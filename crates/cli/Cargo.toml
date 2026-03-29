@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sena"
+path = "src/main.rs"
+
+[dependencies]
+runtime = { path = "../runtime" }
