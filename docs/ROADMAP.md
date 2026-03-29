@@ -28,12 +28,12 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] `cargo build --workspace` compiles clean on macOS, Windows, Linux
 - [x] `cargo test --workspace` passes (no tests yet, just no compile errors)
 
-#### M1.2 — Typed Event System
-- [ ] All Phase 1 event types defined in `crates/bus/src/events.rs`
-- [ ] Event modules: `system`, `platform`, `ctp`
-- [ ] All events are `Clone + Send + 'static`
-- [ ] Zero hardcoded strings in event types
-- [ ] Unit tests: event construction and serialization
+#### M1.2 — Typed Event System ✅
+- [x] All Phase 1 event types defined in `crates/bus/src/events/` (module structure per copilot-instructions.md §5)
+- [x] Event modules: `system`, `platform`, `ctp`
+- [x] All events are `Clone + Send + 'static`
+- [x] Zero hardcoded strings in event types
+- [x] Unit tests: event construction and serialization
 
 #### M1.3 — Actor Trait and Bus
 - [ ] `Actor` trait defined in `crates/bus/src/actor.rs`
