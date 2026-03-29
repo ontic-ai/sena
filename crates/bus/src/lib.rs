@@ -4,6 +4,11 @@ pub mod actor;
 pub mod bus;
 pub mod events;
 
+pub use actor::{Actor, ActorError};
+pub use bus::{BusError, Event, EventBus};
+pub use events::{CTPEvent, PlatformEvent, SystemEvent};
+
+
 #[cfg(test)]
 mod integration_tests {
     use super::events::{CTPEvent, PlatformEvent, SystemEvent};
