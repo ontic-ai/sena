@@ -8,3 +8,13 @@ repository.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+async-trait = { workspace = true }
+tokio = { workspace = true }
+llama-cpp-2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
