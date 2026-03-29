@@ -52,9 +52,9 @@ pub fn re_encrypt_directory(
             continue;
         }
 
-        let matches = extensions.iter().any(|ext| {
-            path.extension().and_then(|e| e.to_str()) == Some(*ext)
-        });
+        let matches = extensions
+            .iter()
+            .any(|ext| path.extension().and_then(|e| e.to_str()) == Some(*ext));
 
         if matches {
             re_encrypt_file(&path, old_master_key, new_master_key)?;

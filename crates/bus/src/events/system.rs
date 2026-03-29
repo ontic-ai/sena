@@ -18,6 +18,12 @@ pub enum SystemEvent {
     BootComplete,
     /// An actor has failed.
     ActorFailed(ActorFailureInfo),
+    /// Encryption subsystem initialized successfully.
+    EncryptionInitialized,
+    /// Encryption initialization failed.
+    EncryptionFailed { reason: String },
+    /// OS keychain was unavailable (fell back to passphrase mode).
+    KeychainUnavailable,
 }
 
 #[cfg(test)]

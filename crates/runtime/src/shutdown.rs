@@ -27,7 +27,7 @@ pub enum ShutdownError {
 /// 4. Return success or timeout error
 ///
 /// Default timeout: 5 seconds per §4.2.
-pub async fn shutdown(mut runtime: Runtime, timeout: Duration) ->Result<(), ShutdownError> {
+pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), ShutdownError> {
     // Step 1: Broadcast ShutdownSignal
     runtime
         .bus
@@ -69,9 +69,10 @@ pub async fn wait_for_sigint() -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boot::boot;
+    use crate::config::SenaConfig;
     use crate::registry::ActorRegistry;
     use bus::EventBus;
+    use crypto::MasterKey;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -85,13 +86,14 @@ mod tests {
         let runtime = Runtime {
             bus: bus.clone(),
             registry,
+            config: SenaConfig::default(),
+            master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
 
         // Spawn shutdown task
-        let shutdown_handle = tokio::spawn(async move {
-            shutdown(runtime, Duration::from_secs(1)).await
-        });
+        let shutdown_handle =
+            tokio::spawn(async move { shutdown(runtime, Duration::from_secs(1)).await });
 
         // Verify ShutdownSignal is broadcast
         let event = rx.recv().await;
@@ -109,7 +111,17 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_completes_with_no_actors() {
-        let runtime = boot().await.unwrap();
+        // Construct Runtime manually to avoid writing to real config dir
+        let bus = Arc::new(EventBus::new());
+        let keep_alive = bus.subscribe_broadcast();
+        let registry = ActorRegistry::new();
+        let runtime = Runtime {
+            bus,
+            registry,
+            config: SenaConfig::default(),
+            master_key: MasterKey::from_bytes([0u8; 32]),
+            _keep_alive: keep_alive,
+        };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
         assert!(result.is_ok());
@@ -132,6 +144,8 @@ mod tests {
         let runtime = Runtime {
             bus: bus.clone(),
             registry,
+            config: SenaConfig::default(),
+            master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: _rx,
         };
 

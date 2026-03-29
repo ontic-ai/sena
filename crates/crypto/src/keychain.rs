@@ -101,7 +101,9 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, CryptoError> {
             b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
             b'+' => Ok(62),
             b'/' => Ok(63),
-            _ => Err(CryptoError::InvalidData("invalid base64 character".to_string())),
+            _ => Err(CryptoError::InvalidData(
+                "invalid base64 character".to_string(),
+            )),
         }
     }
 
