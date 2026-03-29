@@ -1,6 +1,7 @@
 //! Event bus implementation.
 
 use std::collections::HashMap;
+use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{CTPEvent, PlatformEvent, SystemEvent};
@@ -26,6 +27,10 @@ pub enum BusError {
     /// Directed send to actor that doesn't exist in registry.
     #[error("actor not found: {0}")]
     ActorNotFound(String),
+
+    /// Internal lock was poisoned (indicates a prior panic).
+    #[error("registry lock poisoned")]
+    LockPoisoned,
 }
 
 /// Event bus managing broadcast and directed channels.
@@ -37,7 +42,7 @@ pub struct EventBus {
     /// Broadcast sender for one-to-many system events.
     broadcast_tx: broadcast::Sender<Event>,
     /// Registry of directed mpsc senders, keyed by actor name.
-    mpsc_registry: HashMap<&'static str, mpsc::Sender<Event>>,
+    mpsc_registry: RwLock<HashMap<&'static str, mpsc::Sender<Event>>>,
 }
 
 impl EventBus {
@@ -46,7 +51,7 @@ impl EventBus {
         let (broadcast_tx, _) = broadcast::channel(1024);
         Self {
             broadcast_tx,
-            mpsc_registry: HashMap::new(),
+            mpsc_registry: RwLock::new(HashMap::new()),
         }
     }
 
@@ -64,20 +69,27 @@ impl EventBus {
     }
 
     /// Register a directed mpsc sender for a named actor.
-    pub fn register_directed(&mut self, name: &'static str, tx: mpsc::Sender<Event>) {
-        self.mpsc_registry.insert(name, tx);
+    pub fn register_directed(&self, name: &'static str, tx: mpsc::Sender<Event>) -> Result<(), BusError> {
+        self.mpsc_registry
+            .write()
+            .map_err(|_| BusError::LockPoisoned)?
+            .insert(name, tx);
+        Ok(())
     }
 
     /// Send an event to a specific named actor via directed channel.
     pub async fn send_directed(&self, name: &'static str, event: Event) -> Result<(), BusError> {
         let tx = self
             .mpsc_registry
+            .read()
+            .map_err(|_| BusError::LockPoisoned)?
             .get(name)
+            .cloned()
             .ok_or_else(|| BusError::ActorNotFound(name.to_string()))?;
 
-        tx.send(event)
-            .await
-            .map_err(|e| BusError::ChannelClosed(format!("directed send to {} failed: {}", name, e)))
+        tx.send(event).await.map_err(|e| {
+            BusError::ChannelClosed(format!("directed send to {} failed: {}", name, e))
+        })
     }
 }
 
@@ -122,10 +134,10 @@ mod tests {
 
     #[tokio::test]
     async fn directed_send_delivers_to_registered_actor() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let (tx, mut rx) = mpsc::channel(16);
 
-        bus.register_directed("test_actor", tx);
+        bus.register_directed("test_actor", tx).expect("register_directed failed");
 
         let event = Event::System(SystemEvent::BootComplete);
         bus.send_directed("test_actor", event).await.unwrap();
