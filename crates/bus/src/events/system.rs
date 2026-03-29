@@ -1,0 +1,78 @@
+//! System-level events: boot, shutdown, failure.
+
+/// Information about a failed actor.
+#[derive(Debug, Clone)]
+pub struct ActorFailureInfo {
+    /// Static name of the actor that failed.
+    pub actor_name: &'static str,
+    /// Error message describing the failure.
+    pub error_msg: String,
+}
+
+/// System lifecycle and control events.
+#[derive(Debug, Clone)]
+pub enum SystemEvent {
+    /// Signal to initiate graceful shutdown.
+    ShutdownSignal,
+    /// Boot sequence completed successfully.
+    BootComplete,
+    /// An actor has failed.
+    ActorFailed(ActorFailureInfo),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_signal_constructs_and_clones() {
+        let event = SystemEvent::ShutdownSignal;
+        let cloned = event.clone();
+        matches!(cloned, SystemEvent::ShutdownSignal);
+    }
+
+    #[test]
+    fn boot_complete_constructs_and_clones() {
+        let event = SystemEvent::BootComplete;
+        let cloned = event.clone();
+        matches!(cloned, SystemEvent::BootComplete);
+    }
+
+    #[test]
+    fn actor_failed_constructs_and_clones() {
+        let info = ActorFailureInfo {
+            actor_name: "test_actor",
+            error_msg: "test error".to_string(),
+        };
+        let event = SystemEvent::ActorFailed(info);
+        let cloned = event.clone();
+
+        if let SystemEvent::ActorFailed(failure_info) = cloned {
+            assert_eq!(failure_info.actor_name, "test_actor");
+            assert_eq!(failure_info.error_msg, "test error");
+        } else {
+            panic!("Expected ActorFailed variant");
+        }
+    }
+
+    #[test]
+    fn actor_failure_info_clones_independently() {
+        let info = ActorFailureInfo {
+            actor_name: "actor1",
+            error_msg: "error1".to_string(),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.actor_name, "actor1");
+        assert_eq!(cloned.error_msg, "error1");
+    }
+
+    // Compile-time verification: SystemEvent and ActorFailureInfo are Send
+    #[allow(dead_code)]
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn types_are_send() {
+        assert_send::<SystemEvent>();
+        assert_send::<ActorFailureInfo>();
+    }
+}
