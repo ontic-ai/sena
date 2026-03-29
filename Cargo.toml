@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bus",
+    "crates/runtime",
+    "crates/platform",
+    "crates/ctp",
+    "crates/inference",
+    "crates/memory",
+    "crates/prompt",
+    "crates/soul",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["kura120"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ontic-ai/sena"
+
+[workspace.dependencies]
+tokio = { version = "1.41", features = ["full"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
