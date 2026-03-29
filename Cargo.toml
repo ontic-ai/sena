@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/bus",
+    "crates/crypto",
     "crates/runtime",
     "crates/platform",
     "crates/ctp",
@@ -23,3 +24,8 @@ repository = "https://github.com/ontic-ai/sena"
 tokio = { version = "1.41", features = ["full"] }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+toml = "0.8"
+anyhow = "1.0"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.8"
