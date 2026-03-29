@@ -8,3 +8,9 @@ repository.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
+crypto = { path = "../crypto" }
+redb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
