@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Empty workspace table makes this a standalone package
+# (not part of the parent Sena workspace)
+[workspace]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
