@@ -35,59 +35,59 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Zero hardcoded strings in event types
 - [x] Unit tests: event construction and serialization
 
-#### M1.3 — Actor Trait and Bus
-- [ ] `Actor` trait defined in `crates/bus/src/actor.rs`
-- [ ] `EventBus` struct with broadcast sender and mpsc registry
-- [ ] Bus subscription and publish APIs
-- [ ] `ActorError` type defined
-- [ ] Unit tests: bus publish/subscribe round-trip
+#### M1.3 — Actor Trait and Bus ✅
+- [x] `Actor` trait defined in `crates/bus/src/actor.rs`
+- [x] `EventBus` struct with broadcast sender and mpsc registry
+- [x] Bus subscription and publish APIs
+- [x] `ActorError` type defined
+- [x] Unit tests: bus publish/subscribe round-trip
 
-#### M1.4 — Runtime Boot and Shutdown
-- [ ] Boot sequence implemented (steps 1–10 from architecture.md §4.1)
-- [ ] Actor registry with liveness monitoring
-- [ ] Graceful shutdown on SIGINT/SIGTERM
-- [ ] `ShutdownSignal` propagation tested
-- [ ] Configurable shutdown timeout
-- [ ] Integration test: boot → emit events → shutdown, all actors confirm stop
+#### M1.4 — Runtime Boot and Shutdown ✅
+- [x] Boot sequence implemented (steps 1–10 from architecture.md §4.1)
+- [x] Actor registry with liveness monitoring
+- [x] Graceful shutdown on SIGINT/SIGTERM
+- [x] `ShutdownSignal` propagation tested
+- [x] Configurable shutdown timeout
+- [x] Integration test: boot → emit events → shutdown, all actors confirm stop
 
-#### M1.5 — Platform Adapter
-- [ ] `PlatformAdapter` trait defined
-- [ ] macOS implementation: active window, clipboard, file events, keystroke cadence
-- [ ] Windows implementation: active window, clipboard, file events, keystroke cadence
-- [ ] Linux implementation: active window, clipboard, file events, keystroke cadence
-- [ ] `KeystrokePattern` type has no character fields (enforced, not by convention)
-- [ ] Clipboard raw text is digested before leaving platform crate
-- [ ] Platform adapter emits typed events onto bus
-- [ ] Tested on all 3 OS's in CI
+#### M1.5 — Platform Adapter ✅
+- [x] `PlatformAdapter` trait defined
+- [x] macOS implementation: active window, clipboard, file events, keystroke cadence
+- [x] Windows implementation: active window, clipboard, file events, keystroke cadence
+- [x] Linux implementation: active window, clipboard, file events, keystroke cadence
+- [x] `KeystrokePattern` type has no character fields (enforced, not by convention)
+- [x] Clipboard raw text is digested before leaving platform crate
+- [x] Platform adapter emits typed events onto bus
+- [x] Tested on all 3 OS's in CI
 
-#### M1.6 — CTP Skeleton
-- [ ] Signal buffer with rolling time window
-- [ ] `ContextSnapshot` type fully defined
-- [ ] Context assembler: platform events → `ContextSnapshot`
-- [ ] Trigger gate: time-based only in Phase 1 (configurable interval)
-- [ ] `ThoughtEventTriggered` emitted on bus
-- [ ] Integration test: platform events flow through CTP → `ThoughtEvent` on bus
+#### M1.6 — CTP Skeleton ✅
+- [x] Signal buffer with rolling time window
+- [x] `ContextSnapshot` type fully defined
+- [x] Context assembler: platform events → `ContextSnapshot`
+- [x] Trigger gate: time-based only in Phase 1 (configurable interval)
+- [x] `ThoughtEventTriggered` emitted on bus
+- [x] Integration test: platform events flow through CTP → `ThoughtEvent` on bus
 
-#### M1.7 — Config System
-- [ ] Config file location per OS
-- [ ] TOML format, loaded at boot
-- [ ] All CTP thresholds, shutdown timeout, file watch paths in config
-- [ ] Default config written to disk on first boot if absent
-- [ ] Unit tests: config load, defaults, missing fields
+#### M1.7 — Config System ✅
+- [x] Config file location per OS
+- [x] TOML format, loaded at boot
+- [x] All CTP thresholds, shutdown timeout, file watch paths in config
+- [x] Default config written to disk on first boot if absent
+- [x] Unit tests: config load, defaults, missing fields
 
-#### M1.8 — xtask: cargo xtask dump
-- [ ] `cargo xtask dump` outputs all crate source files, structured with file path headers
-- [ ] Supports `--crate <name>` flag to scope output
-- [ ] Output is deterministic (sorted, stable)
-- [ ] Used by developer to share code for review without manual copy-paste
+#### M1.8 — xtask: cargo xtask dump ✅
+- [x] `cargo xtask dump` outputs all crate source files, structured with file path headers
+- [x] Supports `--crate <name>` flag to scope output
+- [x] Output is deterministic (sorted, stable)
+- [x] Used by developer to share code for review without manual copy-paste
 
 **Exit gate — Phase 1 complete when:**
-- [ ] All milestones M1.1–M1.8 checked off
-- [ ] `cargo test --workspace` passes on macOS, Windows, Linux in CI
-- [ ] Zero `unwrap()` calls in production code paths
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] `cargo xtask dump` produces usable output
-- [ ] Architecture doc reviewed — no implementation has deviated from it
+- [x] All milestones M1.1–M1.8 checked off
+- [x] `cargo test --workspace` passes on macOS, Windows, Linux in CI
+- [x] Zero `unwrap()` calls in production code paths
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo xtask dump` produces usable output
+- [x] Architecture doc reviewed — no implementation has deviated from it
 
 ---
 
@@ -99,15 +99,15 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ### Milestones
 
-#### M2.0 — Encryption Layer (must complete before any other Phase 2 milestone)
-- [ ] OQ-SEC resolved: Soul redb, ech0 graph redb, and ech0 vector index all encrypted
-- [ ] `aes-gcm`, `argon2`, `keyring`, `zeroize`, `rand` added to workspace dependencies
-- [ ] Encrypt/decrypt, key derivation, DEK generation implemented
-- [ ] OS keychain integration tested on macOS, Windows, Linux
-- [ ] Passphrase fallback with Argon2id tested
-- [ ] Re-encryption path implemented and tested
-- [ ] Log sanitization wrappers in place — no sensitive content reaches log sink
-- [ ] Unit tests: encrypt/decrypt round-trip, keychain store/retrieve, passphrase derive determinism
+#### M2.0 — Encryption Layer (must complete before any other Phase 2 milestone) ✅
+- [x] OQ-SEC resolved: Soul redb, ech0 graph redb, and ech0 vector index all encrypted
+- [x] `aes-gcm`, `argon2`, `keyring`, `zeroize`, `rand` added to workspace dependencies
+- [x] Encrypt/decrypt, key derivation, DEK generation implemented
+- [x] OS keychain integration tested on macOS, Windows, Linux
+- [x] Passphrase fallback with Argon2id tested
+- [x] Re-encryption path implemented and tested
+- [x] Log sanitization wrappers in place — no sensitive content reaches log sink
+- [x] Unit tests: encrypt/decrypt round-trip, keychain store/retrieve, passphrase derive determinism
 
 #### M2.1 — Ollama GGUF Discovery
 - [ ] Ollama model manifest parsed on all 3 OS's
