@@ -29,3 +29,6 @@ toml = "0.8"
 anyhow = "1.0"
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.8"
+aes-gcm = "0.10"
+argon2 = "0.5"
+keyring = "3"
