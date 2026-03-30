@@ -24,8 +24,15 @@ use crate::backend::{BackendError, BackendType, InferenceParams, LlmBackend};
 static LLAMA_CPP_INIT: OnceLock<Result<LlamaCppInit, String>> = OnceLock::new();
 
 fn init_llama_cpp() -> Result<&'static LlamaCppInit, BackendError> {
-    let result = LLAMA_CPP_INIT
-        .get_or_init(|| LlamaCppInit::init().map_err(|e| format!("llama backend init: {e}")));
+    let result = LLAMA_CPP_INIT.get_or_init(|| {
+        LlamaCppInit::init()
+            .map(|mut backend| {
+                // Suppress native llama.cpp log output to prevent terminal flooding
+                backend.void_logs();
+                backend
+            })
+            .map_err(|e| format!("llama backend init: {e}"))
+    });
     result
         .as_ref()
         .map_err(|e| BackendError::ModelLoadFailed(e.clone()))
