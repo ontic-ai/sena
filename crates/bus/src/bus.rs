@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::events::{CTPEvent, PlatformEvent, SystemEvent};
+use crate::events::{CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SystemEvent};
 
 /// Unified event type for all bus communication.
 #[derive(Debug, Clone)]
@@ -15,6 +15,12 @@ pub enum Event {
     Platform(PlatformEvent),
     /// CTP (Continuous Thought Processing) events.
     CTP(CTPEvent),
+    /// Inference-layer events (model discovery, inference requests/responses).
+    Inference(InferenceEvent),
+    /// Memory subsystem events (write/query requests and responses).
+    Memory(MemoryEvent),
+    /// Soul subsystem events (event log writes and summaries).
+    Soul(SoulEvent),
 }
 
 /// Bus operation errors.
@@ -24,7 +30,7 @@ pub enum BusError {
     #[error("channel closed: {0}")]
     ChannelClosed(String),
 
-    /// Directed send to actor that doesn't exist in registry.
+    /// Directed send to actor that does not exist in registry.
     #[error("actor not found: {0}")]
     ActorNotFound(String),
 
@@ -69,7 +75,11 @@ impl EventBus {
     }
 
     /// Register a directed mpsc sender for a named actor.
-    pub fn register_directed(&self, name: &'static str, tx: mpsc::Sender<Event>) -> Result<(), BusError> {
+    pub fn register_directed(
+        &self,
+        name: &'static str,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<(), BusError> {
         self.mpsc_registry
             .write()
             .map_err(|_| BusError::LockPoisoned)?
@@ -113,7 +123,6 @@ mod tests {
         let event = Event::System(SystemEvent::BootComplete);
         bus.broadcast(event.clone()).await.unwrap();
 
-        // Both receivers should get the event
         assert!(rx1.recv().await.is_ok());
         assert!(rx2.recv().await.is_ok());
     }
@@ -122,11 +131,10 @@ mod tests {
     async fn broadcast_handles_closed_receiver() {
         let bus = EventBus::new();
         let rx1 = bus.subscribe_broadcast();
-        let mut rx2 = bus.subscribe_broadcast(); // Keep one alive
+        let mut rx2 = bus.subscribe_broadcast();
 
-        drop(rx1); // Close one receiver
+        drop(rx1);
 
-        // Broadcast should still succeed with at least one receiver active
         let event = Event::System(SystemEvent::ShutdownSignal);
         assert!(bus.broadcast(event).await.is_ok());
         assert!(rx2.recv().await.is_ok());
@@ -137,7 +145,8 @@ mod tests {
         let bus = EventBus::new();
         let (tx, mut rx) = mpsc::channel(16);
 
-        bus.register_directed("test_actor", tx).expect("register_directed failed");
+        bus.register_directed("test_actor", tx)
+            .expect("register_directed failed");
 
         let event = Event::System(SystemEvent::BootComplete);
         bus.send_directed("test_actor", event).await.unwrap();

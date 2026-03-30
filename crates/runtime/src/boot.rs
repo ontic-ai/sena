@@ -96,7 +96,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let ctp_trigger_interval = Duration::from_secs(config.ctp_trigger_interval_secs);
     let ctp_buffer_window = Duration::from_secs(300);
     let ctp_poll_interval = Duration::from_secs(1);
-    let ctp_actor = ctp::CTPActor::new(ctp_trigger_interval, ctp_buffer_window, ctp_poll_interval);
+    let ctp_actor = ctp::CTPActor::new(ctp_trigger_interval, ctp_buffer_window, ctp_poll_interval)
+        .with_trigger_sensitivity(config.ctp_trigger_sensitivity);
     spawn_actor(&bus, &mut registry, Box::new(ctp_actor));
 
     // Step 8: Initialize memory system â€” STUB
@@ -123,9 +124,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
 }
 
 fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
-    match crypto::keychain::retrieve_master_key() {
-        Ok(key) => return Ok(key),
-        Err(_) => {}
+    if let Ok(key) = crypto::keychain::retrieve_master_key() {
+        return Ok(key);
     }
 
     let passphrase_str = std::env::var("SENA_PASSPHRASE").map_err(|_| {
@@ -245,13 +245,20 @@ mod tests {
                 ran: StdArc<AtomicBool>,
                 stopped: StdArc<AtomicBool>,
             ) -> Self {
-                Self { name, started, ran, stopped }
+                Self {
+                    name,
+                    started,
+                    ran,
+                    stopped,
+                }
             }
         }
 
         #[async_trait::async_trait]
         impl Actor for MockActor {
-            fn name(&self) -> &'static str { self.name }
+            fn name(&self) -> &'static str {
+                self.name
+            }
 
             async fn start(&mut self, _bus: Arc<EventBus>) -> Result<(), ActorError> {
                 self.started.store(true, Ordering::SeqCst);
@@ -282,18 +289,26 @@ mod tests {
         let actor2_ran = StdArc::new(AtomicBool::new(false));
         let actor2_stopped = StdArc::new(AtomicBool::new(false));
 
-        spawn_actor(&bus, &mut registry, Box::new(MockActor::new(
-            "mock1",
-            StdArc::clone(&actor1_started),
-            StdArc::clone(&actor1_ran),
-            StdArc::clone(&actor1_stopped),
-        )));
-        spawn_actor(&bus, &mut registry, Box::new(MockActor::new(
-            "mock2",
-            StdArc::clone(&actor2_started),
-            StdArc::clone(&actor2_ran),
-            StdArc::clone(&actor2_stopped),
-        )));
+        spawn_actor(
+            &bus,
+            &mut registry,
+            Box::new(MockActor::new(
+                "mock1",
+                StdArc::clone(&actor1_started),
+                StdArc::clone(&actor1_ran),
+                StdArc::clone(&actor1_stopped),
+            )),
+        );
+        spawn_actor(
+            &bus,
+            &mut registry,
+            Box::new(MockActor::new(
+                "mock2",
+                StdArc::clone(&actor2_started),
+                StdArc::clone(&actor2_ran),
+                StdArc::clone(&actor2_stopped),
+            )),
+        );
 
         assert_eq!(registry.actor_count(), 2);
 

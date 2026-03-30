@@ -12,3 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 runtime = { path = "../runtime" }
+tokio = { workspace = true }
+anyhow = { workspace = true }

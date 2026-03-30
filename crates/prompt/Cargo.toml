@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-memory = { path = "../memory" }
+bus = { path = "../bus" }
 ctp = { path = "../ctp" }
 inference = { path = "../inference" }
+memory = { path = "../memory" }
+thiserror.workspace = true

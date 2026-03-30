@@ -8,3 +8,6 @@ repository.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
