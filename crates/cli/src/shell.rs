@@ -33,6 +33,7 @@ const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
 
 /// Reason the shell exited — drives the restart loop in main.rs.
 #[derive(Debug, PartialEq)]
@@ -346,6 +347,13 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                 let msg = format!("  {}·{}  model loaded: {} {}({}){}", DIM, RESET, name, DIM, backend, RESET);
                                 print_above(&msg, &mut editor, &mut stdout);
                             }
+                        }
+                        Event::Inference(InferenceEvent::BackendMismatchWarning { detected, compiled }) => {
+                            let msg = format!(
+                                "  {}{}⚠{}  backend mismatch: {} detected, but llama-cpp-2 compiled as {}",
+                                BOLD, YELLOW, RESET, detected, compiled
+                            );
+                            print_above(&msg, &mut editor, &mut stdout);
                         }
                         _ if verbose => {
                             let msg = verbose_format(&ev);

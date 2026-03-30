@@ -448,6 +448,24 @@ impl Actor for InferenceActor {
             .map_err(|e| ActorError::StartupFailed(format!("register directed failed: {}", e)))?;
         self.directed_rx = Some(rx);
 
+        // Check for backend mismatch: GPU detected but CPU-only llama-cpp-2 build
+        // Currently compiled without GPU features. When GPU features are added,
+        // update this check to: cfg!(feature = "cuda") || cfg!(feature = "metal")
+        let gpu_features_compiled = false;
+        if !gpu_features_compiled
+            && (self.backend_type == BackendType::Cuda || self.backend_type == BackendType::Metal)
+        {
+            let warning_event = InferenceEvent::BackendMismatchWarning {
+                detected: format!("{}", self.backend_type),
+                compiled: "CPU-only".to_string(),
+            };
+            bus.broadcast(Event::Inference(warning_event))
+                .await
+                .map_err(|e| {
+                    ActorError::StartupFailed(format!("broadcast warning failed: {}", e))
+                })?;
+        }
+
         // Perform model discovery
         match discovery::discover_models(&self.models_dir) {
             Ok(mut registry) => {
@@ -673,7 +691,15 @@ mod tests {
         assert!(actor.registry().is_some());
         assert_eq!(actor.registry().map(|r| r.model_count()), Some(1));
 
-        let event = rx.recv().await.expect("should receive event");
+        // May emit BackendMismatchWarning first if GPU detected but not compiled
+        let mut event = rx.recv().await.expect("should receive event");
+        if matches!(
+            event,
+            Event::Inference(InferenceEvent::BackendMismatchWarning { .. })
+        ) {
+            event = rx.recv().await.expect("should receive second event");
+        }
+
         match event {
             Event::Inference(InferenceEvent::ModelRegistryBuilt {
                 model_count,
@@ -701,7 +727,15 @@ mod tests {
 
         assert!(actor.registry().is_none());
 
-        let event = rx.recv().await.expect("should receive event");
+        // May emit BackendMismatchWarning first if GPU detected but not compiled
+        let mut event = rx.recv().await.expect("should receive event");
+        if matches!(
+            event,
+            Event::Inference(InferenceEvent::BackendMismatchWarning { .. })
+        ) {
+            event = rx.recv().await.expect("should receive second event");
+        }
+
         match event {
             Event::Inference(InferenceEvent::ModelDiscoveryFailed { reason }) => {
                 assert!(!reason.is_empty());

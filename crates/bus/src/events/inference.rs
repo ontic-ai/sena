@@ -89,6 +89,8 @@ pub enum InferenceEvent {
     ExtractionCompleted { facts: Vec<String>, request_id: u64 },
     /// Model weights loaded lazily on first request.
     ModelLoaded { name: String, backend: String },
+    /// Backend mismatch warning: GPU backend detected but llama-cpp-2 compiled without GPU support.
+    BackendMismatchWarning { detected: String, compiled: String },
 }
 
 #[cfg(test)]
