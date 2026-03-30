@@ -18,3 +18,4 @@ platform = { path = "../platform" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 crossterm = { version = "0.28", features = [] }
+ratatui = { workspace = true }

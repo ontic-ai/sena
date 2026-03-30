@@ -97,13 +97,13 @@ impl Actor for CTPActor {
                                     self.handle_platform_event(platform_event);
                                 }
                                 // Handle transparency queries
-                                Event::Transparency(TransparencyEvent::QueryRequested(query)) => {
+                                Event::Transparency(TransparencyEvent::QueryRequested(
+                                    TransparencyQuery::CurrentObservation,
+                                )) => {
                                     // Only CTP handles CurrentObservation; other queries are
                                     // handled by memory and inference actors respectively.
-                                    if let TransparencyQuery::CurrentObservation = query {
-                                        if let Err(e) = self.handle_observation_query(&bus).await {
-                                            eprintln!("CTP actor failed to handle observation query: {}", e);
-                                        }
+                                    if let Err(e) = self.handle_observation_query(&bus).await {
+                                        eprintln!("CTP actor failed to handle observation query: {}", e);
                                     }
                                 }
                                 // Handle shutdown signal
