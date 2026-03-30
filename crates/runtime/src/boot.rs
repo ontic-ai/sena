@@ -11,82 +11,52 @@ use crate::registry::ActorRegistry;
 
 /// Runtime holds initialized subsystems and the event bus.
 pub struct Runtime {
-    /// Event bus for all actor communication.
     pub bus: Arc<EventBus>,
-    /// Registry of spawned actor tasks.
     pub registry: ActorRegistry,
-    /// Loaded configuration.
     pub config: SenaConfig,
-    /// Master encryption key — zeroed on Runtime drop.
-    /// Used by Soul and Memory actors during initialization (U9/U10).
     #[allow(dead_code)]
     pub(crate) master_key: MasterKey,
-    /// Keep-alive receiver to prevent broadcast channel from closing.
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
 }
 
 /// Boot sequence errors.
 #[derive(Debug, thiserror::Error)]
 pub enum BootError {
-    /// Step 1: Config load failed.
     #[error("config load failed: {0}")]
     ConfigLoadFailed(String),
 
-    /// Step 2: Encryption initialization failed.
     #[error("encryption init failed: {0}")]
     EncryptionInitFailed(String),
 
-    /// Step 3: Event bus initialization failed.
     #[error("event bus init failed: {0}")]
     BusInitFailed(String),
 
-    /// Step 4: Soul (SoulBox) initialization failed.
     #[error("soul init failed: {0}")]
     SoulInitFailed(String),
 
-    /// Step 5: Actor spawn failed.
     #[error("actor spawn failed: {0}")]
     ActorSpawnFailed(String),
 
-    /// Step 6: Platform adapter init failed.
     #[error("platform init failed: {0}")]
     PlatformInitFailed(String),
 
-    /// Step 7: CTP (Continuous Thought Processing) init failed.
     #[error("ctp init failed: {0}")]
     CTPInitFailed(String),
 
-    /// Step 8: Memory system init failed.
     #[error("memory init failed: {0}")]
     MemoryInitFailed(String),
 
-    /// Step 9: Inference system init failed.
     #[error("inference init failed: {0}")]
     InferenceInitFailed(String),
 
-    /// Step 10: Prompt composer init failed.
     #[error("prompt init failed: {0}")]
     PromptInitFailed(String),
 
-    /// Step 11: Boot complete broadcast failed.
     #[error("boot complete broadcast failed: {0}")]
     BroadcastFailed(String),
 }
 
-/// Boot sequence per architecture §4.1.
-///
-/// Steps:
-/// 1. Load config from OS-appropriate location
-/// 2. Initialize encryption (keychain → passphrase fallback)
-/// 3. Initialize EventBus, emit EncryptionInitialized
-/// 4. Initialize Soul (SoulBox) — STUB (requires encrypted redb)
-/// 5. Spawn actor registry
-/// 6. Initialize and spawn platform adapter
-/// 7. Initialize and spawn CTP actor
-/// 8. Initialize memory system — STUB
-/// 9. Initialize inference system — STUB
-/// 10. Initialize prompt composer — STUB
-/// 11. Broadcast BootComplete event
+/// Boot sequence per architecture Â§4.1.
 pub async fn boot() -> Result<Runtime, BootError> {
     // Step 1: Config load
     let config = crate::config::load_or_create_config()
@@ -101,16 +71,20 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let bus = Arc::new(EventBus::new());
     let keep_alive = bus.subscribe_broadcast();
 
-    // Emit EncryptionInitialized after bus is ready
     bus.broadcast(Event::System(SystemEvent::EncryptionInitialized))
         .await
         .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
 
-    // Step 4: Initialize Soul (SoulBox) — STUB (requires encrypted redb, M2.5)
-    // TODO M2.5: Initialize Soul with master_key for encrypted redb
+    // Step 4: Initialize Soul (SoulBox)
+    let soul_db_path = platform::config_dir()
+        .map_err(|e| BootError::SoulInitFailed(e.to_string()))?
+        .join("soul.redb.enc");
+    let soul_master_key = MasterKey::from_bytes(*master_key.as_bytes());
+    let soul_actor = soul::SoulActor::new(soul_db_path, soul_master_key);
 
-    // Step 5: Actor registry
+    // Step 5: Actor registry â€” spawn Soul first (lowest-level subsystem)
     let mut registry = ActorRegistry::new();
+    spawn_actor(&bus, &mut registry, Box::new(soul_actor));
 
     // Step 6: Initialize and spawn platform adapter
     let platform_adapter = platform::create_platform_adapter();
@@ -125,14 +99,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let ctp_actor = ctp::CTPActor::new(ctp_trigger_interval, ctp_buffer_window, ctp_poll_interval);
     spawn_actor(&bus, &mut registry, Box::new(ctp_actor));
 
-    // Step 8: Initialize memory system — STUB
+    // Step 8: Initialize memory system â€” STUB
     // TODO M2.4: Initialize ech0 Store with master_key
 
-    // Step 9: Initialize inference system — STUB
+    // Step 9: Initialize inference system â€” STUB
     // TODO M2.2: Initialize llama-cpp-rs model loader
 
-    // Step 10: Initialize prompt composer — STUB
-    // TODO M2.6: Initialize prompt composer
+    // Step 10: PromptComposer is stateless â€” instantiated per inference cycle.
+    // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
     // Step 11: Broadcast BootComplete
     bus.broadcast(Event::System(SystemEvent::BootComplete))
@@ -148,21 +122,12 @@ pub async fn boot() -> Result<Runtime, BootError> {
     })
 }
 
-/// Initialize encryption: try OS keychain first, fall back to passphrase.
-///
-/// Per architecture §15.3:
-/// - Primary: OS keychain via `keyring`
-/// - Fallback: user passphrase via `SENA_PASSPHRASE` env var → Argon2id derivation
 fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
-    // Try OS keychain first
     match crypto::keychain::retrieve_master_key() {
         Ok(key) => return Ok(key),
-        Err(_) => {
-            // Keychain unavailable or no key stored — try passphrase fallback
-        }
+        Err(_) => {}
     }
 
-    // Fallback: passphrase from environment variable
     let passphrase_str = std::env::var("SENA_PASSPHRASE").map_err(|_| {
         crypto::CryptoError::KeychainError(
             "no keychain key found and SENA_PASSPHRASE not set".to_string(),
@@ -171,7 +136,6 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
 
     let passphrase = crypto::argon2_kdf::Passphrase::new(passphrase_str);
 
-    // Load or generate salt
     let salt_path = platform::config_dir()
         .map_err(|e| crypto::CryptoError::IoError(std::io::Error::other(e.to_string())))?
         .join("salt.bin");
@@ -187,7 +151,6 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
         crypto::argon2_kdf::Salt::from_bytes(arr)
     } else {
         let salt = crypto::argon2_kdf::generate_salt();
-        // Ensure parent directory exists
         if let Some(parent) = salt_path.parent() {
             std::fs::create_dir_all(parent).map_err(crypto::CryptoError::IoError)?;
         }
@@ -195,14 +158,9 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
         salt
     };
 
-    // Derive master key (passphrase is ZeroizeOnDrop, will be zeroed when dropped)
     crypto::argon2_kdf::derive_master_key(&passphrase, &salt)
 }
 
-/// Helper to spawn an actor into the registry.
-///
-/// The actor's lifecycle (start → run → stop) is managed by the spawned task.
-/// This is used internally during boot to wire up actors.
 fn spawn_actor(bus: &Arc<EventBus>, registry: &mut ActorRegistry, mut actor: Box<dyn Actor>) {
     let name = actor.name();
     let bus_clone = Arc::clone(bus);
@@ -226,7 +184,6 @@ mod tests {
 
     #[tokio::test]
     async fn boot_constructs_runtime_with_actors() {
-        // Construct Runtime manually to avoid writing to real config dir
         let bus = Arc::new(EventBus::new());
         let keep_alive = bus.subscribe_broadcast();
         let config = SenaConfig::default();
@@ -245,7 +202,6 @@ mod tests {
             _keep_alive: keep_alive,
         };
 
-        // Verify runtime was constructed
         assert_eq!(runtime.registry.actor_count(), 0);
     }
 
@@ -254,13 +210,11 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut rx = bus.subscribe_broadcast();
 
-        // Simulate boot's final step
         let event = Event::System(SystemEvent::BootComplete);
         bus.broadcast(event)
             .await
             .expect("broadcast should succeed in test");
 
-        // Verify receiver gets BootComplete
         let received = rx.recv().await;
         assert!(received.is_ok());
 
@@ -271,14 +225,12 @@ mod tests {
         }
     }
 
-    /// Integration test with mock actors to verify spawn_actor() functionality.
     #[tokio::test]
     async fn spawn_actors_lifecycle_integration() {
         use bus::ActorError;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc as StdArc;
 
-        // Mock actor that tracks lifecycle calls
         struct MockActor {
             name: &'static str,
             started: StdArc<AtomicBool>,
@@ -293,20 +245,13 @@ mod tests {
                 ran: StdArc<AtomicBool>,
                 stopped: StdArc<AtomicBool>,
             ) -> Self {
-                Self {
-                    name,
-                    started,
-                    ran,
-                    stopped,
-                }
+                Self { name, started, ran, stopped }
             }
         }
 
         #[async_trait::async_trait]
         impl Actor for MockActor {
-            fn name(&self) -> &'static str {
-                self.name
-            }
+            fn name(&self) -> &'static str { self.name }
 
             async fn start(&mut self, _bus: Arc<EventBus>) -> Result<(), ActorError> {
                 self.started.store(true, Ordering::SeqCst);
@@ -315,7 +260,6 @@ mod tests {
 
             async fn run(&mut self) -> Result<(), ActorError> {
                 self.ran.store(true, Ordering::SeqCst);
-                // Simulate brief work then exit
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 Ok(())
             }
@@ -326,40 +270,30 @@ mod tests {
             }
         }
 
-        // Construct runtime manually to avoid writing to real config dir
         let bus = Arc::new(EventBus::new());
         let keep_alive = bus.subscribe_broadcast();
         let config = SenaConfig::default();
         let mut registry = ActorRegistry::new();
 
-        assert_eq!(registry.actor_count(), 0);
-
-        // Create tracking flags for two mock actors
         let actor1_started = StdArc::new(AtomicBool::new(false));
         let actor1_ran = StdArc::new(AtomicBool::new(false));
         let actor1_stopped = StdArc::new(AtomicBool::new(false));
-
         let actor2_started = StdArc::new(AtomicBool::new(false));
         let actor2_ran = StdArc::new(AtomicBool::new(false));
         let actor2_stopped = StdArc::new(AtomicBool::new(false));
 
-        // Create and spawn actors
-        let mock1 = MockActor::new(
+        spawn_actor(&bus, &mut registry, Box::new(MockActor::new(
             "mock1",
             StdArc::clone(&actor1_started),
             StdArc::clone(&actor1_ran),
             StdArc::clone(&actor1_stopped),
-        );
-
-        let mock2 = MockActor::new(
+        )));
+        spawn_actor(&bus, &mut registry, Box::new(MockActor::new(
             "mock2",
             StdArc::clone(&actor2_started),
             StdArc::clone(&actor2_ran),
             StdArc::clone(&actor2_stopped),
-        );
-
-        spawn_actor(&bus, &mut registry, Box::new(mock1));
-        spawn_actor(&bus, &mut registry, Box::new(mock2));
+        )));
 
         assert_eq!(registry.actor_count(), 2);
 
@@ -371,25 +305,17 @@ mod tests {
             _keep_alive: keep_alive,
         };
 
-        // Give actors time to spawn and start
         tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // Verify start was called
         assert!(actor1_started.load(Ordering::SeqCst));
         assert!(actor2_started.load(Ordering::SeqCst));
 
-        // Give actors time to run and complete
         tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Verify run was called
         assert!(actor1_ran.load(Ordering::SeqCst));
         assert!(actor2_ran.load(Ordering::SeqCst));
 
-        // Shutdown
         let result = crate::shutdown::shutdown(runtime, Duration::from_secs(2)).await;
         assert!(result.is_ok());
 
-        // Verify stop was called
         assert!(actor1_stopped.load(Ordering::SeqCst));
         assert!(actor2_stopped.load(Ordering::SeqCst));
     }

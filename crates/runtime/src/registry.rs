@@ -33,10 +33,7 @@ impl ActorRegistry {
     ///
     /// Note: Timeout handling is best-effort in Phase 1. In production, actors
     /// that don't respond to shutdown signals within timeout are considered failed.
-    pub async fn wait_all(
-        &mut self,
-        timeout: Duration,
-    ) -> Vec<(&'static str, Result<(), String>)> {
+    pub async fn wait_all(&mut self, timeout: Duration) -> Vec<(&'static str, Result<(), String>)> {
         let mut results = Vec::new();
 
         for (name, handle) in self.actors.drain() {
