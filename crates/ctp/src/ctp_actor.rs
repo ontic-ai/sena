@@ -13,7 +13,7 @@ use bus::{Actor, ActorError, Event, EventBus};
 
 use crate::context_assembler::ContextAssembler;
 use crate::signal_buffer::SignalBuffer;
-use crate::transparency_query::handle_transparency_query;
+use crate::transparency_query::handle_current_observation;
 use crate::trigger_gate::TriggerGate;
 
 /// CTP Actor — orchestrates context assembly and thought triggering.
@@ -98,8 +98,12 @@ impl Actor for CTPActor {
                                 }
                                 // Handle transparency queries
                                 Event::Transparency(TransparencyEvent::QueryRequested(query)) => {
-                                    if let Err(e) = self.handle_transparency_query_event(query, &bus).await {
-                                        eprintln!("CTP actor failed to handle transparency query: {}", e);
+                                    // Only CTP handles CurrentObservation; other queries are
+                                    // handled by memory and inference actors respectively.
+                                    if let TransparencyQuery::CurrentObservation = query {
+                                        if let Err(e) = self.handle_observation_query(&bus).await {
+                                            eprintln!("CTP actor failed to handle observation query: {}", e);
+                                        }
                                     }
                                 }
                                 // Handle shutdown signal
@@ -176,15 +180,10 @@ impl CTPActor {
         }
     }
 
-    /// Handle a transparency query request and broadcast the response.
-    async fn handle_transparency_query_event(
-        &self,
-        query: TransparencyQuery,
-        bus: &Arc<EventBus>,
-    ) -> Result<(), String> {
+    /// Handle a `CurrentObservation` transparency query and broadcast the response.
+    async fn handle_observation_query(&self, bus: &Arc<EventBus>) -> Result<(), String> {
         let response =
-            handle_transparency_query(query, &self.buffer, &self.assembler, self.session_start)
-                .map_err(|e| format!("query handling error: {}", e))?;
+            handle_current_observation(&self.buffer, &self.assembler, self.session_start);
 
         bus.broadcast(Event::Transparency(
             TransparencyEvent::ObservationResponded(response),

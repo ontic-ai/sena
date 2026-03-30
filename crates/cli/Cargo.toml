@@ -13,5 +13,8 @@ path = "src/main.rs"
 [dependencies]
 runtime = { path = "../runtime" }
 bus = { path = "../bus" }
+inference = { path = "../inference" }
+platform = { path = "../platform" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+crossterm = { version = "0.28", features = [] }

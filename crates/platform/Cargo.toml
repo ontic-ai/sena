@@ -11,3 +11,7 @@ bus = { path = "../bus" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+arboard = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true }

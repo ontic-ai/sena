@@ -63,11 +63,31 @@ impl ModelRegistry {
         &self.models
     }
 
-    /// Find a model by name.
+    /// Find a model by name (case-insensitive).
     ///
     /// Returns the first model matching the given name.
     pub fn find_by_name(&self, name: &str) -> Option<&ModelInfo> {
-        self.models.iter().find(|m| m.name == name)
+        self.models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Override the default model selection with a preferred model name.
+    ///
+    /// If the preferred model exists in the registry, it becomes the default.
+    /// If the preferred model is not found, the current default is preserved.
+    pub fn set_preferred_model(&mut self, preferred: &str) {
+        if self.models.iter().any(|m| m.name.eq_ignore_ascii_case(preferred)) {
+            // Normalise to the exact name as stored in the registry.
+            if let Some(name) = self
+                .models
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(preferred))
+                .map(|m| m.name.clone())
+            {
+                self.default_model = Some(name);
+            }
+        }
     }
 }
 

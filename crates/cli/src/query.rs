@@ -1,19 +1,20 @@
-//! Query subcommand handler for transparency queries.
+//! Query handler — transparency queries over the event bus.
 //!
-//! Implements the `sena query <type>` mode:
-//! - Boots runtime
-//! - Sends transparency query on bus
-//! - Awaits response with 5-second timeout
-//! - Formats and displays result
+//! Two entry points:
+//! - `query_on_bus(query, bus)` — uses an already-running bus (shell REPL mode)
+//! - `execute_query(query)` — boots its own runtime (legacy `sena query <type>` mode)
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bus::events::transparency::{
     InferenceExplanationResponse, MemoryResponse, ObservationResponse, TransparencyQuery,
 };
-use bus::{Event, TransparencyEvent};
+use bus::{Event, EventBus, TransparencyEvent};
 use tokio::sync::broadcast;
+
+use crate::display::{BOLD, CYAN, DIM, GREEN, RESET, YELLOW};
 
 /// Parse query type string to TransparencyQuery enum.
 ///
@@ -35,6 +36,25 @@ pub fn parse_query_type(query_type: &str) -> Result<TransparencyQuery> {
             query_type
         )),
     }
+}
+
+/// Execute a transparency query on an already-running bus.
+///
+/// Used by the interactive shell to avoid re-booting the runtime for every
+/// query. The caller provides the `Arc<EventBus>` from the running runtime.
+///
+/// # Errors
+/// - Bus send failure
+/// - No matching response within 5-second timeout
+pub async fn query_on_bus(query: TransparencyQuery, bus: &Arc<EventBus>) -> Result<String> {
+    let mut rx = bus.subscribe_broadcast();
+    bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+        query.clone(),
+    )))
+    .await?;
+    tokio::time::timeout(Duration::from_secs(5), wait_for_response(query, &mut rx))
+        .await
+        .map_err(|_| anyhow!("query timed out — no response in 5 seconds"))?
 }
 
 /// Execute a transparency query and return formatted output.
@@ -133,109 +153,131 @@ async fn wait_for_response(
     }
 }
 
-/// Format CurrentObservation response for display.
-///
-/// Output format per unit spec:
-/// "Current Context: [app name] | [task] | [clipboard present?] | [keystroke rate] | [session duration]"
+/// Format CurrentObservation response with ANSI-styled key/value rows.
 fn format_observation_response(resp: &ObservationResponse) -> String {
     let snapshot = &resp.snapshot;
-    let app_name = snapshot.active_app.app_name.clone();
+    let app = &snapshot.active_app.app_name;
     let task = match &snapshot.inferred_task {
         Some(hint) => format!("{} ({:.0}%)", hint.category, hint.confidence * 100.0),
         None => "(no task inferred)".to_string(),
     };
-    let clipboard_present = snapshot.clipboard_digest.is_some();
-    let keystroke_rate = snapshot.keystroke_cadence.events_per_minute;
-    let session_duration_secs = snapshot.session_duration.as_secs();
+    let clipboard = if snapshot.clipboard_digest.is_some() {
+        format!("{GREEN}clipboard ready{RESET}")
+    } else {
+        format!("{DIM}no clipboard{RESET}")
+    };
+    let rate = snapshot.keystroke_cadence.events_per_minute;
+    let secs = snapshot.session_duration.as_secs();
+    let session = if secs >= 60 {
+        format!("{} min {} sec", secs / 60, secs % 60)
+    } else {
+        format!("{secs} sec")
+    };
 
     format!(
-        "Current Context: {} | {} | {} | {:.1} events/min | {} seconds",
-        app_name,
-        task,
-        if clipboard_present {
-            "clipboard ready"
-        } else {
-            "no clipboard"
-        },
-        keystroke_rate,
-        session_duration_secs
+        "{BOLD}Window{RESET}      {app}\n\
+         {BOLD}Task{RESET}        {task}\n\
+         {BOLD}Clipboard{RESET}   {clipboard}\n\
+         {BOLD}Keyboard{RESET}    {rate:.1} events/min\n\
+         {BOLD}Session{RESET}     {session}"
     )
 }
 
-/// Format UserMemory response for display.
-///
-/// Output format per unit spec:
-/// "Soul Summary: [patterns] [preferences] [interests]\nRecent Memories:\n  [chunk text] (score: X)"
+/// Format UserMemory response with ANSI-styled soul summary and memory list.
 fn format_memory_response(resp: &MemoryResponse) -> String {
     let summary = &resp.soul_summary;
 
     let patterns = if summary.work_patterns.is_empty() {
-        "(none detected)".to_string()
+        format!("{DIM}(none detected){RESET}")
     } else {
         summary.work_patterns.join(", ")
     };
-
     let preferences = if summary.tool_preferences.is_empty() {
-        "(none detected)".to_string()
+        format!("{DIM}(none detected){RESET}")
     } else {
         summary.tool_preferences.join(", ")
     };
-
     let interests = if summary.interest_clusters.is_empty() {
-        "(none detected)".to_string()
+        format!("{DIM}(none detected){RESET}")
     } else {
         summary.interest_clusters.join(", ")
     };
 
-    let mut output = format!(
-        "Soul Summary: patterns=[{}] | preferences=[{}] | interests=[{}]",
-        patterns, preferences, interests
+    let mut out = format!(
+        "{BOLD}{CYAN}Soul Summary{RESET}\n\
+         {BOLD}Work patterns{RESET}  {patterns}\n\
+         {BOLD}Tools{RESET}          {preferences}\n\
+         {BOLD}Interests{RESET}      {interests}"
     );
 
-    output.push_str("\n\nRecent Memories:");
+    out.push_str(&format!(
+        "\n\n{BOLD}{CYAN}Recent Memories{RESET}"
+    ));
+
     if resp.memory_chunks.is_empty() {
-        output.push_str("\n  (no memories retrieved)");
+        out.push_str(&format!("\n  {DIM}(no memories retrieved){RESET}"));
     } else {
-        for chunk in &resp.memory_chunks {
-            let text_preview = if chunk.text.len() > 100 {
-                format!("{}...", &chunk.text[..100])
+        for (i, chunk) in resp.memory_chunks.iter().enumerate() {
+            let preview = if chunk.text.len() > 120 {
+                format!("{}...", &chunk.text[..120])
             } else {
                 chunk.text.clone()
             };
-            output.push_str(&format!("\n  {} (score: {:.2})", text_preview, chunk.score));
+            out.push_str(&format!(
+                "\n  {CYAN}[{}]{RESET}  {preview}\n       {DIM}score: {:.2}{RESET}",
+                i + 1,
+                chunk.score
+            ));
         }
     }
 
-    output
+    out
 }
 
-/// Format InferenceExplanation response for display.
-///
-/// Output format per unit spec:
-/// "Last Inference:\nRequest: [context]\nResponse: [first 200 chars]...\nWorking Memory: [N chunks]"
+/// Format InferenceExplanation response with ANSI labels.
 fn format_inference_explanation_response(resp: &InferenceExplanationResponse) -> String {
-    let request_preview = if resp.request_context.len() > 200 {
+    let request = if resp.request_context.len() > 200 {
         format!("{}...", &resp.request_context[..200])
     } else {
         resp.request_context.clone()
     };
-
-    let response_preview = if resp.response_text.len() > 200 {
-        format!("{}...", &resp.response_text[..200])
+    let response = if resp.response_text.len() > 299 {
+        format!("{}...", &resp.response_text[..299])
     } else {
         resp.response_text.clone()
     };
 
-    format!(
-        "Last Inference (Rounds: {}):\n\
-         Request: {}\n\
-         Response: {}\n\
-         Working Memory: {} chunks",
-        resp.rounds_completed,
-        request_preview,
-        response_preview,
-        resp.working_memory_context.len()
-    )
+    let mut out = format!(
+        "{BOLD}{CYAN}Last Inference{RESET}\n\
+         Rounds: {}\n\
+         {BOLD}Request{RESET}   {DIM}{request}{RESET}\n\
+         {BOLD}Response{RESET}  {response}",
+        resp.rounds_completed
+    );
+
+    if resp.working_memory_context.is_empty() {
+        out.push_str(&format!(
+            "\n{BOLD}Memory{RESET}    {DIM}(none used){RESET}"
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n{BOLD}Memory{RESET}    {YELLOW}{} chunks used{RESET}",
+            resp.working_memory_context.len()
+        ));
+        for (i, chunk) in resp.working_memory_context.iter().enumerate() {
+            let preview = if chunk.text.len() > 80 {
+                format!("{}…", &chunk.text[..80])
+            } else {
+                chunk.text.clone()
+            };
+            out.push_str(&format!(
+                "\n          {DIM}[{}] {preview}{RESET}",
+                i + 1
+            ));
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -316,7 +358,7 @@ mod tests {
         assert!(output.contains("coding"));
         assert!(output.contains("clipboard ready"));
         assert!(output.contains("45.5"));
-        assert!(output.contains("3600"));
+        assert!(output.contains("60 min"));
     }
 
     #[test]

@@ -35,6 +35,12 @@ keyring = "3"
 redb = "2"
 llama-cpp-2 = "0.1"
 ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.0" }
+arboard = "3"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [patch.crates-io]
 # usearch 2.24.0 does not guard MAP_FAILED usage behind #ifdef _WIN32,

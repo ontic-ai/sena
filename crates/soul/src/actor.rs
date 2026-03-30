@@ -1,9 +1,10 @@
-//! SoulActor: owns the EncryptedDb and handles all Soul subsystem events.
+﻿//! SoulActor: owns the EncryptedDb and handles all Soul subsystem events.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bus::events::soul::{SoulEventLogged, SoulSummary, SoulSummaryRequested, SoulWriteRequest};
+use bus::events::soul::{SoulEventLogged, SoulReadCompleted, SoulSummary, SoulSummaryRequested, SoulWriteRequest};
+use bus::events::transparency::SoulSummaryForTransparency;
 use bus::events::{CTPEvent, InferenceEvent, PlatformEvent};
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SystemEvent};
 use redb::ReadableTable;
@@ -19,12 +20,8 @@ const SOUL_ACTOR_NAME: &str = "soul";
 const SOUL_CHANNEL_CAPACITY: usize = 256;
 
 /// Actor that owns the SoulBox encrypted database.
-///
-/// Accepts directed Soul events (WriteRequested, SummaryRequested,
-/// IdentitySignalEmitted). Broadcasts EventLogged and SummaryReady back.
 pub struct SoulActor {
     db_path: std::path::PathBuf,
-    /// Option so we can take() and zero it in start() once EncryptedDb copies it.
     master_key: Option<crypto::MasterKey>,
     db: Option<EncryptedDb>,
     next_event_id: u64,
@@ -46,18 +43,11 @@ impl SoulActor {
         }
     }
 
-    fn handle_write(
-        &mut self,
-        req: SoulWriteRequest,
-        bus: &Arc<EventBus>,
-    ) -> Result<(), SoulError> {
+    fn handle_write(&mut self, req: SoulWriteRequest, bus: &Arc<EventBus>) -> Result<(), SoulError> {
         let row_id = self.next_event_id;
         self.next_event_id += 1;
 
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
 
         let entry = format!(
@@ -76,25 +66,14 @@ impl SoulActor {
         let bus_clone = Arc::clone(bus);
         tokio::spawn(async move {
             let _ = bus_clone
-                .broadcast(Event::Soul(SoulEvent::EventLogged(SoulEventLogged {
-                    row_id,
-                    request_id,
-                })))
+                .broadcast(Event::Soul(SoulEvent::EventLogged(SoulEventLogged { row_id, request_id })))
                 .await;
         });
-
         Ok(())
     }
 
-    fn handle_summary(
-        &self,
-        req: SoulSummaryRequested,
-        bus: &Arc<EventBus>,
-    ) -> Result<(), SoulError> {
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+    fn handle_summary(&self, req: SoulSummaryRequested, bus: &Arc<EventBus>) -> Result<(), SoulError> {
+        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
 
         let read_txn = redb.begin_read()?;
@@ -104,18 +83,14 @@ impl SoulActor {
             .iter()?
             .rev()
             .take(req.max_events)
-            .map(
-                |r: Result<(redb::AccessGuard<'_, u64>, redb::AccessGuard<'_, &[u8]>), _>| {
-                    let (_, v) = r?;
-                    Ok(String::from_utf8_lossy(v.value()).into_owned())
-                },
-            )
+            .map(|r: Result<(redb::AccessGuard<'_, u64>, redb::AccessGuard<'_, &[u8]>), _>| {
+                let (_, v) = r?;
+                Ok(String::from_utf8_lossy(v.value()).into_owned())
+            })
             .collect::<Result<Vec<_>, redb::StorageError>>()?;
 
-        // Reverse back to chronological order (oldest first).
         entries.reverse();
 
-        // Append compact identity signal state.
         let signals = read_identity_signals(redb)?;
         if !signals.is_empty() {
             entries.push("[identity]".to_string());
@@ -126,19 +101,13 @@ impl SoulActor {
 
         let event_count = entries.len();
         let content = entries.join("\n");
-
         let request_id = req.request_id;
         let bus_clone = Arc::clone(bus);
         tokio::spawn(async move {
             let _ = bus_clone
-                .broadcast(Event::Soul(SoulEvent::SummaryReady(SoulSummary {
-                    content,
-                    event_count,
-                    request_id,
-                })))
+                .broadcast(Event::Soul(SoulEvent::SummaryReady(SoulSummary { content, event_count, request_id })))
                 .await;
         });
-
         Ok(())
     }
 
@@ -147,29 +116,20 @@ impl SoulActor {
     }
 
     fn write_identity_signal(&self, key: &str, value: &str) -> Result<(), SoulError> {
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
-
         let write_txn = redb.begin_write()?;
         {
             let mut signals = write_txn.open_table(IDENTITY_SIGNALS)?;
             signals.insert(key, value)?;
         }
         write_txn.commit()?;
-
         Ok(())
     }
 
     fn increment_identity_counter(&self, key: &str, delta: u64) -> Result<(), SoulError> {
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
-
         let write_txn = redb.begin_write()?;
         {
             let mut signals = write_txn.open_table(IDENTITY_SIGNALS)?;
@@ -178,8 +138,7 @@ impl SoulActor {
                 .and_then(|v| v.value().parse::<u64>().ok())
                 .unwrap_or(0);
             let next = current.saturating_add(delta);
-            let next_value = next.to_string();
-            signals.insert(key, next_value.as_str())?;
+            signals.insert(key, next.to_string().as_str())?;
         }
         write_txn.commit()?;
         Ok(())
@@ -229,6 +188,51 @@ impl SoulActor {
         }
         Ok(())
     }
+
+    /// Handle a transparency ReadRequested — build a redacted summary and broadcast ReadCompleted.
+    fn handle_read(&self, req: bus::events::soul::SoulReadRequest, bus: &Arc<EventBus>) -> Result<(), SoulError> {
+        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let redb = db.db()?;
+
+        let signals = read_identity_signals(redb)?;
+        let mut work_patterns = vec![];
+        let mut tool_preferences = vec![];
+        let mut interest_clusters = vec![];
+        let mut inference_cycle_count = 0usize;
+
+        for (key, value) in &signals {
+            if key.starts_with("task_pref::") {
+                if let Ok(n) = value.parse::<u64>() {
+                    if n > 0 { work_patterns.push(key.trim_start_matches("task_pref::").to_string()); }
+                }
+            } else if key.starts_with("tool_pref::") {
+                if let Ok(n) = value.parse::<u64>() {
+                    if n > 0 { tool_preferences.push(key.trim_start_matches("tool_pref::").to_string()); }
+                }
+            } else if key.starts_with("interest::") {
+                if let Ok(n) = value.parse::<u64>() {
+                    if n > 0 { interest_clusters.push(key.trim_start_matches("interest::").to_string()); }
+                }
+            } else if key == "inference_cycle_count" {
+                inference_cycle_count = value.parse().unwrap_or(0);
+            }
+        }
+
+        let summary = SoulSummaryForTransparency {
+            inference_cycle_count,
+            work_patterns,
+            tool_preferences,
+            interest_clusters,
+        };
+        let request_id = req.request_id;
+        let bus_clone = Arc::clone(bus);
+        tokio::spawn(async move {
+            let _ = bus_clone
+                .broadcast(Event::Soul(SoulEvent::ReadCompleted(SoulReadCompleted { summary, request_id })))
+                .await;
+        });
+        Ok(())
+    }
 }
 
 fn read_identity_signals(db: &redb::Database) -> Result<Vec<(String, String)>, SoulError> {
@@ -251,11 +255,7 @@ fn infer_interest_topics(text: &str) -> Vec<&'static str> {
     if lower.contains("rust") || lower.contains("cargo") || lower.contains("tokio") {
         topics.push("rust");
     }
-    if lower.contains("llm")
-        || lower.contains("embedding")
-        || lower.contains("prompt")
-        || lower.contains("model")
-    {
+    if lower.contains("llm") || lower.contains("embedding") || lower.contains("prompt") || lower.contains("model") {
         topics.push("ai");
     }
     if lower.contains("sql") || lower.contains("database") || lower.contains("redb") {
@@ -279,21 +279,38 @@ impl Actor for SoulActor {
             .take()
             .ok_or_else(|| ActorError::StartupFailed("SoulActor already started".into()))?;
 
-        let db = EncryptedDb::open(&self.db_path, &master_key)
-            .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
-        // master_key is now dropped and zeroed (ZeroizeOnDrop).
+        // Open the encrypted DB. If decryption fails (master key rotated between runs),
+        // delete the stale file and start fresh so the actor stays alive.
+        let db = match EncryptedDb::open(&self.db_path, &master_key) {
+            Ok(db) => db,
+            Err(e) => {
+                let reason = e.to_string();
+                if reason.contains("decryption failed") || reason.contains("encryption error") {
+                    eprintln!(
+                        "[soul] WARNING: Decryption failed (master key changed). \
+                         Resetting Soul DB — previous history cleared."
+                    );
+                    if self.db_path.exists() {
+                        std::fs::remove_file(&self.db_path).map_err(|io| {
+                            ActorError::StartupFailed(format!("could not remove stale soul db: {io}"))
+                        })?;
+                    }
+                    EncryptedDb::open(&self.db_path, &master_key)
+                        .map_err(|e2| ActorError::StartupFailed(e2.to_string()))?
+                } else {
+                    return Err(ActorError::StartupFailed(reason));
+                }
+            }
+        };
 
         schema::apply_schema(
-            db.db()
-                .map_err(|e| ActorError::StartupFailed(e.to_string()))?,
+            db.db().map_err(|e| ActorError::StartupFailed(e.to_string()))?,
         )
         .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
 
         // Recover next_event_id from the database.
         {
-            let redb = db
-                .db()
-                .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
+            let redb = db.db().map_err(|e| ActorError::StartupFailed(e.to_string()))?;
             if let Ok(read_txn) = redb.begin_read() {
                 if let Ok(log) = read_txn.open_table(EVENT_LOG) {
                     if let Some(Ok((k, _))) = log
@@ -308,7 +325,6 @@ impl Actor for SoulActor {
         }
 
         self.db = Some(db);
-
         self.broadcast_rx = Some(bus.subscribe_broadcast());
 
         let (tx, rx) = mpsc::channel(SOUL_CHANNEL_CAPACITY);
@@ -358,7 +374,7 @@ impl Actor for SoulActor {
                                         eprintln!("[soul] identity signal failed: {}", e);
                                     }
                                 }
-                                _ => {} // EventLogged / SummaryReady are outbound only
+                                _ => {}
                             }
                         }
                         Some(_) => {}
@@ -378,14 +394,21 @@ impl Actor for SoulActor {
                                 eprintln!("[soul] ctp identity extraction failed: {}", e);
                             }
                         }
-                        Ok(Event::Inference(inf_event)) => {
-                            if let Err(e) = self.absorb_inference_signal(inf_event) {
+                        Ok(Event::Inference(inference_event)) => {
+                            if let Err(e) = self.absorb_inference_signal(inference_event) {
                                 eprintln!("[soul] inference identity extraction failed: {}", e);
+                            }
+                        }
+                        Ok(Event::Soul(SoulEvent::ReadRequested(req))) => {
+                            if let Err(e) = self.handle_read(req, &bus) {
+                                eprintln!("[soul] read failed: {}", e);
                             }
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("[soul] broadcast lagged by {} events", n);
+                        }
                     }
                 }
             }
@@ -396,9 +419,13 @@ impl Actor for SoulActor {
 
     async fn stop(&mut self) -> Result<(), ActorError> {
         if let Some(db) = self.db.take() {
-            db.close()
-                .map_err(|e| ActorError::RuntimeError(e.to_string()))?;
+            if let Err(e) = db.close() {
+                eprintln!("[soul] close failed: {}", e);
+            }
         }
+        self.bus = None;
+        self.directed_rx = None;
+        self.broadcast_rx = None;
         Ok(())
     }
 }
@@ -406,6 +433,8 @@ impl Actor for SoulActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::soul::{SoulSummaryRequested, SoulWriteRequest};
+    use std::time::SystemTime;
     use tempfile::tempdir;
 
     fn test_key() -> crypto::MasterKey {
@@ -420,21 +449,14 @@ mod tests {
         let mut actor = SoulActor::new(&db_path, test_key());
         let bus = Arc::new(EventBus::new());
 
-        actor
-            .start(Arc::clone(&bus))
-            .await
-            .expect("start should succeed");
+        actor.start(Arc::clone(&bus)).await.expect("start should succeed");
         actor.stop().await.expect("stop should succeed");
 
-        // Encrypted file should exist
         assert!(db_path.exists());
     }
 
     #[tokio::test]
     async fn soul_actor_write_and_summary() {
-        use bus::events::soul::{SoulSummaryRequested, SoulWriteRequest};
-        use std::time::SystemTime;
-
         let dir = tempdir().expect("should create tempdir");
         let db_path = dir.path().join("soul.redb.enc");
 
@@ -442,12 +464,8 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut rx = bus.subscribe_broadcast();
 
-        actor
-            .start(Arc::clone(&bus))
-            .await
-            .expect("start should succeed");
+        actor.start(Arc::clone(&bus)).await.expect("start should succeed");
 
-        // Write an event
         let req = SoulWriteRequest {
             description: "user opened editor".to_string(),
             app_context: Some("Code".to_string()),
@@ -456,21 +474,14 @@ mod tests {
         };
         actor.handle_write(req, &bus).expect("write should succeed");
 
-        // Flush EventLogged broadcast
         let event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("should receive within timeout")
             .expect("should receive event");
         assert!(matches!(event, Event::Soul(SoulEvent::EventLogged(_))));
 
-        // Request a summary
-        let summary_req = SoulSummaryRequested {
-            max_events: 10,
-            request_id: 2,
-        };
-        actor
-            .handle_summary(summary_req, &bus)
-            .expect("summary should succeed");
+        let summary_req = SoulSummaryRequested { max_events: 10, request_id: 2 };
+        actor.handle_summary(summary_req, &bus).expect("summary should succeed");
 
         let summary_event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await

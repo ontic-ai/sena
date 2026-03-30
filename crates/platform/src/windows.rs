@@ -1,4 +1,9 @@
-//! Windows platform adapter implementation.
+﻿//! Windows platform adapter implementation.
+
+#[cfg(target_os = "windows")]
+use std::hash::{Hash, Hasher};
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 #[cfg(target_os = "windows")]
 use async_trait::async_trait;
@@ -21,19 +26,68 @@ impl WindowsPlatform {
     pub fn new() -> Self {
         Self
     }
+
+    /// Get the foreground window title via Win32 API.
+    fn foreground_window_title() -> Option<String> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+
+        // Safety: GetForegroundWindow is documented as safe to call from any thread.
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return None;
+        }
+
+
+        let mut buf = [0u16; 512];
+        // Safety: hwnd is a valid nonzero window handle; buf is properly sized.
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len <= 0 {
+            return None;
+        }
+
+        let title = String::from_utf16_lossy(&buf[..len as usize]);
+        if title.is_empty() {
+            None
+        } else {
+            Some(title)
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
 #[async_trait]
 impl PlatformAdapter for WindowsPlatform {
     fn active_window(&self) -> Option<WindowContext> {
-        // TODO M1.5: implement via winapi GetForegroundWindow
-        None
+        let title = Self::foreground_window_title()?;
+        Some(WindowContext {
+            app_name: title.clone(),
+            window_title: Some(title),
+            bundle_id: None,
+            timestamp: Instant::now(),
+        })
     }
 
     fn clipboard_digest(&self) -> Option<ClipboardDigest> {
-        // TODO M1.5: implement via arboard
-        None
+        let text = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok())?;
+
+        if text.is_empty() {
+            return None;
+        }
+
+        let char_count = text.chars().count();
+
+        // Hash the content â€” never store raw clipboard text.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let digest_hex = format!("{:016x}", hasher.finish());
+
+        Some(ClipboardDigest {
+            digest: Some(digest_hex),
+            char_count,
+            timestamp: Instant::now(),
+        })
     }
 
     fn subscribe_file_events(&self, _tx: mpsc::Sender<FileEvent>) {
@@ -55,14 +109,13 @@ mod tests {
     }
 
     #[test]
-    fn active_window_returns_none_stub() {
+    fn active_window_does_not_panic() {
+        // On a real Windows machine there should always be a foreground window,
+        // but in headless CI there may not be. Either way must not panic.
         let platform = WindowsPlatform::new();
-        assert!(platform.active_window().is_none());
-    }
-
-    #[test]
-    fn clipboard_digest_returns_none_stub() {
-        let platform = WindowsPlatform::new();
-        assert!(platform.clipboard_digest().is_none());
+        let _ = platform.active_window();
     }
 }
+
+
+

@@ -36,6 +36,8 @@ const MEMORY_QUERY_TOKEN_BUDGET: usize = 8;
 pub struct InferenceActor {
     registry: Option<ModelRegistry>,
     models_dir: PathBuf,
+    /// Preferred model name from config; overrides auto-selected largest model.
+    preferred_model: Option<String>,
     bus: Option<Arc<EventBus>>,
     bus_rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
@@ -56,6 +58,7 @@ impl InferenceActor {
         Self {
             registry: None,
             models_dir,
+            preferred_model: None,
             bus: None,
             bus_rx: None,
             directed_rx: None,
@@ -64,6 +67,15 @@ impl InferenceActor {
             queue: InferenceQueue::new(DEFAULT_QUEUE_CAPACITY),
             last_inference_state: None,
         }
+    }
+
+    /// Override the default model with a user-preferred model name.
+    ///
+    /// If the preferred model is found in the registry after discovery,
+    /// it will be used for inference instead of the largest auto-selected model.
+    pub fn with_preferred_model(mut self, preferred: Option<String>) -> Self {
+        self.preferred_model = preferred;
+        self
     }
 
     /// Returns a reference to the model registry, if discovery succeeded.
@@ -414,7 +426,11 @@ impl Actor for InferenceActor {
 
         // Perform model discovery
         match discovery::discover_models(&self.models_dir) {
-            Ok(registry) => {
+            Ok(mut registry) => {
+                // Apply user-preferred model override if set and found in registry.
+                if let Some(preferred) = &self.preferred_model {
+                    registry.set_preferred_model(preferred);
+                }
                 let event = InferenceEvent::ModelRegistryBuilt {
                     model_count: registry.model_count(),
                     default_model: registry.default_model().map(String::from),

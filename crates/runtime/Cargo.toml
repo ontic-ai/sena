@@ -16,6 +16,7 @@ memory = { path = "../memory" }
 platform = { path = "../platform" }
 serde = { workspace = true }
 soul = { path = "../soul" }
+rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

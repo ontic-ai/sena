@@ -68,6 +68,12 @@ pub struct SenaConfig {
     /// Default: 2
     #[serde(default = "default_max_reflection_rounds")]
     pub max_reflection_rounds: usize,
+
+    /// Preferred model name selected via `sena models`.
+    /// When set, Sena will attempt to use this model over the auto-discovered default.
+    /// If the preferred model is not found at boot, Sena falls back to the largest discovered model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_model: Option<String>,
 }
 
 impl Default for SenaConfig {
@@ -84,6 +90,7 @@ impl Default for SenaConfig {
             memory_consolidation_idle_secs: default_memory_consolidation_idle_secs(),
             ctp_trigger_sensitivity: default_ctp_trigger_sensitivity(),
             max_reflection_rounds: default_max_reflection_rounds(),
+            preferred_model: None,
         }
     }
 }
@@ -153,6 +160,17 @@ pub fn default_config() -> SenaConfig {
 pub async fn load_or_create_config() -> Result<SenaConfig, ConfigError> {
     let path = config_path()?;
     load_or_create_config_at(&path).await
+}
+
+/// Saves a config to the OS-specific config path.
+pub async fn save_config(config: &SenaConfig) -> Result<(), ConfigError> {
+    let path = config_path()?;
+    let toml_string = toml::to_string_pretty(config)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, toml_string).await?;
+    Ok(())
 }
 
 pub(crate) async fn load_or_create_config_at(

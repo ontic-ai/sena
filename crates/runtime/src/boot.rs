@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::MasterKey;
+use rand::RngCore;
 
 use crate::config::SenaConfig;
 use crate::registry::ActorRegistry;
@@ -100,13 +101,40 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_trigger_sensitivity(config.ctp_trigger_sensitivity);
     spawn_actor(&bus, &mut registry, Box::new(ctp_actor));
 
-    // Step 8: Initialize memory system â€” STUB
-    // TODO M2.4: Initialize ech0 Store with master_key
+    // Step 8: Initialize and spawn memory actor
+    let config_dir = platform::config_dir()
+        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    let memory_dir = config_dir.join("memory");
+    std::fs::create_dir_all(&memory_dir)
+        .map_err(|e| BootError::MemoryInitFailed(format!("failed to create memory dir: {e}")))?;
+    let memory_graph_path = memory_dir.join("graph");
+    let memory_vector_path = memory_dir.join("vector.usearch");
 
-    // Step 9: Initialize inference system â€” STUB
-    // TODO M2.2: Initialize llama-cpp-rs model loader
+    let memory_consolidation_interval =
+        Duration::from_secs(config.memory_consolidation_interval_secs);
+    let memory_idle_threshold = Duration::from_secs(config.memory_consolidation_idle_secs);
+    let memory_actor = memory::MemoryActor::with_consolidation_interval(
+        memory_graph_path,
+        memory_vector_path,
+        memory_consolidation_interval,
+    )
+    .with_consolidation_idle_threshold(memory_idle_threshold);
+    spawn_actor(&bus, &mut registry, Box::new(memory_actor));
 
-    // Step 10: PromptComposer is stateless â€” instantiated per inference cycle.
+    // Step 9: Initialize and spawn inference actor
+    let models_dir = platform::ollama_models_dir()
+        .map_err(|e| BootError::InferenceInitFailed(e.to_string()))?;
+    let inference_backend = inference::LlamaBackend::new();
+    let inference_backend_type = inference::BackendType::Cpu;
+    let inference_actor = inference::InferenceActor::new(
+        models_dir,
+        Box::new(inference_backend),
+        inference_backend_type,
+    )
+    .with_preferred_model(config.preferred_model.clone());
+    spawn_actor(&bus, &mut registry, Box::new(inference_actor));
+
+    // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
     // Step 11: Broadcast BootComplete
@@ -124,23 +152,37 @@ pub async fn boot() -> Result<Runtime, BootError> {
 }
 
 fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
+    // Case 1: Key already exists in OS keychain (normal subsequent runs).
     if let Ok(key) = crypto::keychain::retrieve_master_key() {
         return Ok(key);
     }
 
-    let passphrase_str = std::env::var("SENA_PASSPHRASE").map_err(|_| {
-        crypto::CryptoError::KeychainError(
-            "no keychain key found and SENA_PASSPHRASE not set".to_string(),
-        )
-    })?;
+    // Case 2: Passphrase supplied via environment variable (CI / headless).
+    if let Ok(passphrase_str) = std::env::var("SENA_PASSPHRASE") {
+        let passphrase = crypto::argon2_kdf::Passphrase::new(passphrase_str);
+        let salt_path = platform::config_dir()
+            .map_err(|e| crypto::CryptoError::IoError(std::io::Error::other(e.to_string())))?
+            .join("salt.bin");
+        let salt = load_or_create_salt(&salt_path)?;
+        let key = crypto::argon2_kdf::derive_master_key(&passphrase, &salt)?;
+        crypto::keychain::store_master_key(&key)?;
+        return Ok(key);
+    }
 
-    let passphrase = crypto::argon2_kdf::Passphrase::new(passphrase_str);
+    // Case 3: First run — generate a fresh random master key and store it.
+    // The key is never written to disk; only the keychain holds it.
+    let mut raw = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let key = crypto::MasterKey::from_bytes(raw);
+    crypto::keychain::store_master_key(&key)?;
+    Ok(key)
+}
 
-    let salt_path = platform::config_dir()
-        .map_err(|e| crypto::CryptoError::IoError(std::io::Error::other(e.to_string())))?
-        .join("salt.bin");
-    let salt = if salt_path.exists() {
-        let bytes = std::fs::read(&salt_path).map_err(crypto::CryptoError::IoError)?;
+fn load_or_create_salt(
+    salt_path: &std::path::Path,
+) -> Result<crypto::argon2_kdf::Salt, crypto::CryptoError> {
+    if salt_path.exists() {
+        let bytes = std::fs::read(salt_path).map_err(crypto::CryptoError::IoError)?;
         if bytes.len() != 16 {
             return Err(crypto::CryptoError::InvalidData(
                 "salt file has invalid length".to_string(),
@@ -148,17 +190,15 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
         }
         let mut arr = [0u8; 16];
         arr.copy_from_slice(&bytes);
-        crypto::argon2_kdf::Salt::from_bytes(arr)
+        Ok(crypto::argon2_kdf::Salt::from_bytes(arr))
     } else {
         let salt = crypto::argon2_kdf::generate_salt();
         if let Some(parent) = salt_path.parent() {
             std::fs::create_dir_all(parent).map_err(crypto::CryptoError::IoError)?;
         }
-        std::fs::write(&salt_path, salt.as_bytes()).map_err(crypto::CryptoError::IoError)?;
-        salt
-    };
-
-    crypto::argon2_kdf::derive_master_key(&passphrase, &salt)
+        std::fs::write(salt_path, salt.as_bytes()).map_err(crypto::CryptoError::IoError)?;
+        Ok(salt)
+    }
 }
 
 fn spawn_actor(bus: &Arc<EventBus>, registry: &mut ActorRegistry, mut actor: Box<dyn Actor>) {

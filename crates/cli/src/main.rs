@@ -1,13 +1,13 @@
-//! Sena CLI — application entry point.
+﻿//! Sena CLI — application entry point.
 //!
-//! The CLI has zero business logic. It delegates to runtime for boot/shutdown.
-//! All actor wiring happens in runtime::boot().
-//!
-//! Supports two modes:
-//! 1. Background mode: `sena` — boots runtime and waits for Ctrl+C
-//! 2. Query mode: `sena query <type>` — sends transparency query, awaits response, exits
+//! Default mode: interactive REPL (`cargo run`).
+//! Legacy scripting mode: `cargo run -- query <type>` (no REPL, no stdin).
+//! Standalone model picker: `cargo run -- models`.
 
+mod display;
+mod model_selector;
 mod query;
+mod shell;
 
 use std::time::Duration;
 
@@ -17,72 +17,69 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() >= 2 && args[1] == "query" {
-        // Query mode: sena query <type>
-        query_mode(&args).await
-    } else if args.len() == 1 {
-        // Background mode: sena
-        background_mode().await
-    } else {
-        // Invalid arguments
-        print_usage();
-        anyhow::bail!("Invalid arguments. Use 'sena' or 'sena query <type>'")
+    match args.get(1).map(String::as_str) {
+        Some("query") => query_mode(&args).await,
+        Some("models") => model_selector::run().await,
+        None => interactive_mode().await,
+        _ => {
+            print_usage();
+            anyhow::bail!("Invalid arguments. Run with no args for interactive mode.")
+        }
     }
 }
 
-/// Background mode: boots runtime and waits for Ctrl+C.
-async fn background_mode() -> Result<()> {
-    // Boot runtime (actors are wired inside boot())
-    let runtime = runtime::boot().await?;
+/// Interactive mode: boot runtime, print banner, enter REPL.
+/// Loops on restart signal so the user can hot-swap models without re-launching.
+async fn interactive_mode() -> Result<()> {
+    display::banner();
 
-    println!("Sena started. Press Ctrl+C to shutdown.");
-    println!("To test Sena interactively, use: sena query <type>");
+    loop {
+        display::info("Booting runtime...");
+        let runtime = runtime::boot().await?;
+        display::success("Runtime ready.");
 
-    // Wait for Ctrl+C
-    runtime::wait_for_sigint().await?;
+        let exit_reason = shell::run(runtime).await?;
 
-    println!("Shutdown signal received, stopping actors...");
-
-    // Graceful shutdown with timeout from config
-    let shutdown_timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
-    runtime::shutdown(runtime, shutdown_timeout).await?;
-
-    println!("Sena stopped cleanly.");
+        match exit_reason {
+            shell::ShellExitReason::Quit => break,
+            shell::ShellExitReason::Restart => {
+                display::info("Restarting with new model...");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
 
     Ok(())
 }
 
-/// Query mode: sends a transparency query and displays the response.
-///
-/// Usage: sena query <type>
-/// Valid types: observation, memory, explanation
+/// Legacy scripting mode: single transparency query, print result, exit.
 async fn query_mode(args: &[String]) -> Result<()> {
     if args.len() < 3 {
-        eprintln!("Error: query subcommand requires a query type");
-        eprintln!("Usage: sena query <type>");
-        eprintln!("Valid types: observation, memory, explanation");
-        anyhow::bail!("Missing query type argument")
+        eprintln!("Error: 'query' requires a type argument");
+        eprintln!("Usage: cargo run -- query <observation|memory|explanation>");
+        anyhow::bail!("Missing query type")
     }
 
-    let query_type_arg = &args[2];
-    let query = query::parse_query_type(query_type_arg)?;
-
+    let query = query::parse_query_type(&args[2])?;
     let output = query::execute_query(query).await?;
-    println!("{}", output);
-
+    println!("{output}");
     Ok(())
 }
 
-/// Print usage information.
 fn print_usage() {
-    eprintln!("Sena CLI — transparency query interface");
+    eprintln!("Sena CLI");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  sena             Run in background mode (waits for Ctrl+C)");
-    eprintln!("  sena query TYPE Query Sena's current state and exit");
-    eprintln!();
-    eprintln!("Query types:");
-    eprintln!("  observation  What are you observing right now?");
-    eprintln!("  memory       What do you remember about me?");
-    eprintln!("  explanation  Why did you say that?");
+    eprintln!("  cargo run                     Start interactive mode (recommended)");
+    eprintln!("  cargo run -- models           Pick an Ollama model (no REPL needed)");
+    eprintln!("  cargo run -- query TYPE       Scripting: single query, print, exit");
+}
+
+#[allow(dead_code)]
+async fn background_mode() -> Result<()> {
+    let runtime = runtime::boot().await?;
+    runtime::wait_for_sigint().await?;
+    let shutdown_timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
+    runtime::shutdown(runtime, shutdown_timeout).await?;
+    Ok(())
 }
