@@ -6,13 +6,13 @@ pub mod events;
 
 pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
-pub use events::{CTPEvent, PlatformEvent, SystemEvent};
-
+pub use events::{
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, Priority, SoulEvent, SystemEvent,
+};
 
 #[cfg(test)]
 mod integration_tests {
     use super::events::{CTPEvent, PlatformEvent, SystemEvent};
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc};
 
@@ -22,7 +22,6 @@ mod integration_tests {
 
     use crate::events::ctp::ContextSnapshot;
 
-    /// Helper to create a minimal ContextSnapshot for testing.
     fn create_test_snapshot() -> ContextSnapshot {
         let now = Instant::now();
         ContextSnapshot {
@@ -50,10 +49,8 @@ mod integration_tests {
         let (tx, mut rx1) = broadcast::channel::<SystemEvent>(16);
         let mut rx2 = tx.subscribe();
 
-        // Send a system event
         tx.send(SystemEvent::ShutdownSignal).unwrap();
 
-        // Both receivers should get it
         let event1 = rx1.recv().await.unwrap();
         let event2 = rx2.recv().await.unwrap();
 
@@ -118,9 +115,9 @@ mod integration_tests {
 
     #[tokio::test]
     async fn all_platform_event_variants_through_channel() {
+        use std::path::PathBuf;
         let (tx, mut rx) = mpsc::channel::<PlatformEvent>(16);
 
-        // WindowChanged
         tx.send(PlatformEvent::WindowChanged(WindowContext {
             app_name: "App1".to_string(),
             window_title: None,
@@ -130,7 +127,6 @@ mod integration_tests {
         .await
         .unwrap();
 
-        // ClipboardChanged
         tx.send(PlatformEvent::ClipboardChanged(ClipboardDigest {
             digest: Some("abc123".to_string()),
             char_count: 10,
@@ -139,7 +135,6 @@ mod integration_tests {
         .await
         .unwrap();
 
-        // FileEvent
         tx.send(PlatformEvent::FileEvent(FileEvent {
             path: PathBuf::from("/test/file.txt"),
             event_kind: FileEventKind::Modified,
@@ -148,7 +143,6 @@ mod integration_tests {
         .await
         .unwrap();
 
-        // KeystrokePattern
         tx.send(PlatformEvent::KeystrokePattern(KeystrokeCadence {
             events_per_minute: 120.0,
             burst_detected: true,
@@ -157,7 +151,6 @@ mod integration_tests {
         .await
         .unwrap();
 
-        // Verify all received correctly
         assert!(matches!(
             rx.recv().await.unwrap(),
             PlatformEvent::WindowChanged(_)
@@ -176,7 +169,6 @@ mod integration_tests {
         ));
     }
 
-    /// Compile-time verification: all event types are Clone.
     #[test]
     fn all_event_types_are_clone() {
         fn assert_clone<T: Clone>() {}
@@ -184,9 +176,10 @@ mod integration_tests {
         assert_clone::<SystemEvent>();
         assert_clone::<PlatformEvent>();
         assert_clone::<CTPEvent>();
+        assert_clone::<crate::MemoryEvent>();
+        assert_clone::<crate::SoulEvent>();
     }
 
-    /// Compile-time verification: all event types are Send + 'static.
     #[test]
     fn all_event_types_are_send_and_static() {
         fn assert_send_static<T: Send + 'static>() {}
@@ -194,5 +187,7 @@ mod integration_tests {
         assert_send_static::<SystemEvent>();
         assert_send_static::<PlatformEvent>();
         assert_send_static::<CTPEvent>();
+        assert_send_static::<crate::MemoryEvent>();
+        assert_send_static::<crate::SoulEvent>();
     }
 }

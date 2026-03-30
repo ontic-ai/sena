@@ -45,6 +45,29 @@ pub struct SenaConfig {
     /// Default: 50
     #[serde(default = "default_soul_summary_max_events")]
     pub soul_summary_max_events: usize,
+
+    /// Interval in seconds between memory consolidation runs (decay + pruning).
+    /// Default: 300 (5 minutes)
+    #[serde(default = "default_memory_consolidation_interval_secs")]
+    pub memory_consolidation_interval_secs: u64,
+
+    /// Idle threshold in seconds before consolidation is allowed to run.
+    /// Prevents background consolidation during active interaction bursts.
+    /// Default: 120 (2 minutes)
+    #[serde(default = "default_memory_consolidation_idle_secs")]
+    pub memory_consolidation_idle_secs: u64,
+
+    /// CTP trigger sensitivity multiplier (0.0–1.0).
+    /// Lower values require a stronger context change to trigger a thought event.
+    /// Default: 0.5
+    #[serde(default = "default_ctp_trigger_sensitivity")]
+    pub ctp_trigger_sensitivity: f64,
+
+    /// Maximum number of reflection rounds in multi-round reasoning.
+    /// Hard cap: value is clamped to [1, max_reflection_rounds_hard_cap].
+    /// Default: 2
+    #[serde(default = "default_max_reflection_rounds")]
+    pub max_reflection_rounds: usize,
 }
 
 impl Default for SenaConfig {
@@ -57,16 +80,44 @@ impl Default for SenaConfig {
             working_memory_max_exchanges: default_working_memory_max_exchanges(),
             working_memory_token_budget: default_working_memory_token_budget(),
             soul_summary_max_events: default_soul_summary_max_events(),
+            memory_consolidation_interval_secs: default_memory_consolidation_interval_secs(),
+            memory_consolidation_idle_secs: default_memory_consolidation_idle_secs(),
+            ctp_trigger_sensitivity: default_ctp_trigger_sensitivity(),
+            max_reflection_rounds: default_max_reflection_rounds(),
         }
     }
 }
 
-fn default_ctp_trigger_interval_secs() -> u64 { 300 }
-fn default_shutdown_timeout_secs() -> u64 { 5 }
-fn default_clipboard_observation_enabled() -> bool { true }
-fn default_working_memory_max_exchanges() -> usize { 10 }
-fn default_working_memory_token_budget() -> usize { 4096 }
-fn default_soul_summary_max_events() -> usize { 50 }
+fn default_ctp_trigger_interval_secs() -> u64 {
+    300
+}
+fn default_shutdown_timeout_secs() -> u64 {
+    5
+}
+fn default_clipboard_observation_enabled() -> bool {
+    true
+}
+fn default_working_memory_max_exchanges() -> usize {
+    10
+}
+fn default_working_memory_token_budget() -> usize {
+    4096
+}
+fn default_soul_summary_max_events() -> usize {
+    50
+}
+fn default_memory_consolidation_interval_secs() -> u64 {
+    300
+}
+fn default_memory_consolidation_idle_secs() -> u64 {
+    120
+}
+fn default_ctp_trigger_sensitivity() -> f64 {
+    0.5
+}
+fn default_max_reflection_rounds() -> usize {
+    2
+}
 
 /// Configuration-related errors.
 #[derive(Debug, thiserror::Error)]

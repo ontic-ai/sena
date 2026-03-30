@@ -98,9 +98,9 @@ impl WorkingMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::platform::{KeystrokeCadence, WindowContext};
     use std::time::Duration;
     use std::time::Instant;
-    use bus::events::platform::{KeystrokeCadence, WindowContext};
 
     fn make_snap() -> ContextSnapshot {
         let now = Instant::now();
@@ -125,7 +125,10 @@ mod tests {
     }
 
     fn ex(p: &str, r: &str) -> InferenceExchange {
-        InferenceExchange { prompt: p.to_string(), response: r.to_string() }
+        InferenceExchange {
+            prompt: p.to_string(),
+            response: r.to_string(),
+        }
     }
 
     #[test]
@@ -195,7 +198,10 @@ mod tests {
 
     #[test]
     fn inference_exchange_token_estimate() {
-        let e = InferenceExchange { prompt: "abcd".to_string(), response: "efgh".to_string() };
+        let e = InferenceExchange {
+            prompt: "abcd".to_string(),
+            response: "efgh".to_string(),
+        };
         assert_eq!(e.token_estimate(), 2);
     }
 

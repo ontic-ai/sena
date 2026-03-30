@@ -1,61 +1,131 @@
 //! Embedder trait implementation — calls inference actor for embedding generation.
+//!
+//! `SenaEmbedder` implements the real `ech0::Embedder` async trait by routing
+//! embedding requests through the event bus to the inference actor.
+//!
+//! Per architecture.md: memory crate owns this implementation and communicates
+//! with inference via bus — never by importing llama-cpp-rs directly.
 
-use std::sync::Arc;
-use bus::EventBus;
-use crate::ech0_placeholder::Embedder as Ech0Embedder;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
-/// Embedder that delegates to the inference actor via directed mpsc channel.
+use async_trait::async_trait;
+use bus::{Event, EventBus, InferenceEvent};
+use ech0::EchoError;
+
+/// Timeout to wait for an EmbedCompleted response from the inference actor.
+const EMBED_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fixed embedding dimensionality produced by the current model.
 ///
-/// Per architecture.md §8.3: memory crate owns this implementation,
-/// calls inference actor for actual embedding computation.
+/// Must match `StoreConfig.store.vector_dimensions`. Currently set to 384
+/// which matches the mock backend used in tests and small local models.
+/// This will become configurable when model hot-swap is implemented (Phase 4).
+pub const EMBEDDING_DIMENSIONS: usize = 384;
+
+/// Implements `ech0::Embedder` by forwarding embed requests to the inference
+/// actor via the event bus directed channel.
+///
+/// The inference actor runs embed calls inside `spawn_blocking` (backed by
+/// llama-cpp-rs) and broadcasts the result as `InferenceEvent::EmbedCompleted`.
 pub struct SenaEmbedder {
     bus: Arc<EventBus>,
-    request_id_counter: std::sync::atomic::AtomicU64,
+    counter: AtomicU64,
 }
 
 impl SenaEmbedder {
+    /// Create a new embedder that communicates via the given bus.
     pub fn new(bus: Arc<EventBus>) -> Self {
         Self {
             bus,
-            request_id_counter: std::sync::atomic::AtomicU64::new(1),
+            counter: AtomicU64::new(1),
         }
     }
 
-    fn next_request_id(&self) -> u64 {
-        self.request_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    fn next_id(&self) -> u64 {
+        self.counter.fetch_add(1, Ordering::Relaxed)
     }
 }
 
-impl Ech0Embedder for SenaEmbedder {
-    fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
-        // TODO M2.4: Implement actual embedding via inference actor directed channel.
-        // For now, return a placeholder embedding vector.
-        //
-        // Real implementation should:
-        // 1. Send EmbedRequested to inference actor via directed channel
-        // 2. Await EmbedCompleted response
-        // 3. Return the vector
-        //
-        // This requires async context, but ech0's Embedder trait is sync.
-        // Resolution: use tokio::runtime::Handle::current().block_on() or similar.
-        
-        let _request_id = self.next_request_id();
-        
-        // Placeholder: return a dummy 384-dimensional vector (common embedding size)
-        Ok(vec![0.0; 384])
+#[async_trait]
+impl ech0::Embedder for SenaEmbedder {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EchoError> {
+        let request_id = self.next_id();
+        let mut rx = self.bus.subscribe_broadcast();
+
+        self.bus
+            .send_directed(
+                "inference",
+                Event::Inference(InferenceEvent::EmbedRequested {
+                    text: text.to_owned(),
+                    request_id,
+                }),
+            )
+            .await
+            .map_err(|e| EchoError::embedder_failure(format!("bus send failed: {e}")))?;
+
+        let deadline = tokio::time::Instant::now() + EMBED_TIMEOUT;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(EchoError::embedder_failure(
+                    "embed timeout: no response from inference actor",
+                ));
+            }
+
+            let recv_fut = rx.recv();
+            match tokio::time::timeout(remaining, recv_fut).await {
+                Ok(Ok(Event::Inference(InferenceEvent::EmbedCompleted {
+                    vector,
+                    request_id: rid,
+                }))) if rid == request_id => {
+                    return Ok(vector);
+                }
+                Ok(Ok(Event::Inference(InferenceEvent::InferenceFailed {
+                    request_id: rid,
+                    reason,
+                }))) if rid == request_id => {
+                    return Err(EchoError::embedder_failure(format!(
+                        "inference actor failed: {reason}"
+                    )));
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => {
+                    return Err(EchoError::embedder_failure("bus channel closed"));
+                }
+                Err(_) => {
+                    return Err(EchoError::embedder_failure(
+                        "embed timeout: no response from inference actor",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn dimensions(&self) -> usize {
+        EMBEDDING_DIMENSIONS
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ech0::Embedder;
 
     #[test]
-    fn embedder_returns_placeholder_vector() {
+    fn embedding_dimensions_is_positive() {
+        assert!(EMBEDDING_DIMENSIONS > 0);
+    }
+
+    #[test]
+    fn sena_embedder_reports_correct_dimensions() {
         let bus = Arc::new(EventBus::new());
         let embedder = SenaEmbedder::new(bus);
-        let result = embedder.embed("test text");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 384);
+        // dimensions() must match EMBEDDING_DIMENSIONS
+        assert_eq!(embedder.dimensions(), EMBEDDING_DIMENSIONS);
     }
 }
