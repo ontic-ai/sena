@@ -341,9 +341,9 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                             let msg = format!("  {}{}✗{}  model error: {}", BOLD, RED, RESET, reason);
                             print_above(&msg, &mut editor, &mut stdout);
                         }
-                        Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => {
+                        Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
                             if verbose || pending_inference_id.is_some() {
-                                let msg = format!("  {}·{}  model loaded: {}", DIM, RESET, name);
+                                let msg = format!("  {}·{}  model loaded: {} {}({}){}", DIM, RESET, name, DIM, backend, RESET);
                                 print_above(&msg, &mut editor, &mut stdout);
                             }
                         }
