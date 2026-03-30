@@ -1,4 +1,4 @@
-﻿//! Interactive REPL shell for Sena — crossterm-powered TUI.
+//! Interactive REPL shell for Sena — crossterm-powered TUI.
 //!
 //! Features:
 //! - Alternate screen buffer (original terminal restored on exit)
@@ -16,10 +16,10 @@ use bus::events::transparency::TransparencyQuery;
 use bus::Event;
 use crossterm::{
     cursor,
-    event::{self, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, ClearType},
 };
 use tokio::sync::broadcast;
 
@@ -44,15 +44,15 @@ pub enum ShellExitReason {
 /// Commands shown in the / dropdown.
 const COMMANDS: &[(&str, &str)] = &[
     ("/observation", "What are you observing right now?"),
-    ("/obs",         "What are you observing right now?"),
-    ("/memory",      "What do you remember about me?"),
-    ("/mem",         "What do you remember about me?"),
+    ("/obs", "What are you observing right now?"),
+    ("/memory", "What do you remember about me?"),
+    ("/mem", "What do you remember about me?"),
     ("/explanation", "Why did you say that?"),
-    ("/why",         "Why did you say that?"),
-    ("/models",      "Select which Ollama model to use"),
-    ("/verbose",     "Toggle verbose actor-event logging"),
-    ("/help",        "Show all commands"),
-    ("/quit",        "Exit Sena"),
+    ("/why", "Why did you say that?"),
+    ("/models", "Select which Ollama model to use"),
+    ("/verbose", "Toggle verbose actor-event logging"),
+    ("/help", "Show all commands"),
+    ("/quit", "Exit Sena"),
 ];
 
 const PROMPT_PREFIX_LEN: usize = 7; // visual width of "sena › "
@@ -62,20 +62,19 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            cursor::Show
-        );
+        let _ = execute!(io::stdout(), cursor::Show);
     }
 }
 
 /// State for the inline line editor.
 struct EditorState {
-    buffer:            String,
-    completions:       Vec<&'static str>,
-    completion_index:  usize,
-    prev_comp_count:   usize,
+    buffer: String,
+    completions: Vec<&'static str>,
+    completion_index: usize,
+    prev_comp_count: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    temp_buffer: String,
 }
 
 impl EditorState {
@@ -85,6 +84,9 @@ impl EditorState {
             completions: vec![],
             completion_index: 0,
             prev_comp_count: 0,
+            history: vec![],
+            history_index: None,
+            temp_buffer: String::new(),
         }
     }
 
@@ -117,9 +119,47 @@ impl EditorState {
 
     fn prev_completion(&mut self) {
         if !self.completions.is_empty() {
-            self.completion_index = self.completion_index
+            self.completion_index = self
+                .completion_index
                 .checked_sub(1)
                 .unwrap_or(self.completions.len() - 1);
+        }
+    }
+
+    fn add_to_history(&mut self, line: String) {
+        if !line.is_empty() && (self.history.is_empty() || self.history.last() != Some(&line)) {
+            self.history.push(line);
+        }
+        self.history_index = None;
+        self.temp_buffer.clear();
+    }
+
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        if self.history_index.is_none() {
+            self.temp_buffer = self.buffer.clone();
+            self.history_index = Some(self.history.len() - 1);
+        } else if let Some(idx) = self.history_index {
+            if idx > 0 {
+                self.history_index = Some(idx - 1);
+            }
+        }
+        if let Some(idx) = self.history_index {
+            self.buffer = self.history[idx].clone();
+        }
+    }
+
+    fn history_next(&mut self) {
+        if let Some(idx) = self.history_index {
+            if idx + 1 < self.history.len() {
+                self.history_index = Some(idx + 1);
+                self.buffer = self.history[idx + 1].clone();
+            } else {
+                self.history_index = None;
+                self.buffer = self.temp_buffer.clone();
+            }
         }
     }
 }
@@ -141,8 +181,12 @@ fn redraw(state: &EditorState, stdout: &mut impl Write) {
     if state.prev_comp_count > 0 {
         let _ = queue!(stdout, cursor::MoveUp(state.prev_comp_count as u16));
     }
-    // Clear from current position to end of screen.
-    let _ = queue!(stdout, terminal::Clear(ClearType::FromCursorDown));
+    // Always anchor to start of line before clearing, or prompts will stack.
+    let _ = queue!(
+        stdout,
+        cursor::MoveToColumn(0),
+        terminal::Clear(ClearType::FromCursorDown)
+    );
 
     // Prompt + buffer.
     let _ = queue!(
@@ -166,7 +210,11 @@ fn redraw(state: &EditorState, stdout: &mut impl Write) {
                 .map(|(_, d)| *d)
                 .unwrap_or("");
 
-            let marker = if i == state.completion_index { "▸" } else { " " };
+            let marker = if i == state.completion_index {
+                "▸"
+            } else {
+                " "
+            };
 
             let _ = queue!(
                 stdout,
@@ -213,9 +261,8 @@ fn print_above(msg: &str, state: &mut EditorState, stdout: &mut impl Write) {
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
 pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
-    // ── Enter alternate screen + raw mode ────────────────────────────────────
+    // ── Enter raw mode (no alternate screen — preserve scrollback) ───────────
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard; // restores terminal on drop
 
@@ -279,8 +326,13 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                             if pending_inference_id == Some(*request_id) =>
                         {
                             pending_inference_id = None;
-                            let formatted = format_chat_response(text);
-                            print_above(&formatted, &mut editor, &mut stdout);
+                            if text.trim().is_empty() {
+                                let msg = format!("  {}{}✗{}  model returned empty response", BOLD, RED, RESET);
+                                print_above(&msg, &mut editor, &mut stdout);
+                            } else {
+                                let formatted = format_chat_response(text);
+                                print_above(&formatted, &mut editor, &mut stdout);
+                            }
                         }
                         Event::Inference(InferenceEvent::InferenceFailed { request_id, reason })
                             if pending_inference_id == Some(*request_id) =>
@@ -309,7 +361,11 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
             // Keyboard events
             Some(ev) = key_rx.recv() => {
                 match ev {
-                    event::Event::Key(KeyEvent { code, modifiers, .. }) => {
+                    event::Event::Key(KeyEvent { code, modifiers, kind, .. }) => {
+                        // Filter out key release events to prevent duplicate input on Windows.
+                        if kind != KeyEventKind::Press {
+                            continue;
+                        }
                         match (code, modifiers) {
 
                             // Quit
@@ -339,6 +395,8 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                     redraw(&editor, &mut stdout);
                                     continue;
                                 }
+
+                                editor.add_to_history(line.clone());
 
                                 // Dispatch
                                 let result = dispatch_line(
@@ -377,15 +435,29 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                 redraw(&editor, &mut stdout);
                             }
 
-                            // Arrow down — next completion
+                            // Arrow down — next completion or next history
                             (KeyCode::Down, _) => {
-                                editor.next_completion();
+                                if !editor.completions.is_empty() {
+                                    editor.next_completion();
+                                } else {
+                                    editor.history_next();
+                                    editor.update_completions();
+                                    editor.completion_index = 0;
+                                    editor.prev_comp_count = editor.completions.len();
+                                }
                                 redraw(&editor, &mut stdout);
                             }
 
-                            // Arrow up — prev completion
+                            // Arrow up — prev completion or prev history
                             (KeyCode::Up, _) => {
-                                editor.prev_completion();
+                                if !editor.completions.is_empty() {
+                                    editor.prev_completion();
+                                } else {
+                                    editor.history_prev();
+                                    editor.update_completions();
+                                    editor.completion_index = 0;
+                                    editor.prev_comp_count = editor.completions.len();
+                                }
                                 redraw(&editor, &mut stdout);
                             }
 
@@ -470,7 +542,10 @@ async fn dispatch_line(
         "/verbose" => {
             *verbose = !*verbose;
             let state = if *verbose { "ON" } else { "OFF" };
-            rln(&format!("  {}·{}  Verbose logging: {}{}{}", DIM, RESET, BOLD, state, RESET));
+            rln(&format!(
+                "  {}·{}  Verbose logging: {}{}{}",
+                DIM, RESET, BOLD, state, RESET
+            ));
         }
         "/help" | "/h" => {
             print_help_raw();
@@ -537,7 +612,10 @@ async fn run_models(
     // Prompt for selection (blocking-style using crossterm in raw mode).
     let _ = queue!(
         stdout,
-        Print(format!("  {}>{} Enter number or model name (Enter to keep current): ", CYAN, RESET)),
+        Print(format!(
+            "  {}>{} Enter number or model name (Enter to keep current): ",
+            CYAN, RESET
+        )),
     );
     let _ = stdout.flush();
 
@@ -552,13 +630,19 @@ async fn run_models(
     match model_selector::apply_selection(&trimmed, &models, runtime).await {
         Ok(name) => {
             rln("");
-            rln(&format!("  {}{}✓{}  Selected: {}", BOLD, GREEN, RESET, name));
+            rln(&format!(
+                "  {}{}✓{}  Selected: {}",
+                BOLD, GREEN, RESET, name
+            ));
             rln(&format!("  {}·{}  Saved to config.", DIM, RESET));
 
             // Ask whether to restart now.
             let _ = queue!(
                 stdout,
-                Print(format!("  {}>{} Restart now to apply? (y/N): ", CYAN, RESET)),
+                Print(format!(
+                    "  {}>{} Restart now to apply? (y/N): ",
+                    CYAN, RESET
+                )),
             );
             let _ = stdout.flush();
 
@@ -569,7 +653,10 @@ async fn run_models(
             if answer == "y" || answer == "yes" {
                 return Some(DispatchResult::Restart);
             } else {
-                rln(&format!("  {}·{}  Restart Sena manually to use the new model.", DIM, RESET));
+                rln(&format!(
+                    "  {}·{}  Restart Sena manually to use the new model.",
+                    DIM, RESET
+                ));
             }
         }
         Err(e) => {
@@ -587,6 +674,10 @@ async fn read_line_raw() -> String {
         loop {
             if event::poll(Duration::from_secs(120)).unwrap_or(false) {
                 if let Ok(event::Event::Key(k)) = event::read() {
+                    // Filter out key release events to prevent duplicate input.
+                    if k.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Enter => break,
                         KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -600,7 +691,10 @@ async fn read_line_raw() -> String {
                                 let _ = io::stdout().flush();
                             }
                         }
-                        KeyCode::Esc => { buf.clear(); break; }
+                        KeyCode::Esc => {
+                            buf.clear();
+                            break;
+                        }
                         _ => {}
                     }
                 }
@@ -630,7 +724,10 @@ async fn send_chat(
 
     let _ = queue!(
         stdout,
-        Print(format!("  {}·{}  Thinking... (model response may take a moment)\r\n", DIM, RESET)),
+        Print(format!(
+            "  {}·{}  Thinking... (model response may take a moment)\r\n",
+            DIM, RESET
+        )),
     );
     let _ = stdout.flush();
 
@@ -650,7 +747,10 @@ async fn send_chat(
             *pending_id = Some(request_id);
         }
         Err(e) => {
-            rln(&format!("  {}{}✗{}  could not reach inference actor: {}", BOLD, RED, RESET, e));
+            rln(&format!(
+                "  {}{}✗{}  could not reach inference actor: {}",
+                BOLD, RED, RESET, e
+            ));
         }
     }
 }
@@ -668,18 +768,22 @@ fn format_chat_response(text: &str) -> String {
 
 fn verbose_format(ev: &Event) -> Option<String> {
     match ev {
-        Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => {
-            Some(format!("  {}[verbose] CTP: thought triggered{}", DIM, RESET))
-        }
-        Event::Soul(bus::events::SoulEvent::EventLogged(e)) => {
-            Some(format!("  {}[verbose] Soul: event logged (row {}){}", DIM, e.row_id, RESET))
-        }
-        Event::Platform(bus::events::PlatformEvent::WindowChanged(w)) => {
-            Some(format!("  {}[verbose] Window: {}{}", DIM, w.app_name, RESET))
-        }
-        Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => {
-            Some(format!("  {}[verbose] Inference: model loaded — {}{}", DIM, name, RESET))
-        }
+        Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => Some(format!(
+            "  {}[verbose] CTP: thought triggered{}",
+            DIM, RESET
+        )),
+        Event::Soul(bus::events::SoulEvent::EventLogged(e)) => Some(format!(
+            "  {}[verbose] Soul: event logged (row {}){}",
+            DIM, e.row_id, RESET
+        )),
+        Event::Platform(bus::events::PlatformEvent::WindowChanged(w)) => Some(format!(
+            "  {}[verbose] Window: {}{}",
+            DIM, w.app_name, RESET
+        )),
+        Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => Some(format!(
+            "  {}[verbose] Inference: model loaded — {}{}",
+            DIM, name, RESET
+        )),
         _ => None,
     }
 }
@@ -692,21 +796,150 @@ fn print_banner_raw() {
     rln("  \u{2551}       \u{00B7} S E N A \u{00B7}                \u{2551}");
     rln("  \u{2551}       local-first ambient AI     \u{2551}");
     rln("  \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D}");
-    rln(&format!("{}", RESET));
+    rln(RESET);
 }
 
 fn print_help_raw() {
     rln(&format!("\r\n  {}{}━━  Commands{}", BOLD, CYAN, RESET));
     rln("");
-    rln(&format!("  {}/observation{}  or /obs   What are you observing right now?", BOLD, RESET));
-    rln(&format!("  {}/memory{}       or /mem   What do you remember about me?", BOLD, RESET));
-    rln(&format!("  {}/explanation{}  or /why   Why did you say that?", BOLD, RESET));
-    rln(&format!("  {}/models{}               Select which Ollama model to use", BOLD, RESET));
-    rln(&format!("  {}/verbose{}              Toggle verbose actor-event logging", BOLD, RESET));
-    rln(&format!("  {}/help{}                 Show this message", BOLD, RESET));
-    rln(&format!("  {}/quit{}                 Exit Sena", BOLD, RESET));
+    rln(&format!(
+        "  {}/observation{}  or /obs   What are you observing right now?",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/memory{}       or /mem   What do you remember about me?",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/explanation{}  or /why   Why did you say that?",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/models{}               Select which Ollama model to use",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/verbose{}              Toggle verbose actor-event logging",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/help{}                 Show this message",
+        BOLD, RESET
+    ));
+    rln(&format!(
+        "  {}/quit{}                 Exit Sena",
+        BOLD, RESET
+    ));
     rln("");
-    rln(&format!("  {}·{}  Type any message to chat with the model.", DIM, RESET));
-    rln(&format!("  {}·{}  Tab / Down / Up to navigate / completions.", DIM, RESET));
+    rln(&format!(
+        "  {}·{}  Type any message to chat with the model.",
+        DIM, RESET
+    ));
+    rln(&format!(
+        "  {}·{}  Tab / Down / Up to navigate / completions.",
+        DIM, RESET
+    ));
     rln("");
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_state_history_tracks_commands() {
+        let mut state = EditorState::new();
+        assert!(state.history.is_empty());
+
+        state.add_to_history("hello".to_string());
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0], "hello");
+
+        state.add_to_history("world".to_string());
+        assert_eq!(state.history.len(), 2);
+        assert_eq!(state.history[1], "world");
+    }
+
+    #[test]
+    fn editor_state_history_ignores_duplicates() {
+        let mut state = EditorState::new();
+        state.add_to_history("same".to_string());
+        state.add_to_history("same".to_string());
+        assert_eq!(state.history.len(), 1);
+    }
+
+    #[test]
+    fn editor_state_history_ignores_empty() {
+        let mut state = EditorState::new();
+        state.add_to_history("".to_string());
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn editor_state_history_prev_navigates_backward() {
+        let mut state = EditorState::new();
+        state.add_to_history("first".to_string());
+        state.add_to_history("second".to_string());
+        state.add_to_history("third".to_string());
+
+        state.buffer = "current".to_string();
+        state.history_prev();
+        assert_eq!(state.buffer, "third");
+        assert_eq!(state.temp_buffer, "current");
+
+        state.history_prev();
+        assert_eq!(state.buffer, "second");
+
+        state.history_prev();
+        assert_eq!(state.buffer, "first");
+
+        // Should stay at first
+        state.history_prev();
+        assert_eq!(state.buffer, "first");
+    }
+
+    #[test]
+    fn editor_state_history_next_navigates_forward() {
+        let mut state = EditorState::new();
+        state.add_to_history("first".to_string());
+        state.add_to_history("second".to_string());
+
+        state.buffer = "current".to_string();
+        state.history_prev(); // -> "second"
+        state.history_prev(); // -> "first"
+
+        state.history_next(); // -> "second"
+        assert_eq!(state.buffer, "second");
+
+        state.history_next(); // -> "current" (temp buffer)
+        assert_eq!(state.buffer, "current");
+    }
+
+    #[test]
+    fn editor_state_history_empty_returns_early() {
+        let mut state = EditorState::new();
+        state.buffer = "test".to_string();
+        state.history_prev();
+        assert_eq!(state.buffer, "test"); // unchanged
+    }
+
+    #[test]
+    fn format_chat_response_handles_multiline() {
+        let text = "line one\nline two\nline three";
+        let result = format_chat_response(text);
+        assert!(result.contains("line one"));
+        assert!(result.contains("line two"));
+        assert!(result.contains("line three"));
+        assert!(result.contains("━━  Response"));
+    }
+
+    #[test]
+    fn format_chat_response_preserves_empty_lines() {
+        let text = "first\n\nlast";
+        let result = format_chat_response(text);
+        assert!(result.contains("first"));
+        assert!(result.contains("last"));
+    }
 }
