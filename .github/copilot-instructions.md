@@ -1,0 +1,390 @@
+# Sena — GitHub Copilot Agent Instructions
+# .github/copilot-instructions.md
+#
+# These instructions govern ALL Copilot-assisted code generation in this repository.
+# They are project-specific, non-negotiable, and take precedence over Copilot defaults.
+# Read the full file before generating any code.
+
+---
+
+## 0. Before You Write Anything
+
+Read these files first. Do not generate code without understanding them:
+
+1. `docs/PRD.md` — what Sena is and is not
+2. `docs/architecture.md` — every structural rule
+3. `docs/ROADMAP.md` — what phase we are in and what is in scope
+
+If you are asked to implement something not in the current phase, say so. Do not implement it.
+
+---
+
+## 1. Project Identity
+
+- **Language:** Rust, exclusively. No Python, no shell scripts, no JavaScript.
+- **Async runtime:** `tokio` with the `full` feature. No `async-std`. No mixing runtimes.
+- **Edition:** Rust 2021.
+- **MSRV:** Defined in `rust-toolchain.toml`. Do not use features newer than the pinned toolchain.
+
+---
+
+## 2. Workspace Rules
+
+- The root `Cargo.toml` is a virtual manifest. It has no `[package]`. Never add one.
+- All crates live under `crates/`. No exceptions.
+- Crate names have no `sena-` prefix. Names are functional: `bus`, `runtime`, `soul`.
+- The only binary crate is `crates/cli`. All other crates are `lib`.
+- `xtask/` is a standalone Cargo package, not part of the workspace members list that produces production artifacts.
+- Never add a dependency to the workspace without confirming it is the correct, maintained crate for the job.
+
+---
+
+## 3. Dependency Rules
+
+Before adding any dependency, ask:
+
+1. Is there a `std` solution that is good enough?
+2. Is this crate actively maintained (commit in last 6 months)?
+3. Does this crate have a `no_std` option if we might need it later?
+4. Does this crate compile on all three target platforms (macOS, Windows, Linux)?
+
+**Approved core dependencies (do not substitute without explicit approval):**
+
+| Purpose | Crate |
+|---|---|
+| Async runtime | `tokio` |
+| Error handling (lib crates) | `thiserror` |
+| Error handling (cli only) | `anyhow` |
+| Config parsing | `toml` + `serde` |
+| Embedded database (Soul) | `redb` |
+| Memory graph + vector store | `ech0` (git dependency) |
+| OS signals (file watch) | `notify` |
+| OS signals (clipboard) | `arboard` |
+| OS signals (keystroke timing) | `rdev` |
+| System tray (Phase 4) | `tray-icon` |
+| LLM inference | `llama-cpp-rs` |
+| Async trait | `async-trait` |
+| Serialization | `serde` with `derive` feature |
+| Encryption | `aes-gcm` |
+| Key derivation | `argon2` |
+| OS keychain | `keyring` |
+| Secure memory zeroing | `zeroize` |
+| Random nonce/salt | `rand` |
+
+**Banned:**
+
+| Crate | Reason |
+|---|---|
+| `reqwest` / any HTTP client | No network calls in Phase 1–3 |
+| `openai` / any cloud AI SDK | Violates P1 (local-first) |
+| `rusqlite` / `sqlite` / `sqlx` | Replaced by `redb` (Soul) and `ech0` (memory). SQLite is not in this stack. |
+| `lazy_static` | Use `std::sync::OnceLock` or `once_cell` |
+| `failure` | Superseded by `thiserror` |
+| Any crate that calls `process::exit` | Shutdown is the runtime's job |
+
+---
+
+## 4. Code Style Rules
+
+### 4.1 Error Handling
+
+```rust
+// CORRECT — typed error in lib crate
+#[derive(Debug, thiserror::Error)]
+pub enum BusError {
+    #[error("channel closed: {0}")]
+    ChannelClosed(String),
+}
+
+// CORRECT — ? operator propagation
+pub fn subscribe(&self, event_type: EventType) -> Result<Receiver, BusError> {
+    self.registry.get(event_type).ok_or_else(|| BusError::ChannelClosed(...))
+}
+
+// WRONG — never do this in production code
+pub fn subscribe(&self, event_type: EventType) -> Receiver {
+    self.registry.get(event_type).unwrap() // FORBIDDEN
+}
+
+// WRONG — anyhow in a lib crate
+use anyhow::Result; // FORBIDDEN outside of crates/cli
+```
+
+### 4.2 No `unwrap()` Policy
+
+- `unwrap()` is forbidden in all production code paths.
+- `expect("reason")` is permitted in tests only, with a descriptive reason string.
+- If you find yourself wanting to `unwrap()`, the function signature is wrong. Return a `Result`.
+
+### 4.3 Async Code
+
+```rust
+// CORRECT — blocking work goes to spawn_blocking
+pub async fn run_inference(&self, prompt: String) -> Result<String, InferenceError> {
+    tokio::task::spawn_blocking(move || {
+        // llama-cpp-rs call here — this blocks, and that's fine
+    }).await.map_err(|e| InferenceError::TaskPanicked(e.to_string()))?
+}
+
+// WRONG — blocking inside async without spawn_blocking
+pub async fn run_inference(&self, prompt: String) -> Result<String, InferenceError> {
+    std::thread::sleep(Duration::from_secs(10)); // NEVER
+    llama_blocking_call(prompt) // NEVER directly in async fn
+}
+```
+
+### 4.4 No Static Strings in Prompts
+
+```rust
+// WRONG — absolutely forbidden
+let prompt = "You are Sena, a helpful assistant...".to_string();
+
+// CORRECT — composed from typed segments
+let prompt = self.composer.assemble(&[
+    PromptSegment::SystemPersona(soul.persona_state()),
+    PromptSegment::MemoryContext(memory_chunks),
+    PromptSegment::CurrentContext(snapshot),
+])?;
+```
+
+`grep -r "You are" crates/` should return nothing. Ever.
+
+### 4.5 Actor Communication
+
+```rust
+// CORRECT — actor sends event on bus
+self.bus.broadcast(Event::Ctp(CTPEvent::ThoughtEventTriggered(thought))).await?;
+
+// WRONG — actor calls another actor's function directly
+self.inference_actor.run(prompt).await; // FORBIDDEN. Actors are isolated.
+```
+
+### 4.6 Types Over Primitives
+
+```rust
+// WRONG — stringly typed
+pub struct Event {
+    pub kind: String,
+    pub data: String,
+}
+
+// CORRECT — typed
+pub enum PlatformEvent {
+    WindowChanged(WindowContext),
+    ClipboardChanged(ClipboardDigest),
+    FileEvent(FileEvent),
+    KeystrokePattern(KeystrokeCadence),
+}
+```
+
+### 4.7 Privacy-Critical Types
+
+`KeystrokeCadence` must never contain a field of type `char`, `String`, `Vec<char>`, or `Vec<u8>` that could represent character content. If you add such a field, you are introducing a critical privacy violation.
+
+```rust
+// CORRECT
+pub struct KeystrokeCadence {
+    pub events_per_minute: f64,
+    pub burst_detected: bool,
+    pub idle_duration: Duration,
+}
+
+// WRONG — captures character content
+pub struct KeystrokeCadence {
+    pub keys: Vec<char>, // FORBIDDEN. Privacy violation.
+}
+```
+
+---
+
+## 5. Module and File Structure
+
+- One concept per file. Do not put `EventBus` and `Actor` in the same file.
+- `mod.rs` is forbidden. Use named modules (`bus.rs`, `actor.rs`, `events.rs`).
+- Public API surface is minimal. Default to `pub(crate)`. Promote to `pub` only when another crate needs it.
+- `events.rs` in `crates/bus` is the **single source of truth** for all event types. No event type is defined anywhere else.
+
+```
+crates/bus/src/
+├── lib.rs          ← re-exports only. No logic.
+├── bus.rs          ← EventBus struct
+├── actor.rs        ← Actor trait, ActorError
+└── events/
+    ├── mod.rs      ← EXCEPTION: mod.rs permitted here as a re-export hub
+    ├── system.rs
+    ├── platform.rs
+    ├── ctp.rs
+    ├── inference.rs
+    ├── memory.rs
+    └── soul.rs
+```
+
+---
+
+## 6. Testing Rules
+
+- Every public function has at least one test.
+- Tests live in a `#[cfg(test)]` module at the bottom of the file they test, OR in `tests/` for integration.
+- No test may write to the user's real config directory, Soul database, or home directory. Use `tempfile::tempdir()`.
+- No test may make a network call.
+- No test may depend on a real GGUF model file. Inference tests use a fixture minimal model or a mock.
+- Test names describe behavior, not implementation: `test_bus_delivers_event_to_subscriber`, not `test_bus_1`.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn bus_delivers_broadcast_to_all_subscribers() {
+        // arrange
+        let bus = EventBus::new();
+        let mut rx1 = bus.subscribe_broadcast();
+        let mut rx2 = bus.subscribe_broadcast();
+
+        // act
+        bus.broadcast(Event::System(SystemEvent::BootComplete)).await.unwrap();
+
+        // assert
+        assert!(rx1.recv().await.is_ok());
+        assert!(rx2.recv().await.is_ok());
+    }
+}
+```
+
+---
+
+## 7. Platform-Specific Code
+
+- All platform-specific code lives in `crates/platform`. Nowhere else.
+- Platform guards use `#[cfg(target_os = "macos")]`, `#[cfg(target_os = "windows")]`, `#[cfg(target_os = "linux")]`.
+- Every platform branch must be covered. No `#[cfg(not(target_os = "windows"))]` that silently covers macOS and Linux as a group.
+- If a platform implementation is not yet done, it must be a stub that returns an appropriate error — never a silent no-op.
+
+```rust
+// CORRECT — explicit stub
+#[cfg(target_os = "linux")]
+pub fn active_window(&self) -> Option<WindowContext> {
+    // TODO M1.5: implement via x11rb
+    None
+}
+
+// WRONG — silent no-op that looks like it might work
+#[cfg(not(target_os = "windows"))]
+pub fn active_window(&self) -> Option<WindowContext> {
+    None
+}
+```
+
+---
+
+## 8. Dependency Direction Enforcement
+
+If you are in crate X and want to import from crate Y, check the dependency graph in `docs/architecture.md §2` first.
+
+**Quick reference — forbidden imports:**
+
+| In crate | May NOT import |
+|---|---|
+| `bus` | Any other Sena crate |
+| `soul` | `ctp`, `inference`, `memory`, `prompt`, `platform` |
+| `platform` | `ctp`, `inference`, `memory`, `prompt`, `soul` |
+| `cli` | Direct business logic of any kind |
+| Any crate | `anyhow` (except `cli`) |
+
+If the architecture graph does not have an arrow for the import you want, the architecture must be revised — not violated. Raise it before writing the code.
+
+---
+
+## 9. SoulBox-Specific Rules
+
+- Never write SQL directly in a file outside of `crates/soul/`.
+- Never access Soul's SQLite connection from outside `crates/soul/`.
+- All writes to Soul go through Soul's mpsc write channel.
+- All reads from Soul come back as typed events on the bus (`SoulSummary`, `SoulEventLogged`).
+- Schema changes require a new numbered migration file in `crates/soul/src/schema/migrations/`. No in-place schema modification.
+
+---
+
+## 10. What to Do When You Are Unsure
+
+1. Read `docs/architecture.md` again, specifically the relevant section.
+2. If still unsure, implement the minimal thing that satisfies the current milestone and leave a `// TODO: <question>` comment with a specific question.
+3. Do NOT make an assumption that results in a cross-crate dependency violation, a privacy type violation, or a static prompt string. These are the three categories of mistake that cause the most damage.
+4. Surface the ambiguity in the PR description.
+
+---
+
+## 11. Commit and PR Rules
+
+- Commits are atomic: one logical change per commit.
+- Commit messages: `<crate>: <imperative verb> <what>` — e.g. `bus: add broadcast subscription API`
+- PRs must reference the milestone they are closing: `Closes M1.3`
+- PRs must pass: `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --check`
+- PRs do not contain code for future phases. Scope is the current milestone only.
+
+### 11.1 Persistence and Milestone Commit Enforcement
+
+- Agent behavior is persistent by default: do not stop at partial implementation.
+- Every completed milestone must be committed before moving to the next milestone.
+- If a milestone spans multiple logical units, commit each unit as it becomes clean and verified.
+- Do not leave completed milestone work only in the working tree.
+- Before reporting milestone completion, push all milestone commits to the configured remote.
+- If push fails (auth/network/protection), report the exact failure and stop claiming completion until resolved.
+
+---
+
+## 12. ech0 Integration Rules
+
+ech0 is the memory system. The `memory` crate is an adapter over it. These rules are absolute.
+
+- `ech0::Store` is owned exclusively by the memory actor. No other code holds a reference.
+- `Embedder` and `Extractor` traits are implemented in `crates/memory` only. Not in `crates/inference`.
+- The `Extractor` and `Embedder` implementations call `inference` via directed mpsc channel — they do not import llama-cpp-rs directly.
+- `store.ingest_text()` is never called with raw clipboard text or any keystroke data.
+- `ConflictResolution::Overwrite` is never called without a preceding Soul log write. This is non-negotiable.
+- Working memory (`Vec<MemoryChunk>`) is never passed to `store.ingest_text()`. It is ephemeral and in-RAM only.
+- ech0's `_test-helpers` feature is used in tests. Real embedding calls are never made in unit tests.
+
+```rust
+// CORRECT — memory actor owns the store
+struct MemoryActor {
+    store: Store<SenaEmbedder, SenaExtractor>,
+    // ...
+}
+
+// WRONG — store leaked outside memory actor
+pub fn get_store() -> &'static Store<...> { ... } // FORBIDDEN
+```
+
+---
+
+## 13. Encryption Rules
+
+All sensitive persistent state is encrypted. These rules have zero tolerance.
+
+- Soul redb, ech0 graph redb, and ech0 vector index are all encrypted. No exceptions.
+- Encryption is initialized at boot step 2 (before Soul init at step 3). Any code that opens a store before encryption is initialized is a critical bug.
+- Master key and DEK are never written to disk in any form.
+- Master key and DEK are never passed to a log macro.
+- All key types implement `ZeroizeOnDrop`. No key type uses `#[derive(Debug)]` — they have a custom impl that redacts.
+- Nonces are generated fresh per encryption call using `rand`. Never hardcoded, never sequential.
+- Passphrase (when used) is `Zeroize`d immediately after Argon2 derivation.
+
+```rust
+// CORRECT — key type that cannot leak
+#[derive(ZeroizeOnDrop)]
+struct MasterKey([u8; 32]);
+
+impl fmt::Debug for MasterKey {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MasterKey([REDACTED])")
+    }
+}
+
+// WRONG — key that can appear in logs
+#[derive(Debug, Clone)]  // FORBIDDEN on key types
+struct MasterKey(Vec<u8>);
+```
+

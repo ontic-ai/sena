@@ -186,46 +186,46 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 ### Milestones
 
 #### M3.1 — Semantic Memory and Vector Index
-- [ ] Vector index via `usearch` (or FFI equivalent)
-- [ ] Embedding generation for memory chunks (local, via loaded model)
-- [ ] Semantic memory write path: distilled facts/patterns from episodic
-- [ ] Schema for semantic store: chunk, embedding, routing key, timestamp
+- [x] Vector index via `usearch` (or FFI equivalent)
+- [x] Embedding generation for memory chunks (local, via loaded model)
+- [x] Semantic memory write path: distilled facts/patterns from episodic
+- [x] Schema for semantic store: chunk, embedding, routing key, timestamp
 
 #### M3.2 — Dual-Routing Retrieval
-- [ ] Level 1: embed `ContextSnapshot` → cosine similarity vs. routing keys → top-K clusters
-- [ ] Level 2: fine-screen within clusters → highest-signal chunks within token budget
-- [ ] `MemoryQueryRequest` triggers full dual-routing pipeline
-- [ ] Integration test: retrieval returns relevant chunks given realistic context
+- [x] Level 1: embed `ContextSnapshot` → cosine similarity vs. routing keys → top-K clusters
+- [x] Level 2: fine-screen within clusters → highest-signal chunks within token budget
+- [x] `MemoryQueryRequest` triggers full dual-routing pipeline
+- [x] Integration test: retrieval returns relevant chunks given realistic context
 
 #### M3.3 — Memory Consolidation Background Job
-- [ ] Low-priority background task: episodic → semantic promotion
-- [ ] Deduplication of redundant episodic entries
-- [ ] Compression of older sessions
-- [ ] Runs during idle periods (configurable idle threshold)
-- [ ] Never blocks CTP or inference
+- [x] Low-priority background task: episodic → semantic promotion
+- [x] Deduplication of redundant episodic entries
+- [x] Compression of older sessions
+- [x] Runs during idle periods (configurable idle threshold)
+- [x] Never blocks CTP or inference
 
 #### M3.4 — CTP Intelligence
-- [ ] Trigger gate upgraded: context-diff scoring (not just time-based)
-- [ ] Triggers on: significant task switch, detected frustration/repetition pattern, anomalous behavior
-- [ ] `InferredTask` populated from observable signals
-- [ ] Trigger sensitivity is configurable
+- [x] Trigger gate upgraded: context-diff scoring (not just time-based)
+- [x] Triggers on: significant task switch, detected frustration/repetition pattern, anomalous behavior
+- [x] `InferredTask` populated from observable signals
+- [x] Trigger sensitivity is configurable
 
 #### M3.5 — Soul Identity Signals
-- [ ] Soul accumulates: work patterns, tool preferences, temporal habits, interest clusters
-- [ ] Identity signals extracted from inference exchanges and episodic memory
-- [ ] `SoulSummary` reflects evolved identity state
-- [ ] Prompt composer uses `SoulContext` segment from soul summary
+- [x] Soul accumulates: work patterns, tool preferences, temporal habits, interest clusters
+- [x] Identity signals extracted from inference exchanges and episodic memory
+- [x] `SoulSummary` reflects evolved identity state
+- [x] Prompt composer uses `SoulContext` segment from soul summary
 
 #### M3.6 — Memory Interleave (Multi-Round Reasoning)
-- [ ] Inference actor supports multi-round: partial response → re-query memory → continue
-- [ ] Controlled by prompt composer: `ReflectionMode::Iterative`
-- [ ] Maximum rounds configurable. Hard cap enforced.
+- [x] Inference actor supports multi-round: partial response → re-query memory → continue
+- [x] Controlled by prompt composer: `ReflectionMode::Iterative`
+- [x] Maximum rounds configurable. Hard cap enforced.
 
 **Exit gate — Phase 3 complete when:**
-- [ ] All milestones M3.1–M3.6 checked off
-- [ ] Dual-routing retrieval demonstrably outperforms naive recency-based retrieval in benchmarks
-- [ ] Soul state is visibly different between a new install and a 2-week-old install
-- [ ] All previous exit gate conditions still hold
+- [x] All milestones M3.1–M3.6 checked off
+- [x] Dual-routing retrieval demonstrably outperforms naive recency-based retrieval in benchmarks
+- [x] Soul state is visibly different between a new install and a 2-week-old install
+- [x] All previous exit gate conditions still hold
 
 ---
 
