@@ -11,3 +11,4 @@ bus = { path = "../bus" }
 platform = { path = "../platform" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }

@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod mock_backend;
 pub mod queue;
 pub mod registry;
+mod transparency_query;
 
 pub use actor::InferenceActor;
 pub use backend::{BackendType, InferenceParams, LlmBackend};

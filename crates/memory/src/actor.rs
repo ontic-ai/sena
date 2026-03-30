@@ -8,6 +8,7 @@
 //! - `MemoryEvent::QueryRequested`          → `store.search()`
 //! - `MemoryEvent::ConflictDetected`        → (broadcast, outbound only)
 //! - `MemoryEvent::QueryCompleted`          → (broadcast, outbound only)
+//! - `TransparencyQuery::UserMemory`        → transparency query handler
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -17,7 +18,8 @@ use bus::events::memory::{
     MemoryChunk, MemoryConflictDetected, MemoryConsolidationCompleted, MemoryQueryRequest,
     MemoryQueryResponse, MemoryWriteRequest, SemanticIngestComplete, SemanticIngestRequest,
 };
-use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent};
+use bus::events::transparency::TransparencyQuery;
+use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent, TransparencyEvent};
 use ech0::schema::{MemoryTier, ScoredNode};
 use ech0::{SearchOptions, Store, StoreConfig, StorePathConfig};
 use tokio::sync::{broadcast, mpsc};
@@ -25,6 +27,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::embedder::{SenaEmbedder, EMBEDDING_DIMENSIONS};
 use crate::error::MemoryError;
 use crate::extractor::SenaExtractor;
+use crate::transparency_query;
 
 const MEMORY_ACTOR_NAME: &str = "memory";
 const MEMORY_CHANNEL_CAPACITY: usize = 256;
@@ -382,6 +385,37 @@ impl Actor for MemoryActor {
                 bcast = broadcast_rx.recv() => {
                     match bcast {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
+                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(query))) => {
+                            // Handle transparency queries on broadcast
+                            match query {
+                                TransparencyQuery::UserMemory => {
+                                    let s = Arc::clone(&store);
+                                    let b = Arc::clone(&bus);
+                                    let mut bcast_rx = broadcast_rx.resubscribe();
+                                    tokio::spawn(async move {
+                                        // Generate a simple request_id based on timestamp
+                                        let request_id = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_nanos() as u64)
+                                            .unwrap_or(1);
+
+                                        if let Err(e) = transparency_query::handle_transparency_query(
+                                            s,
+                                            b,
+                                            &mut bcast_rx,
+                                            request_id,
+                                        )
+                                        .await
+                                        {
+                                            eprintln!("[memory] transparency query failed: {e}");
+                                        }
+                                    });
+                                }
+                                _ => {
+                                    // Other transparency queries handled by different actors
+                                }
+                            }
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -431,6 +465,38 @@ mod tests {
             .start(Arc::clone(&bus))
             .await
             .expect("start should succeed");
+        actor.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn memory_actor_handles_transparency_query_user_memory() {
+        use bus::events::transparency::TransparencyQuery;
+
+        let dir = tempdir().expect("tempdir");
+        let graph_path = dir.path().join("graph");
+        let vector_path = dir.path().join("vector.usearch");
+
+        let mut actor = MemoryActor::new(&graph_path, &vector_path);
+        let bus = Arc::new(EventBus::new());
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Emit a transparency query for user memory
+        let query = TransparencyQuery::UserMemory;
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            query,
+        )))
+        .await
+        .expect("broadcast sh   ould succeed");
+
+        // Give the memory actor a moment to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The transparency query handler should have emitted a response event or handled gracefully
+        // (Since there's no Soul response, it should use a default summary)
         actor.stop().await.expect("stop should succeed");
     }
 }

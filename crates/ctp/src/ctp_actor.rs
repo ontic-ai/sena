@@ -7,11 +7,13 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
-use bus::events::{CTPEvent, PlatformEvent, SystemEvent};
+use bus::events::transparency::TransparencyQuery;
+use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
 use bus::{Actor, ActorError, Event, EventBus};
 
 use crate::context_assembler::ContextAssembler;
 use crate::signal_buffer::SignalBuffer;
+use crate::transparency_query::handle_transparency_query;
 use crate::trigger_gate::TriggerGate;
 
 /// CTP Actor — orchestrates context assembly and thought triggering.
@@ -94,6 +96,12 @@ impl Actor for CTPActor {
                                 Event::Platform(platform_event) => {
                                     self.handle_platform_event(platform_event);
                                 }
+                                // Handle transparency queries
+                                Event::Transparency(TransparencyEvent::QueryRequested(query)) => {
+                                    if let Err(e) = self.handle_transparency_query_event(query, &bus).await {
+                                        eprintln!("CTP actor failed to handle transparency query: {}", e);
+                                    }
+                                }
                                 // Handle shutdown signal
                                 Event::System(SystemEvent::ShutdownSignal) => {
                                     break;
@@ -167,11 +175,29 @@ impl CTPActor {
             }
         }
     }
+
+    /// Handle a transparency query request and broadcast the response.
+    async fn handle_transparency_query_event(
+        &self,
+        query: TransparencyQuery,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), String> {
+        let response =
+            handle_transparency_query(query, &self.buffer, &self.assembler, self.session_start)
+                .map_err(|e| format!("query handling error: {}", e))?;
+
+        bus.broadcast(Event::Transparency(
+            TransparencyEvent::ObservationResponded(response),
+        ))
+        .await
+        .map_err(|e| format!("failed to broadcast ObservationResponded: {}", e))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::transparency::TransparencyQuery;
 
     #[tokio::test]
     async fn test_ctp_actor_starts_and_stops() {
@@ -228,5 +254,63 @@ mod tests {
             Duration::from_millis(100),
         );
         assert_eq!(actor.name(), "ctp");
+    }
+
+    #[tokio::test]
+    async fn test_ctp_actor_handles_transparency_query() {
+        let mut actor = CTPActor::new(
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            Duration::from_millis(100),
+        );
+
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe_broadcast();
+
+        // Start the actor
+        actor.start(bus.clone()).await.unwrap();
+
+        // Spawn actor run in background
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        // Give actor time to start listening
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send a transparency query
+        let query = TransparencyQuery::CurrentObservation;
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            query,
+        )))
+        .await
+        .unwrap();
+
+        // Receive events until we get the response
+        let mut found_response = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_millis(500), bus_rx.recv()).await {
+                Ok(Ok(event)) => {
+                    if let Event::Transparency(TransparencyEvent::ObservationResponded(response)) =
+                        event
+                    {
+                        // Verify snapshot is present
+                        assert_eq!(response.snapshot.active_app.app_name, "Unknown");
+                        found_response = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+
+        assert!(found_response, "did not receive ObservationResponded event");
+
+        // Send shutdown signal
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .unwrap();
+
+        // Wait for actor to stop
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok());
     }
 }

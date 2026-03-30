@@ -41,6 +41,21 @@ pub struct IdentitySignalEmitted {
     pub timestamp: SystemTime,
 }
 
+/// Request for a transparency view of the Soul state for transparency queries.
+#[derive(Debug, Clone)]
+pub struct SoulReadRequest {
+    pub request_id: u64,
+}
+
+/// Response to SoulReadRequest: the transparency view of Soul state.
+/// Includes only high-level aggregates, never raw identity data.
+#[derive(Debug, Clone)]
+pub struct SoulReadCompleted {
+    /// High-level summary for transparency purposes.
+    pub summary: crate::events::transparency::SoulSummaryForTransparency,
+    pub request_id: u64,
+}
+
 /// Top-level soul event enum wrapping all Soul subsystem events.
 #[derive(Debug, Clone)]
 pub enum SoulEvent {
@@ -49,6 +64,8 @@ pub enum SoulEvent {
     SummaryRequested(SoulSummaryRequested),
     SummaryReady(SoulSummary),
     IdentitySignalEmitted(IdentitySignalEmitted),
+    ReadRequested(SoulReadRequest),
+    ReadCompleted(SoulReadCompleted),
 }
 
 #[cfg(test)]
@@ -94,8 +111,18 @@ mod tests {
                 value: "v".into(),
                 timestamp: now,
             }),
+            SoulEvent::ReadRequested(SoulReadRequest { request_id: 3 }),
+            SoulEvent::ReadCompleted(SoulReadCompleted {
+                summary: crate::events::transparency::SoulSummaryForTransparency {
+                    inference_cycle_count: 42,
+                    work_patterns: vec![],
+                    tool_preferences: vec![],
+                    interest_clusters: vec![],
+                },
+                request_id: 3,
+            }),
         ];
-        assert_eq!(events.iter().cloned().count(), 5);
+        assert_eq!(events.iter().cloned().count(), 7);
     }
 
     fn assert_send_static<T: Send + 'static>() {}
@@ -107,6 +134,8 @@ mod tests {
         assert_send_static::<SoulSummaryRequested>();
         assert_send_static::<SoulSummary>();
         assert_send_static::<IdentitySignalEmitted>();
+        assert_send_static::<SoulReadRequest>();
+        assert_send_static::<SoulReadCompleted>();
         assert_send_static::<SoulEvent>();
     }
 }

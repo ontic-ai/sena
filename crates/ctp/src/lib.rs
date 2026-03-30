@@ -15,6 +15,7 @@
 pub mod context_assembler;
 pub mod ctp_actor;
 pub mod signal_buffer;
+pub mod transparency_query;
 pub mod trigger_gate;
 
 pub use ctp_actor::CTPActor;

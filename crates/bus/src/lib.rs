@@ -8,6 +8,7 @@ pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
 pub use events::{
     CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, Priority, SoulEvent, SystemEvent,
+    TransparencyEvent,
 };
 
 #[cfg(test)]

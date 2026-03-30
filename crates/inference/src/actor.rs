@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use bus::events::inference::Priority;
-use bus::events::memory::MemoryQueryRequest;
+use bus::events::memory::{MemoryChunk, MemoryQueryRequest};
+use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent};
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use crate::backend::{BackendType, InferenceParams, LlmBackend};
 use crate::discovery;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
+use crate::transparency_query::{handle_transparency_query, InferenceState};
 
 /// Default inference queue capacity.
 const DEFAULT_QUEUE_CAPACITY: usize = 128;
@@ -40,6 +42,8 @@ pub struct InferenceActor {
     backend: Arc<Mutex<Box<dyn LlmBackend>>>,
     backend_type: BackendType,
     queue: InferenceQueue,
+    /// Captures state from the most recent successful inference cycle.
+    last_inference_state: Option<InferenceState>,
 }
 
 impl InferenceActor {
@@ -58,6 +62,7 @@ impl InferenceActor {
             backend: Arc::new(Mutex::new(backend)),
             backend_type,
             queue: InferenceQueue::new(DEFAULT_QUEUE_CAPACITY),
+            last_inference_state: None,
         }
     }
 
@@ -124,7 +129,7 @@ impl InferenceActor {
     }
 
     /// Process a single queued work item.
-    async fn process_work(&self, work: QueuedWork, bus: &Arc<EventBus>) {
+    async fn process_work(&mut self, work: QueuedWork, bus: &Arc<EventBus>) {
         if let Err(err) = self.ensure_loaded(bus).await {
             match work.kind {
                 WorkKind::Infer { response_tx, .. } => {
@@ -155,12 +160,14 @@ impl InferenceActor {
                 response_tx,
             } => {
                 let backend_clone = backend;
+                let prompt_len = prompt.len();
+                let prompt_clone = prompt.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let guard = backend_clone
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
                     guard
-                        .infer(&prompt, &InferenceParams::default())
+                        .infer(&prompt_clone, &InferenceParams::default())
                         .map_err(|e| format!("{}", e))
                 })
                 .await;
@@ -169,6 +176,15 @@ impl InferenceActor {
                     Ok(Ok(text)) => {
                         let token_count = text.split_whitespace().count();
                         let _ = response_tx.send(Ok((text.clone(), token_count)));
+
+                        // Capture inference state for transparency queries
+                        self.last_inference_state = Some(InferenceState {
+                            request_context: format!("Inference request: {} chars", prompt_len),
+                            response_text: text.clone(),
+                            working_memory_context: vec![],
+                            rounds_completed: 1,
+                        });
+
                         let _ = bus
                             .broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
                                 text,
@@ -279,7 +295,7 @@ impl InferenceActor {
         bus: &Arc<EventBus>,
         query: &str,
         request_id: u64,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<MemoryChunk>, String> {
         let mut rx = bus.subscribe_broadcast();
 
         bus.send_directed(
@@ -304,7 +320,7 @@ impl InferenceActor {
                 Ok(Ok(Event::Memory(MemoryEvent::QueryCompleted(resp))))
                     if resp.request_id == request_id =>
                 {
-                    return Ok(resp.chunks.into_iter().map(|c| c.text).collect());
+                    return Ok(resp.chunks);
                 }
                 Ok(Ok(_)) => continue,
                 Ok(Err(_)) => return Ok(Vec::new()),
@@ -314,19 +330,22 @@ impl InferenceActor {
     }
 
     async fn process_iterative_request(
-        &self,
+        &mut self,
         bus: &Arc<EventBus>,
         prompt: String,
         request_id: u64,
         max_rounds: usize,
     ) -> Result<(String, usize), String> {
         let rounds = max_rounds.clamp(1, ITERATIVE_MAX_HARD_CAP);
-        let mut composed_prompt = prompt;
+        let mut composed_prompt = prompt.clone();
         let mut final_text = String::new();
+        let mut working_memory: Vec<MemoryChunk> = Vec::new();
+        let mut actual_rounds_completed = 1;
 
         for round in 1..=rounds {
             let text = self.infer_once(composed_prompt.clone(), bus).await?;
             final_text = text.clone();
+            actual_rounds_completed = round;
 
             let _ = bus
                 .broadcast(Event::Inference(InferenceEvent::InferenceRoundCompleted {
@@ -347,15 +366,33 @@ impl InferenceActor {
                 break;
             }
 
+            // Capture working memory for transparency query
+            working_memory = memory_chunks.clone();
+
+            // Extract text from chunks for prompt composition
+            let memory_text: Vec<String> = memory_chunks.into_iter().map(|c| c.text).collect();
             composed_prompt = format!(
                 "{}\n\n{}\n\n{}",
                 composed_prompt,
                 text,
-                memory_chunks.join("\n")
+                memory_text.join("\n")
             );
         }
 
         let token_count = final_text.split_whitespace().count();
+
+        // Capture inference state for transparency queries
+        self.last_inference_state = Some(InferenceState {
+            request_context: format!(
+                "Iterative inference: {} rounds, {} chars",
+                actual_rounds_completed,
+                prompt.len()
+            ),
+            response_text: final_text.clone(),
+            working_memory_context: working_memory,
+            rounds_completed: actual_rounds_completed,
+        });
+
         Ok((final_text, token_count))
     }
 }
@@ -423,6 +460,20 @@ impl Actor for InferenceActor {
                     match event {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             return Ok(());
+                        }
+                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(
+                            TransparencyQuery::InferenceExplanation,
+                        ))) => {
+                            let state = self.last_inference_state.clone();
+                            let b = bus.clone();
+                            tokio::spawn(async move {
+                                let response = handle_transparency_query(&state).await;
+                                let _ = b
+                                    .broadcast(Event::Transparency(
+                                        TransparencyEvent::InferenceExplanationResponded(response),
+                                    ))
+                                    .await;
+                            });
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(ActorError::ChannelClosed("bus channel closed".to_string()));
@@ -808,5 +859,189 @@ mod tests {
             }
         }
         assert!(found_completed, "should emit ExtractionCompleted event");
+    }
+
+    #[tokio::test]
+    async fn inference_actor_captures_state_after_single_inference() {
+        let temp_dir = tempdir().expect("create temp dir");
+        create_mock_ollama_structure(temp_dir.path());
+
+        let mut actor = mock_actor(temp_dir.path().to_path_buf());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+        let _ = rx.recv().await; // drain ModelRegistryBuilt
+
+        // Send a simple inference request
+        bus.send_directed(
+            "inference",
+            Event::Inference(InferenceEvent::InferenceRequested {
+                prompt: "test prompt".to_string(),
+                priority: Priority::Normal,
+                request_id: 123,
+            }),
+        )
+        .await
+        .expect("send directed should succeed");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Send shutdown
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast should succeed");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok(), "actor should stop within timeout");
+
+        // Verify InferenceCompleted was broadcast
+        let mut found_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::Inference(InferenceEvent::InferenceCompleted {
+                request_id, text, ..
+            }) = event
+            {
+                assert_eq!(request_id, 123);
+                // MockBackend returns "Mock inference response"
+                assert_eq!(text, "Mock inference response");
+                found_completed = true;
+            }
+        }
+        assert!(found_completed, "should emit InferenceCompleted event");
+    }
+
+    #[tokio::test]
+    async fn inference_actor_handles_transparency_query() {
+        use bus::events::transparency::TransparencyQuery;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        create_mock_ollama_structure(temp_dir.path());
+
+        let mut actor = mock_actor(temp_dir.path().to_path_buf());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+        let _ = rx.recv().await; // drain ModelRegistryBuilt
+
+        // Send an inference request first
+        bus.send_directed(
+            "inference",
+            Event::Inference(InferenceEvent::InferenceRequested {
+                prompt: "what is rust?".to_string(),
+                priority: Priority::Normal,
+                request_id: 456,
+            }),
+        )
+        .await
+        .expect("send directed should succeed");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        // Wait for inference to complete
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Now query for transparency
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            TransparencyQuery::InferenceExplanation,
+        )))
+        .await
+        .expect("broadcast should succeed");
+
+        // Wait a bit for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send shutdown
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast should succeed");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok(), "actor should stop within timeout");
+
+        // Verify InferenceExplanationResponded was broadcast
+        let mut found_response = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::Transparency(TransparencyEvent::InferenceExplanationResponded(resp)) =
+                event
+            {
+                // Verify the response contains the inference data
+                assert!(!resp.request_context.is_empty());
+                assert_eq!(resp.response_text, "Mock inference response");
+                assert_eq!(resp.rounds_completed, 1);
+                found_response = true;
+            }
+        }
+        assert!(
+            found_response,
+            "should emit InferenceExplanationResponded event"
+        );
+    }
+
+    #[tokio::test]
+    async fn inference_actor_handles_transparency_query_with_no_state() {
+        use bus::events::transparency::TransparencyQuery;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        create_mock_ollama_structure(temp_dir.path());
+
+        let mut actor = mock_actor(temp_dir.path().to_path_buf());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+        let _ = rx.recv().await; // drain ModelRegistryBuilt
+
+        // Query for transparency WITHOUT running any inference first
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            TransparencyQuery::InferenceExplanation,
+        )))
+        .await
+        .expect("broadcast should succeed");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send shutdown
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast should succeed");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok(), "actor should stop within timeout");
+
+        // Verify InferenceExplanationResponded was broadcast with placeholder
+        let mut found_response = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::Transparency(TransparencyEvent::InferenceExplanationResponded(resp)) =
+                event
+            {
+                // Should have placeholder text since no inference ran
+                assert_eq!(resp.request_context, "No inference cycle completed yet");
+                assert_eq!(resp.response_text, "No inference cycle completed yet");
+                assert_eq!(resp.rounds_completed, 0);
+                assert!(resp.working_memory_context.is_empty());
+                found_response = true;
+            }
+        }
+        assert!(
+            found_response,
+            "should emit InferenceExplanationResponded event with placeholder"
+        );
     }
 }

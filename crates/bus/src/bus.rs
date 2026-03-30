@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::events::{CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SystemEvent};
+use crate::events::{
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SystemEvent, TransparencyEvent,
+};
 
 /// Unified event type for all bus communication.
 #[derive(Debug, Clone)]
@@ -21,6 +23,8 @@ pub enum Event {
     Memory(MemoryEvent),
     /// Soul subsystem events (event log writes and summaries).
     Soul(SoulEvent),
+    /// Transparency layer events (user queries for observation, memory, explanation).
+    Transparency(TransparencyEvent),
 }
 
 /// Bus operation errors.
