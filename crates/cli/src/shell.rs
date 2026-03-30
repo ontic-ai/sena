@@ -31,7 +31,7 @@ use ratatui::{
 };
 
 use crate::tui_state::{EditorState, Message, MessageRole, SessionStats};
-use crate::{display, query};
+use crate::{display, model_selector, query};
 use runtime::boot::Runtime;
 
 /// Reason the shell exited — drives the restart loop in main.rs.
@@ -73,11 +73,15 @@ struct Shell {
     verbose: bool,
     /// Currently loaded model name.
     current_model: Option<String>,
+    /// Model selector popup (visible when not None).
+    model_popup: Option<model_selector::ModelSelectorPopup>,
+    /// Runtime reference for config access.
+    runtime: Arc<Runtime>,
 }
 
 impl Shell {
     /// Create a new Shell instance.
-    fn new(runtime: &Runtime) -> Self {
+    fn new(runtime: Arc<Runtime>) -> Self {
         let messages = vec![
             Message::new(
                 MessageRole::System,
@@ -100,6 +104,8 @@ impl Shell {
             pending_inference_id: None,
             verbose: false,
             current_model: runtime.config.preferred_model.clone(),
+            model_popup: None,
+            runtime,
         }
     }
 
@@ -122,6 +128,11 @@ impl Shell {
 
         // Input area
         self.render_input(frame, chunks[2]);
+
+        // Model selector popup (rendered on top if visible)
+        if let Some(popup) = &self.model_popup {
+            model_selector::render_popup(popup, frame);
+        }
     }
 
     /// Render the header section.
@@ -396,11 +407,17 @@ impl Shell {
                 DispatchResult::Continue
             }
             "/models" => {
-                self.add_message(
-                    MessageRole::System,
-                    "Model selection via TUI not yet implemented — use /load <n> for now"
-                        .to_string(),
-                );
+                match model_selector::discover_popup().await {
+                    Ok(popup) => {
+                        self.model_popup = Some(popup);
+                    }
+                    Err(e) => {
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("Model discovery failed: {}", e),
+                        );
+                    }
+                }
                 DispatchResult::Continue
             }
             "/verbose" => {
@@ -556,7 +573,8 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     terminal.clear()?;
 
     // ── Initialize shell state ────────────────────────────────────────────────
-    let mut shell = Shell::new(&runtime);
+    let runtime = Arc::new(runtime);
+    let mut shell = Shell::new(runtime.clone());
 
     // ── Ctrl-C shutdown watch ─────────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -631,6 +649,57 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                 break;
                             }
 
+                            // ── Model Popup Key Handlers ──────────────────────────────
+                            // When popup is visible, intercept navigation keys
+                            (KeyCode::Up, _) if shell.model_popup.is_some() => {
+                                if let Some(popup) = &mut shell.model_popup {
+                                    popup.prev();
+                                }
+                            }
+                            (KeyCode::Down, _) if shell.model_popup.is_some() => {
+                                if let Some(popup) = &mut shell.model_popup {
+                                    popup.next();
+                                }
+                            }
+                            (KeyCode::Enter, _) if shell.model_popup.is_some() => {
+                                // Apply selection
+                                if let Some(popup) = shell.model_popup.take() {
+                                    if let Some(selected) = popup.selected() {
+                                        let model_name = selected.name.clone();
+                                        // Update config
+                                        let mut config = shell.runtime.config.clone();
+                                        config.preferred_model = Some(model_name.clone());
+                                        match runtime::save_config(&config).await {
+                                            Ok(_) => {
+                                                shell.add_message(
+                                                    MessageRole::System,
+                                                    format!("Selected model: {}", model_name),
+                                                );
+                                                shell.add_message(
+                                                    MessageRole::System,
+                                                    "Model change will take effect after restart.".to_string(),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                shell.add_message(
+                                                    MessageRole::Warning,
+                                                    format!("Failed to save config: {}", e),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            (KeyCode::Esc, _) if shell.model_popup.is_some() => {
+                                // Cancel popup
+                                shell.model_popup = None;
+                                shell.add_message(
+                                    MessageRole::System,
+                                    "Model selection cancelled.".to_string(),
+                                );
+                            }
+
+                            // ── Normal Key Handlers (when popup is NOT visible) ──────
                             // Enter — submit line
                             (KeyCode::Enter, _) => {
                                 let line = shell.editor.input.trim().to_string();
@@ -653,37 +722,37 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                             }
 
                             // Backspace
-                            (KeyCode::Backspace, _) => {
+                            (KeyCode::Backspace, _) if shell.model_popup.is_none() => {
                                 shell.editor.input.pop();
                             }
 
                             // Arrow Up — history prev
-                            (KeyCode::Up, _) => {
+                            (KeyCode::Up, _) if shell.model_popup.is_none() => {
                                 shell.editor.history_prev();
                             }
 
                             // Arrow Down — history next
-                            (KeyCode::Down, _) => {
+                            (KeyCode::Down, _) if shell.model_popup.is_none() => {
                                 shell.editor.history_next();
                             }
 
                             // Page Up — scroll up
-                            (KeyCode::PageUp, _) => {
+                            (KeyCode::PageUp, _) if shell.model_popup.is_none() => {
                                 shell.scroll_offset = shell.scroll_offset.saturating_add(10);
                             }
 
                             // Page Down — scroll down
-                            (KeyCode::PageDown, _) => {
+                            (KeyCode::PageDown, _) if shell.model_popup.is_none() => {
                                 shell.scroll_offset = shell.scroll_offset.saturating_sub(10);
                             }
 
                             // Escape — clear input
-                            (KeyCode::Esc, _) => {
+                            (KeyCode::Esc, _) if shell.model_popup.is_none() => {
                                 shell.editor.input.clear();
                             }
 
                             // Regular character
-                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) && shell.model_popup.is_none() => {
                                 shell.editor.input.push(c);
                                 // Reset Ctrl+C first press if user is typing
                                 shell.ctrl_c_first_press = None;
@@ -700,10 +769,19 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     // ── Graceful shutdown ─────────────────────────────────────────────────────
     drop(_guard); // Restore terminal
     drop(terminal); // Drop terminal before printing to stdout
+
+    // Drop shell to release Arc<Runtime> reference
+    let timeout_secs = runtime.config.shutdown_timeout_secs;
+    drop(shell);
+
     println!();
     display::info("Shutting down actors...");
-    let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
-    runtime::shutdown(runtime, timeout).await?;
+
+    // Extract runtime from Arc for shutdown (should succeed after dropping shell)
+    let runtime_owned = Arc::try_unwrap(runtime)
+        .map_err(|_| anyhow::anyhow!("runtime has remaining references at shutdown"))?;
+    let timeout = Duration::from_secs(timeout_secs);
+    runtime::shutdown(runtime_owned, timeout).await?;
     display::success("Sena stopped cleanly.");
 
     Ok(exit_reason)

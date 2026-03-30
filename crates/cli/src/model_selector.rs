@@ -15,9 +15,149 @@ use anyhow::{anyhow, Result};
 use bus::events::inference::{ModelInfo, Quantization};
 use inference::discover_models;
 use platform::dirs::ollama_models_dir;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Clear, List, ListItem},
+};
 
 use crate::display;
 use crate::display::{BOLD, CYAN, DIM, RESET};
+
+// ── TUI Popup State ──────────────────────────────────────────────────────────
+
+/// Model selector popup state for Ratatui TUI.
+pub struct ModelSelectorPopup {
+    /// List of discovered models.
+    pub models: Vec<ModelInfo>,
+    /// Currently selected index (0-based).
+    pub selected_index: usize,
+    /// Whether the popup is visible.
+    pub visible: bool,
+}
+
+impl ModelSelectorPopup {
+    /// Create a new model selector popup.
+    pub fn new(models: Vec<ModelInfo>) -> Self {
+        Self {
+            models,
+            selected_index: 0,
+            visible: true,
+        }
+    }
+
+    /// Move selection down (arrow down).
+    pub fn next(&mut self) {
+        if !self.models.is_empty() {
+            self.selected_index = (self.selected_index + 1) % self.models.len();
+        }
+    }
+
+    /// Move selection up (arrow up).
+    pub fn prev(&mut self) {
+        if !self.models.is_empty() {
+            if self.selected_index == 0 {
+                self.selected_index = self.models.len() - 1;
+            } else {
+                self.selected_index -= 1;
+            }
+        }
+    }
+
+    /// Get the currently selected model.
+    pub fn selected(&self) -> Option<&ModelInfo> {
+        self.models.get(self.selected_index)
+    }
+}
+
+/// Render the model selector popup over the TUI.
+pub fn render_popup(popup: &ModelSelectorPopup, frame: &mut ratatui::Frame) {
+    if !popup.visible {
+        return;
+    }
+
+    // Center a popup box that is 70% wide and 60% tall
+    let area = centered_rect(70, 60, frame.area());
+
+    // Clear the area
+    frame.render_widget(Clear, area);
+
+    // Build the list items
+    let items: Vec<ListItem> = popup
+        .models
+        .iter()
+        .enumerate()
+        .map(|(i, model)| {
+            let size = format_size(model.size_bytes);
+            let quant = format_quantization(&model.quantization);
+            let display = format!("{:<30}  {:>7}  {:<8}", model.name, size, quant);
+
+            let style = if i == popup.selected_index {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            ListItem::new(display).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("  Select Model (↑↓ navigate, Enter select, Esc cancel)  "),
+    );
+
+    frame.render_widget(list, area);
+}
+
+/// Helper to create a centered rect using percentage of the available rect.
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+/// Discover models and return a popup for TUI display.
+///
+/// # Errors
+/// - Ollama directory not found
+/// - No models discovered
+pub async fn discover_popup() -> Result<ModelSelectorPopup> {
+    let models_dir = ollama_models_dir()
+        .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
+
+    let registry = discover_models(&models_dir).map_err(|e| {
+        anyhow!(
+            "Model discovery failed: {}. Run 'ollama pull <model>' first.",
+            e
+        )
+    })?;
+
+    let models = registry.models().to_vec();
+    if models.is_empty() {
+        return Err(anyhow!("No models found"));
+    }
+
+    Ok(ModelSelectorPopup::new(models))
+}
 
 // ── Shell-facing API ─────────────────────────────────────────────────────────
 
