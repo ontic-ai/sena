@@ -2,6 +2,7 @@
 
 pub mod actor;
 pub mod backend;
+mod chat_template;
 pub mod discovery;
 pub mod error;
 pub mod llama_backend;

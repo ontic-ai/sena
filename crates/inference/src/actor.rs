@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::backend::{BackendType, InferenceParams, LlmBackend};
+use crate::chat_template::ChatTemplate;
 use crate::discovery;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
@@ -38,6 +39,8 @@ pub struct InferenceActor {
     models_dir: PathBuf,
     /// Preferred model name from config; overrides auto-selected largest model.
     preferred_model: Option<String>,
+    /// Name of the currently loaded model (set when model is loaded).
+    current_model_name: Option<String>,
     bus: Option<Arc<EventBus>>,
     bus_rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
@@ -49,16 +52,19 @@ pub struct InferenceActor {
 }
 
 impl InferenceActor {
-    /// Create a new inference actor with the given backend, backend type, and models directory.
-    pub fn new(
-        models_dir: PathBuf,
-        backend: Box<dyn LlmBackend>,
-        backend_type: BackendType,
-    ) -> Self {
+    /// Create a new inference actor with auto-detected backend and models directory.
+    ///
+    /// The backend is automatically selected based on platform and available hardware:
+    /// - macOS → Metal
+    /// - Windows/Linux with NVIDIA GPU → CUDA
+    /// - Otherwise → CPU
+    pub fn new(models_dir: PathBuf, backend: Box<dyn LlmBackend>) -> Self {
+        let backend_type = BackendType::auto_detect();
         Self {
             registry: None,
             models_dir,
             preferred_model: None,
+            current_model_name: None,
             bus: None,
             bus_rx: None,
             directed_rx: None,
@@ -84,7 +90,7 @@ impl InferenceActor {
     }
 
     /// Ensure the model is loaded. On first call, loads lazily via spawn_blocking.
-    async fn ensure_loaded(&self, bus: &Arc<EventBus>) -> Result<(), String> {
+    async fn ensure_loaded(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
         {
             let guard = self
                 .backend
@@ -128,6 +134,9 @@ impl InferenceActor {
 
         match load_result {
             Ok(()) => {
+                // Set current model name for chat template detection
+                self.current_model_name = Some(model_name.clone());
+
                 let _ = bus
                     .broadcast(Event::Inference(InferenceEvent::ModelLoaded {
                         name: model_name,
@@ -171,15 +180,22 @@ impl InferenceActor {
                 prompt,
                 response_tx,
             } => {
+                // Detect chat template and wrap prompt
+                let template = self
+                    .current_model_name
+                    .as_ref()
+                    .map(|name| ChatTemplate::detect_from_model_name(name))
+                    .unwrap_or(ChatTemplate::Raw);
+                let wrapped_prompt = template.wrap(&prompt);
+
                 let backend_clone = backend;
                 let prompt_len = prompt.len();
-                let prompt_clone = prompt.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let guard = backend_clone
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
                     guard
-                        .infer(&prompt_clone, &InferenceParams::default())
+                        .infer(&wrapped_prompt, &InferenceParams::default())
                         .map_err(|e| format!("{}", e))
                 })
                 .await;
@@ -285,8 +301,16 @@ impl InferenceActor {
         }
     }
 
-    async fn infer_once(&self, prompt: String, bus: &Arc<EventBus>) -> Result<String, String> {
+    async fn infer_once(&mut self, prompt: String, bus: &Arc<EventBus>) -> Result<String, String> {
         self.ensure_loaded(bus).await?;
+
+        // Detect chat template and wrap prompt
+        let template = self
+            .current_model_name
+            .as_ref()
+            .map(|name| ChatTemplate::detect_from_model_name(name))
+            .unwrap_or(ChatTemplate::Raw);
+        let wrapped_prompt = template.wrap(&prompt);
 
         let backend_clone = self.backend.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -294,7 +318,7 @@ impl InferenceActor {
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
             guard
-                .infer(&prompt, &InferenceParams::default())
+                .infer(&wrapped_prompt, &InferenceParams::default())
                 .map_err(|e| format!("{}", e))
         })
         .await
@@ -626,7 +650,7 @@ mod tests {
     }
 
     fn mock_actor(models_dir: PathBuf) -> InferenceActor {
-        InferenceActor::new(models_dir, mock_backend(), BackendType::Cpu)
+        InferenceActor::new(models_dir, mock_backend())
     }
 
     #[test]
