@@ -29,6 +29,7 @@ use crate::display::{BOLD, CYAN, DIM, RESET};
 /// # Errors
 /// - Ollama directory not found
 /// - No models discovered
+#[allow(dead_code)]
 pub async fn discover_and_print_menu(runtime: &runtime::boot::Runtime) -> Result<Vec<ModelInfo>> {
     let models_dir = ollama_models_dir()
         .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
@@ -58,6 +59,7 @@ pub async fn discover_and_print_menu(runtime: &runtime::boot::Runtime) -> Result
 /// # Errors
 /// - Selection out of range or not found
 /// - Config save failure
+#[allow(dead_code)]
 pub async fn apply_selection(
     input: &str,
     models: &[ModelInfo],
@@ -96,7 +98,11 @@ pub async fn run() -> Result<()> {
     let current = runtime::config::load_or_create_config().await?;
     let default_name = registry.default_model().map(str::to_owned);
 
-    print_menu(models, current.preferred_model.as_deref(), default_name.as_deref());
+    print_menu(
+        models,
+        current.preferred_model.as_deref(),
+        default_name.as_deref(),
+    );
 
     display::prompt_inline("Enter number or model name (Enter to keep current): ");
 
@@ -150,7 +156,9 @@ fn print_menu(models: &[ModelInfo], current: Option<&str>, default_name: Option<
         Some(name) => display::info(&format!("Currently selected: {name}")),
         None => {
             let auto = default_name.unwrap_or("none");
-            display::info(&format!("Currently selected: {auto} {DIM}(auto — largest){RESET}"));
+            display::info(&format!(
+                "Currently selected: {auto} {DIM}(auto — largest){RESET}"
+            ));
         }
     }
     println!();

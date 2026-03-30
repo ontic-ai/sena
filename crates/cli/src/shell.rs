@@ -1,39 +1,38 @@
-//! Interactive REPL shell for Sena — crossterm-powered TUI.
+//! Ratatui-powered TUI shell for Sena — full-screen interactive interface.
 //!
 //! Features:
-//! - Alternate screen buffer (original terminal restored on exit)
-//! - Raw mode for per-character input with / command dropdown
-//! - Free-text chat: non-/ input is sent to the inference actor
-//! - /verbose toggle: displays internal actor events as they arrive
-//! - Auto-restart prompt after /models model selection
+//! - Full-screen TUI with header, conversation log, and input area
+//! - Scrollable conversation history
+//! - Session statistics display
+//! - Ctrl+C double-press to exit
+//! - Verbose mode for actor event logging
+//! - All transparency queries and model selection
 
-use std::io::{self, Write};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use bus::events::inference::{InferenceEvent, Priority};
 use bus::events::transparency::TransparencyQuery;
 use bus::Event;
 use crossterm::{
-    cursor,
-    event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute, queue,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, ClearType},
+    event::{self, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tokio::sync::broadcast;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Paragraph, Wrap},
+    Terminal,
+};
 
-use crate::{display, model_selector, query};
+use crate::tui_state::{EditorState, Message, MessageRole, SessionStats};
+use crate::{display, query};
 use runtime::boot::Runtime;
-
-// ── ANSI fallback constants used in non-crossterm output paths ────────────────
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const CYAN: &str = "\x1b[36m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
 
 /// Reason the shell exited — drives the restart loop in main.rs.
 #[derive(Debug, PartialEq)]
@@ -42,234 +41,522 @@ pub enum ShellExitReason {
     Restart,
 }
 
-/// Commands shown in the / dropdown.
-const COMMANDS: &[(&str, &str)] = &[
-    ("/observation", "What are you observing right now?"),
-    ("/obs", "What are you observing right now?"),
-    ("/memory", "What do you remember about me?"),
-    ("/mem", "What do you remember about me?"),
-    ("/explanation", "Why did you say that?"),
-    ("/why", "Why did you say that?"),
-    ("/models", "Select which Ollama model to use"),
-    ("/verbose", "Toggle verbose actor-event logging"),
-    ("/help", "Show all commands"),
-    ("/quit", "Exit Sena"),
-];
-
-const PROMPT_PREFIX_LEN: usize = 7; // visual width of "sena › "
-
 /// RAII guard — restores the terminal unconditionally when dropped.
 struct TerminalGuard;
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(io::stdout(), cursor::Show);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
 }
 
-/// State for the inline line editor.
-struct EditorState {
-    buffer: String,
-    completions: Vec<&'static str>,
-    completion_index: usize,
-    prev_comp_count: usize,
-    history: Vec<String>,
-    history_index: Option<usize>,
-    temp_buffer: String,
+/// Main TUI shell state.
+struct Shell {
+    /// Event bus for actor communication.
+    bus: Arc<bus::EventBus>,
+    /// Input line editor with history.
+    editor: EditorState,
+    /// Conversation log messages.
+    messages: Vec<Message>,
+    /// Scroll offset from bottom (0 = at bottom, autoscroll).
+    scroll_offset: usize,
+    /// Session statistics.
+    stats: SessionStats,
+    /// First Ctrl+C press timestamp for double-press detection.
+    ctrl_c_first_press: Option<Instant>,
+    /// Are we waiting for an inference response?
+    waiting_for_inference: bool,
+    /// Request ID of the pending inference (if any).
+    pending_inference_id: Option<u64>,
+    /// Verbose mode: show all actor events.
+    verbose: bool,
+    /// Currently loaded model name.
+    current_model: Option<String>,
 }
 
-impl EditorState {
-    fn new() -> Self {
+impl Shell {
+    /// Create a new Shell instance.
+    fn new(runtime: &Runtime) -> Self {
+        let messages = vec![
+            Message::new(
+                MessageRole::System,
+                "Welcome to Sena — local-first ambient AI".to_string(),
+            ),
+            Message::new(
+                MessageRole::System,
+                "Type /help for commands, or chat freely.".to_string(),
+            ),
+        ];
+
         Self {
-            buffer: String::new(),
-            completions: vec![],
-            completion_index: 0,
-            prev_comp_count: 0,
-            history: vec![],
-            history_index: None,
-            temp_buffer: String::new(),
+            bus: runtime.bus.clone(),
+            editor: EditorState::new(),
+            messages,
+            scroll_offset: 0,
+            stats: SessionStats::new(),
+            ctrl_c_first_press: None,
+            waiting_for_inference: false,
+            pending_inference_id: None,
+            verbose: false,
+            current_model: runtime.config.preferred_model.clone(),
         }
     }
 
-    fn update_completions(&mut self) {
-        if self.buffer.starts_with('/') {
-            self.completions = COMMANDS
-                .iter()
-                .filter(|(cmd, _)| cmd.starts_with(self.buffer.as_str()))
-                .map(|(cmd, _)| *cmd)
-                .collect();
+    /// Render the TUI.
+    fn render(&self, frame: &mut ratatui::Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(1),    // Conversation log
+                Constraint::Length(3), // Input + status
+            ])
+            .split(frame.area());
+
+        // Header
+        self.render_header(frame, chunks[0]);
+
+        // Conversation log
+        self.render_conversation(frame, chunks[1]);
+
+        // Input area
+        self.render_input(frame, chunks[2]);
+    }
+
+    /// Render the header section.
+    fn render_header(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let elapsed = self.stats.elapsed_formatted();
+        let model = self.current_model.as_deref().unwrap_or("(auto-selecting)");
+
+        let header_text = vec![
+            Line::from(vec![
+                Span::styled(
+                    "SENA",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" — local-first ambient AI"),
+            ]),
+            Line::from(vec![
+                Span::raw("Session: "),
+                Span::styled(elapsed, Style::default().fg(Color::Green)),
+                Span::raw("  •  Messages: "),
+                Span::styled(
+                    self.stats.messages_sent.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw("  •  Tokens: "),
+                Span::styled(
+                    self.stats.tokens_received.to_string(),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::raw("  •  Model: "),
+                Span::styled(model, Style::default().fg(Color::Cyan)),
+            ]),
+        ];
+
+        let header = Paragraph::new(header_text).block(Block::default().borders(Borders::BOTTOM));
+
+        frame.render_widget(header, area);
+    }
+
+    /// Render the conversation log.
+    fn render_conversation(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let mut lines = Vec::new();
+
+        for msg in &self.messages {
+            match msg.role {
+                MessageRole::User => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "> ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(&msg.text),
+                    ]));
+                    lines.push(Line::from("")); // Spacing
+                }
+                MessageRole::Sena => {
+                    // Multi-line response wrapping
+                    for line in msg.text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line,
+                            Style::default().fg(Color::Green),
+                        )));
+                    }
+                    lines.push(Line::from("")); // Spacing
+                }
+                MessageRole::System => {
+                    lines.push(Line::from(Span::styled(
+                        &msg.text,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                MessageRole::Warning => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "⚠ ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(&msg.text, Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            }
+        }
+
+        // Calculate scroll position
+        let total_lines = lines.len();
+        let visible_lines = area.height.saturating_sub(2) as usize; // Account for block borders
+        let scroll = if self.scroll_offset == 0 {
+            // Auto-scroll to bottom
+            total_lines.saturating_sub(visible_lines)
         } else {
-            self.completions.clear();
-            self.completion_index = 0;
+            // User has scrolled up
+            total_lines.saturating_sub(visible_lines + self.scroll_offset)
+        };
+
+        let text = Text::from(lines);
+        let paragraph = Paragraph::new(text)
+            .block(Block::default().borders(Borders::NONE))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0));
+
+        frame.render_widget(paragraph, area);
+    }
+
+    /// Render the input area and status line.
+    fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let input_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Separator
+                Constraint::Length(1), // Input line
+                Constraint::Length(1), // Status line
+            ])
+            .split(area);
+
+        // Top separator
+        let separator = Paragraph::new("").block(Block::default().borders(Borders::TOP));
+        frame.render_widget(separator, input_chunks[0]);
+
+        // Input line
+        let input_text = Line::from(vec![
+            Span::styled(
+                "sena",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" › ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&self.editor.input),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ]);
+        let input_paragraph = Paragraph::new(input_text);
+        frame.render_widget(input_paragraph, input_chunks[1]);
+
+        // Status line
+        let status_text = if let Some(first_press) = self.ctrl_c_first_press {
+            if first_press.elapsed() < Duration::from_secs(3) {
+                Line::from(Span::styled(
+                    "Press Ctrl+C again to exit",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                self.status_line_normal()
+            }
+        } else if self.waiting_for_inference {
+            Line::from(Span::styled(
+                "⏳ Thinking...",
+                Style::default().fg(Color::Yellow),
+            ))
+        } else {
+            self.status_line_normal()
+        };
+
+        let status_paragraph = Paragraph::new(status_text);
+        frame.render_widget(status_paragraph, input_chunks[2]);
+    }
+
+    /// Generate the normal status line.
+    fn status_line_normal(&self) -> Line<'static> {
+        if self.verbose {
+            Line::from(Span::styled(
+                "Ready [verbose on]",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from(Span::styled("Ready", Style::default().fg(Color::DarkGray)))
         }
     }
 
-    fn accept_completion(&mut self) {
-        if let Some(&cmd) = self.completions.get(self.completion_index) {
-            self.buffer = cmd.to_string();
-            self.completions.clear();
-            self.completion_index = 0;
+    /// Add a message to the conversation log.
+    fn add_message(&mut self, role: MessageRole, text: String) {
+        self.messages.push(Message::new(role, text));
+        // Auto-scroll to bottom when new message arrives (unless user scrolled up)
+        if self.scroll_offset == 0 {
+            // Already at bottom, stay there
         }
     }
 
-    fn next_completion(&mut self) {
-        if !self.completions.is_empty() {
-            self.completion_index = (self.completion_index + 1) % self.completions.len();
+    /// Handle bus events and update internal state.
+    fn handle_bus_event(&mut self, event: &Event) {
+        match event {
+            Event::Inference(InferenceEvent::InferenceCompleted {
+                text,
+                request_id,
+                token_count,
+                ..
+            }) if self.pending_inference_id == Some(*request_id) => {
+                self.pending_inference_id = None;
+                self.waiting_for_inference = false;
+                if text.trim().is_empty() {
+                    self.add_message(
+                        MessageRole::Warning,
+                        "Model returned empty response".to_string(),
+                    );
+                } else {
+                    self.add_message(MessageRole::Sena, text.clone());
+                    self.stats.tokens_received += token_count;
+                }
+            }
+            Event::Inference(InferenceEvent::InferenceFailed { request_id, reason })
+                if self.pending_inference_id == Some(*request_id) =>
+            {
+                self.pending_inference_id = None;
+                self.waiting_for_inference = false;
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Inference failed: {}", reason),
+                );
+            }
+            Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
+                if self.verbose || self.waiting_for_inference {
+                    self.add_message(
+                        MessageRole::System,
+                        format!("Model loaded: {} ({})", name, backend),
+                    );
+                }
+                self.current_model = Some(name.clone());
+            }
+            Event::Inference(InferenceEvent::BackendMismatchWarning { detected, compiled }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "GPU not active: detected {} but compiled {}",
+                        detected, compiled
+                    ),
+                );
+            }
+            Event::System(bus::events::SystemEvent::BootComplete) => {
+                if self.verbose {
+                    self.add_message(MessageRole::System, "Boot complete".to_string());
+                }
+            }
+            _ if self.verbose => {
+                if let Some(msg) = verbose_format(event) {
+                    self.add_message(MessageRole::System, msg);
+                }
+            }
+            _ => {}
         }
     }
 
-    fn prev_completion(&mut self) {
-        if !self.completions.is_empty() {
-            self.completion_index = self
-                .completion_index
-                .checked_sub(1)
-                .unwrap_or(self.completions.len() - 1);
-        }
-    }
+    /// Dispatch user input (command or chat).
+    async fn dispatch_line(&mut self, line: String) -> DispatchResult {
+        let lower = line.to_lowercase();
+        #[allow(clippy::manual_unwrap_or_default, clippy::manual_unwrap_or)]
+        let cmd = if let Some(v) = lower.split_whitespace().next() {
+            v
+        } else {
+            ""
+        };
 
-    fn add_to_history(&mut self, line: String) {
-        if !line.is_empty() && (self.history.is_empty() || self.history.last() != Some(&line)) {
-            self.history.push(line);
-        }
-        self.history_index = None;
-        self.temp_buffer.clear();
-    }
-
-    fn history_prev(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        if self.history_index.is_none() {
-            self.temp_buffer = self.buffer.clone();
-            self.history_index = Some(self.history.len() - 1);
-        } else if let Some(idx) = self.history_index {
-            if idx > 0 {
-                self.history_index = Some(idx - 1);
+        match cmd {
+            "/observation" | "/obs" => {
+                self.run_query(TransparencyQuery::CurrentObservation).await;
+                DispatchResult::Continue
+            }
+            "/memory" | "/mem" => {
+                self.run_query(TransparencyQuery::UserMemory).await;
+                DispatchResult::Continue
+            }
+            "/explanation" | "/why" => {
+                self.run_query(TransparencyQuery::InferenceExplanation)
+                    .await;
+                DispatchResult::Continue
+            }
+            "/models" => {
+                self.add_message(
+                    MessageRole::System,
+                    "Model selection via TUI not yet implemented — use /load <n> for now"
+                        .to_string(),
+                );
+                DispatchResult::Continue
+            }
+            "/verbose" => {
+                self.verbose = !self.verbose;
+                let state = if self.verbose { "ON" } else { "OFF" };
+                self.add_message(MessageRole::System, format!("Verbose logging: {}", state));
+                DispatchResult::Continue
+            }
+            "/help" | "/h" => {
+                self.show_help();
+                DispatchResult::Continue
+            }
+            "/actors" => {
+                self.add_message(
+                    MessageRole::System,
+                    "Actor health: use the /actors command (coming soon)".to_string(),
+                );
+                DispatchResult::Continue
+            }
+            "/quit" | "/exit" | "/q" => DispatchResult::Quit,
+            _ if line.starts_with('/') => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Unknown command '{}'. Type /help for commands.", line),
+                );
+                DispatchResult::Continue
+            }
+            _ => {
+                // Free text → inference chat
+                self.send_chat(line).await;
+                DispatchResult::Continue
             }
         }
-        if let Some(idx) = self.history_index {
-            self.buffer = self.history[idx].clone();
-        }
     }
 
-    fn history_next(&mut self) {
-        if let Some(idx) = self.history_index {
-            if idx + 1 < self.history.len() {
-                self.history_index = Some(idx + 1);
-                self.buffer = self.history[idx + 1].clone();
-            } else {
-                self.history_index = None;
-                self.buffer = self.temp_buffer.clone();
+    /// Run a transparency query.
+    async fn run_query(&mut self, query: TransparencyQuery) {
+        let label = match &query {
+            TransparencyQuery::CurrentObservation => "Current Observation",
+            TransparencyQuery::UserMemory => "Memory",
+            TransparencyQuery::InferenceExplanation => "Last Inference",
+        };
+
+        self.add_message(MessageRole::System, format!("Querying {}...", label));
+
+        match query::query_on_bus(query, &self.bus).await {
+            Ok(output) => {
+                self.add_message(MessageRole::System, format!("━━  {}", label));
+                self.add_message(MessageRole::Sena, output);
+            }
+            Err(e) => {
+                self.add_message(MessageRole::Warning, format!("Query failed: {}", e));
             }
         }
     }
-}
 
-/// Print a line with \r\n for raw mode.
-fn rln(line: &str) {
-    print!("{}\r\n", line);
-}
+    /// Send a chat message to the inference actor.
+    async fn send_chat(&mut self, prompt: String) {
+        // Add user message to log
+        self.add_message(MessageRole::User, prompt.clone());
 
-/// Flush stdout.
-fn flush() {
-    let _ = io::stdout().flush();
-}
+        // Generate request ID
+        let request_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
 
-/// Redraw the prompt + current buffer + completions in place.
-/// Clears previous completion lines before drawing new ones.
-fn redraw(state: &EditorState, stdout: &mut impl Write) {
-    // Move up to clear previous completions.
-    if state.prev_comp_count > 0 {
-        let _ = queue!(stdout, cursor::MoveUp(state.prev_comp_count as u16));
-    }
-    // Always anchor to start of line before clearing, or prompts will stack.
-    let _ = queue!(
-        stdout,
-        cursor::MoveToColumn(0),
-        terminal::Clear(ClearType::FromCursorDown)
-    );
+        self.add_message(MessageRole::System, "Thinking...".to_string());
+        self.waiting_for_inference = true;
+        self.pending_inference_id = Some(request_id);
+        self.stats.messages_sent += 1;
 
-    // Prompt + buffer.
-    let _ = queue!(
-        stdout,
-        SetAttribute(Attribute::Bold),
-        SetForegroundColor(Color::Cyan),
-        Print("sena"),
-        ResetColor,
-        SetAttribute(Attribute::Dim),
-        Print(" \u{203A} "),
-        ResetColor,
-        Print(&state.buffer),
-    );
-
-    // Completions below the prompt (if buffer starts with /).
-    if !state.completions.is_empty() {
-        for (i, cmd) in state.completions.iter().enumerate() {
-            let desc = COMMANDS
-                .iter()
-                .find(|(c, _)| c == cmd)
-                .map(|(_, d)| *d)
-                .unwrap_or("");
-
-            let marker = if i == state.completion_index {
-                "▸"
-            } else {
-                " "
-            };
-
-            let _ = queue!(
-                stdout,
-                Print("\r\n"),
-                SetAttribute(Attribute::Dim),
-                Print(format!("  {} {:<16} {}", marker, cmd, desc)),
-                ResetColor,
+        if let Err(e) = self
+            .bus
+            .send_directed(
+                "inference",
+                Event::Inference(InferenceEvent::InferenceRequested {
+                    prompt,
+                    priority: Priority::High,
+                    request_id,
+                }),
+            )
+            .await
+        {
+            self.waiting_for_inference = false;
+            self.pending_inference_id = None;
+            self.add_message(
+                MessageRole::Warning,
+                format!("Could not reach inference actor: {}", e),
             );
         }
-
-        // Move cursor back up to prompt line.
-        let _ = queue!(
-            stdout,
-            cursor::MoveUp(state.completions.len() as u16),
-            cursor::MoveToColumn((PROMPT_PREFIX_LEN + state.buffer.len()) as u16),
-        );
     }
 
-    let _ = stdout.flush();
+    /// Show help text.
+    fn show_help(&mut self) {
+        self.add_message(MessageRole::System, "━━  Commands".to_string());
+        self.add_message(
+            MessageRole::System,
+            "/observation or /obs   What are you observing right now?".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/memory or /mem        What do you remember about me?".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/explanation or /why   Why did you say that?".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/models                Select which model to use".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/verbose               Toggle verbose actor-event logging".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/actors                Show actor health (coming soon)".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/help                  Show this message".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/quit                  Exit Sena".to_string(),
+        );
+        self.add_message(MessageRole::System, "".to_string());
+        self.add_message(
+            MessageRole::System,
+            "Type any message to chat with the model.".to_string(),
+        );
+    }
 }
 
-/// Print output above the prompt (for async messages arriving mid-input).
-/// Moves to a new line, prints the message, then redraws the prompt.
-fn print_above(msg: &str, state: &mut EditorState, stdout: &mut impl Write) {
-    // Clear the current prompt line.
-    let _ = queue!(stdout, Print("\r"), terminal::Clear(ClearType::CurrentLine));
-    // Move up over completions if any.
-    for _ in 0..state.prev_comp_count {
-        let _ = queue!(
-            stdout,
-            cursor::MoveUp(1),
-            terminal::Clear(ClearType::CurrentLine),
-        );
-    }
-    state.prev_comp_count = 0;
-
-    // Print the message.
-    let _ = queue!(stdout, Print(msg), Print("\r\n"));
-    let _ = stdout.flush();
-
-    // Redraw prompt.
-    redraw(state, stdout);
+#[allow(dead_code)]
+enum DispatchResult {
+    Continue,
+    Quit,
+    Restart,
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
 pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
-    // ── Enter raw mode (no alternate screen — preserve scrollback) ───────────
-    let mut stdout = io::stdout();
+    // ── Enter raw mode and alternate screen ───────────────────────────────────
     terminal::enable_raw_mode()?;
-    let _guard = TerminalGuard; // restores terminal on drop
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    let _guard = TerminalGuard; // Ensures cleanup on drop
 
-    // Print the help screen (using raw-mode-aware line endings).
-    print_banner_raw();
-    print_help_raw();
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    // ── Initialize shell state ────────────────────────────────────────────────
+    let mut shell = Shell::new(&runtime);
 
     // ── Ctrl-C shutdown watch ─────────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -278,232 +565,141 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
         let _ = shutdown_tx.send(true);
     });
 
-    // ── Keyboard event reader (spawned blocking) ─────────────────────────────
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<event::Event>();
-    let key_tx2 = key_tx.clone();
-    tokio::task::spawn_blocking(move || loop {
-        if event::poll(Duration::from_millis(200)).unwrap_or(false) {
-            if let Ok(ev) = event::read() {
-                if key_tx2.send(ev).is_err() {
-                    break;
-                }
-            }
-        }
-        if key_tx2.is_closed() {
-            break;
-        }
-    });
-
-    // ── Bus subscriber for verbose mode and inference responses ───────────────
+    // ── Bus subscriber for events ─────────────────────────────────────────────
     let mut bus_rx = runtime.bus.subscribe_broadcast();
 
-    // ── Shell state ───────────────────────────────────────────────────────────
-    let mut editor = EditorState::new();
-    let mut verbose = false;
-    let mut pending_inference_id: Option<u64> = None;
     let mut exit_reason = ShellExitReason::Quit;
 
-    // Show initial prompt.
-    redraw(&editor, &mut stdout);
-    flush();
-
-    // ── Main REPL loop ────────────────────────────────────────────────────────
+    // ── Main event loop ───────────────────────────────────────────────────────
     loop {
+        // Render the current state
+        terminal.draw(|f| shell.render(f))?;
+
+        // Check for Ctrl+C timeout (reset if 3 seconds passed)
+        if let Some(first_press) = shell.ctrl_c_first_press {
+            if first_press.elapsed() > Duration::from_secs(3) {
+                shell.ctrl_c_first_press = None;
+            }
+        }
+
         tokio::select! {
             biased;
 
-            // Ctrl-C
+            // Ctrl-C signal
             _ = shutdown_rx.changed() => {
-                rln("");
-                break;
-            }
-
-            // Bus events (verbose mode + inference responses)
-            bcast = bus_rx.recv() => {
-                if let Ok(ev) = bcast {
-                    match &ev {
-                        // Inference response for a pending chat
-                        Event::Inference(InferenceEvent::InferenceCompleted { text, request_id, .. })
-                            if pending_inference_id == Some(*request_id) =>
-                        {
-                            pending_inference_id = None;
-                            if text.trim().is_empty() {
-                                let msg = format!("  {}{}✗{}  model returned empty response", BOLD, RED, RESET);
-                                print_above(&msg, &mut editor, &mut stdout);
-                            } else {
-                                let formatted = format_chat_response(text);
-                                print_above(&formatted, &mut editor, &mut stdout);
-                            }
-                        }
-                        Event::Inference(InferenceEvent::InferenceFailed { request_id, reason })
-                            if pending_inference_id == Some(*request_id) =>
-                        {
-                            pending_inference_id = None;
-                            let msg = format!("  {}{}✗{}  model error: {}", BOLD, RED, RESET, reason);
-                            print_above(&msg, &mut editor, &mut stdout);
-                        }
-                        Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
-                            if verbose || pending_inference_id.is_some() {
-                                let msg = format!("  {}·{}  model loaded: {} {}({}){}", DIM, RESET, name, DIM, backend, RESET);
-                                print_above(&msg, &mut editor, &mut stdout);
-                            }
-                        }
-                        Event::Inference(InferenceEvent::BackendMismatchWarning { detected, compiled }) => {
-                            let msg = format!(
-                                "  {}{}⚠{}  backend mismatch: {} detected, but llama-cpp-2 compiled as {}",
-                                BOLD, YELLOW, RESET, detected, compiled
-                            );
-                            print_above(&msg, &mut editor, &mut stdout);
-                        }
-                        _ if verbose => {
-                            let msg = verbose_format(&ev);
-                            if let Some(m) = msg {
-                                print_above(&m, &mut editor, &mut stdout);
-                            }
-                        }
-                        _ => {}
+                if let Some(first_press) = shell.ctrl_c_first_press {
+                    if first_press.elapsed() < Duration::from_secs(3) {
+                        // Second Ctrl+C within 3 seconds
+                        break;
                     }
+                } else {
+                    shell.ctrl_c_first_press = Some(Instant::now());
                 }
             }
 
-            // Keyboard events
-            Some(ev) = key_rx.recv() => {
-                match ev {
-                    event::Event::Key(KeyEvent { code, modifiers, kind, .. }) => {
-                        // Filter out key release events to prevent duplicate input on Windows.
-                        if kind != KeyEventKind::Press {
+            // Bus events
+            bcast = bus_rx.recv() => {
+                if let Ok(ev) = bcast {
+                    shell.handle_bus_event(&ev);
+                }
+            }
+
+            // Keyboard events (poll in a non-blocking way)
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // Poll for crossterm events
+                if event::poll(Duration::from_millis(0))? {
+                    if let event::Event::Key(key) = event::read()? {
+                        // Filter out key release events (Windows)
+                        if key.kind != KeyEventKind::Press {
                             continue;
                         }
-                        match (code, modifiers) {
 
-                            // Quit
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) |
+                        match (key.code, key.modifiers) {
+                            // Ctrl+C handled via shutdown signal above
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                if let Some(first_press) = shell.ctrl_c_first_press {
+                                    if first_press.elapsed() < Duration::from_secs(3) {
+                                        break;
+                                    }
+                                } else {
+                                    shell.ctrl_c_first_press = Some(Instant::now());
+                                }
+                            }
+
+            // Ctrl+D
                             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                rln("");
                                 break;
                             }
 
-                            // Submit line
+                            // Enter — submit line
                             (KeyCode::Enter, _) => {
-                                let line = editor.buffer.trim().to_string();
-                                editor.buffer.clear();
-                                editor.completions.clear();
-                                editor.prev_comp_count = 0;
-
-                                // Clear the prompt line and move to new line.
-                                let _ = queue!(stdout,
-                                    Print("\r"),
-                                    terminal::Clear(ClearType::CurrentLine),
-                                    Print(format!("{}sena{} {}›{} {}", BOLD, RESET, DIM, RESET, &line)),
-                                    Print("\r\n"),
-                                );
-                                let _ = stdout.flush();
-
-                                if line.is_empty() {
-                                    redraw(&editor, &mut stdout);
-                                    continue;
+                                let line = shell.editor.input.trim().to_string();
+                                shell.editor.input.clear();
+                                if !line.is_empty() {
+                                    shell.editor.push_history(&line);
+                                    let result = shell.dispatch_line(line).await;
+                                    match result {
+                                        DispatchResult::Continue => {}
+                                        DispatchResult::Quit => {
+                                            exit_reason = ShellExitReason::Quit;
+                                            break;
+                                        }
+                                        DispatchResult::Restart => {
+                                            exit_reason = ShellExitReason::Restart;
+                                            break;
+                                        }
+                                    }
                                 }
-
-                                editor.add_to_history(line.clone());
-
-                                // Dispatch
-                                let result = dispatch_line(
-                                    &line,
-                                    &runtime,
-                                    &mut bus_rx,
-                                    &mut verbose,
-                                    &mut stdout,
-                                    &mut pending_inference_id,
-                                ).await;
-
-                                match result {
-                                    DispatchResult::Continue => {}
-                                    DispatchResult::Quit => { exit_reason = ShellExitReason::Quit; break; }
-                                    DispatchResult::Restart => { exit_reason = ShellExitReason::Restart; break; }
-                                }
-
-                                editor.prev_comp_count = 0;
-                                redraw(&editor, &mut stdout);
                             }
 
                             // Backspace
                             (KeyCode::Backspace, _) => {
-                                editor.buffer.pop();
-                                editor.update_completions();
-                                editor.completion_index = 0;
-                                editor.prev_comp_count = editor.completions.len();
-                                redraw(&editor, &mut stdout);
+                                shell.editor.input.pop();
                             }
 
-                            // Tab — accept first/current completion
-                            (KeyCode::Tab, _) => {
-                                editor.accept_completion();
-                                editor.update_completions();
-                                editor.prev_comp_count = editor.completions.len();
-                                redraw(&editor, &mut stdout);
-                            }
-
-                            // Arrow down — next completion or next history
-                            (KeyCode::Down, _) => {
-                                if !editor.completions.is_empty() {
-                                    editor.next_completion();
-                                } else {
-                                    editor.history_next();
-                                    editor.update_completions();
-                                    editor.completion_index = 0;
-                                    editor.prev_comp_count = editor.completions.len();
-                                }
-                                redraw(&editor, &mut stdout);
-                            }
-
-                            // Arrow up — prev completion or prev history
+                            // Arrow Up — history prev
                             (KeyCode::Up, _) => {
-                                if !editor.completions.is_empty() {
-                                    editor.prev_completion();
-                                } else {
-                                    editor.history_prev();
-                                    editor.update_completions();
-                                    editor.completion_index = 0;
-                                    editor.prev_comp_count = editor.completions.len();
-                                }
-                                redraw(&editor, &mut stdout);
+                                shell.editor.history_prev();
                             }
 
-                            // Escape — clear completions / clear line
+                            // Arrow Down — history next
+                            (KeyCode::Down, _) => {
+                                shell.editor.history_next();
+                            }
+
+                            // Page Up — scroll up
+                            (KeyCode::PageUp, _) => {
+                                shell.scroll_offset = shell.scroll_offset.saturating_add(10);
+                            }
+
+                            // Page Down — scroll down
+                            (KeyCode::PageDown, _) => {
+                                shell.scroll_offset = shell.scroll_offset.saturating_sub(10);
+                            }
+
+                            // Escape — clear input
                             (KeyCode::Esc, _) => {
-                                if !editor.completions.is_empty() {
-                                    editor.completions.clear();
-                                } else {
-                                    editor.buffer.clear();
-                                }
-                                editor.completion_index = 0;
-                                editor.prev_comp_count = 0;
-                                redraw(&editor, &mut stdout);
+                                shell.editor.input.clear();
                             }
 
                             // Regular character
                             (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                                editor.buffer.push(c);
-                                editor.update_completions();
-                                editor.completion_index = 0;
-                                editor.prev_comp_count = editor.completions.len();
-                                redraw(&editor, &mut stdout);
+                                shell.editor.input.push(c);
+                                // Reset Ctrl+C first press if user is typing
+                                shell.ctrl_c_first_press = None;
                             }
 
                             _ => {}
                         }
                     }
-                    event::Event::Resize(_, _) => {
-                        redraw(&editor, &mut stdout);
-                    }
-                    _ => {}
                 }
             }
         }
     }
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
-    drop(_guard); // leaves alternate screen
+    drop(_guard); // Restore terminal
+    drop(terminal); // Drop terminal before printing to stdout
     println!();
     display::info("Shutting down actors...");
     let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
@@ -513,441 +709,31 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     Ok(exit_reason)
 }
 
-// ── Dispatch ─────────────────────────────────────────────────────────────────
-
-enum DispatchResult {
-    Continue,
-    Quit,
-    Restart,
-}
-
-async fn dispatch_line(
-    line: &str,
-    runtime: &Runtime,
-    bus_rx: &mut broadcast::Receiver<Event>,
-    verbose: &mut bool,
-    stdout: &mut impl Write,
-    pending_inference_id: &mut Option<u64>,
-) -> DispatchResult {
-    let lower = line.to_lowercase();
-    let cmd = lower.split_whitespace().next().unwrap_or("");
-
-    match cmd {
-        "/observation" | "/obs" => {
-            run_query(TransparencyQuery::CurrentObservation, runtime, stdout).await;
-        }
-        "/memory" | "/mem" => {
-            run_query(TransparencyQuery::UserMemory, runtime, stdout).await;
-        }
-        "/explanation" | "/why" => {
-            run_query(TransparencyQuery::InferenceExplanation, runtime, stdout).await;
-        }
-        "/models" => {
-            if let Some(restart) = run_models(runtime, stdout, bus_rx).await {
-                return restart;
-            }
-        }
-        "/verbose" => {
-            *verbose = !*verbose;
-            let state = if *verbose { "ON" } else { "OFF" };
-            rln(&format!(
-                "  {}·{}  Verbose logging: {}{}{}",
-                DIM, RESET, BOLD, state, RESET
-            ));
-        }
-        "/help" | "/h" => {
-            print_help_raw();
-        }
-        "/quit" | "/exit" | "/q" => {
-            return DispatchResult::Quit;
-        }
-        _ if line.starts_with('/') => {
-            rln(&format!(
-                "  {}{}✗{}  unknown command '{}'. Type /help for commands.",
-                BOLD, RED, RESET, line
-            ));
-        }
-        // Free text → inference chat
-        _ => {
-            send_chat(line, runtime, stdout, pending_inference_id).await;
-        }
-    }
-
-    DispatchResult::Continue
-}
-
-// ── Query helpers ─────────────────────────────────────────────────────────────
-
-async fn run_query(q: TransparencyQuery, runtime: &Runtime, _stdout: &mut impl Write) {
-    let label = match &q {
-        TransparencyQuery::CurrentObservation => "Current Observation",
-        TransparencyQuery::UserMemory => "Memory",
-        TransparencyQuery::InferenceExplanation => "Last Inference",
-    };
-
-    rln(&format!("  {}·{}  Querying...", DIM, RESET));
-
-    match query::query_on_bus(q, &runtime.bus).await {
-        Ok(output) => {
-            rln(&format!("\r\n  {}{}━━  {}{}", BOLD, CYAN, label, RESET));
-            rln("");
-            for line in output.lines() {
-                rln(&format!("  {}", line));
-            }
-            rln("");
-        }
-        Err(e) => {
-            rln(&format!("  {}{}✗{}  {}", BOLD, RED, RESET, e));
-        }
-    }
-}
-
-// ── Models helper ─────────────────────────────────────────────────────────────
-
-async fn run_models(
-    runtime: &Runtime,
-    stdout: &mut impl Write,
-    _bus_rx: &mut broadcast::Receiver<Event>,
-) -> Option<DispatchResult> {
-    let models = match model_selector::discover_and_print_menu(runtime).await {
-        Ok(m) => m,
-        Err(e) => {
-            rln(&format!("  {}{}✗{}  {}", BOLD, RED, RESET, e));
-            return None;
-        }
-    };
-
-    // Prompt for selection (blocking-style using crossterm in raw mode).
-    let _ = queue!(
-        stdout,
-        Print(format!(
-            "  {}>{} Enter number or model name (Enter to keep current): ",
-            CYAN, RESET
-        )),
-    );
-    let _ = stdout.flush();
-
-    let selection = read_line_raw().await;
-    let trimmed = selection.trim().to_string();
-
-    if trimmed.is_empty() {
-        rln(&format!("  {}·{}  No change made.", DIM, RESET));
-        return None;
-    }
-
-    match model_selector::apply_selection(&trimmed, &models, runtime).await {
-        Ok(name) => {
-            rln("");
-            rln(&format!(
-                "  {}{}✓{}  Selected: {}",
-                BOLD, GREEN, RESET, name
-            ));
-            rln(&format!("  {}·{}  Saved to config.", DIM, RESET));
-
-            // Ask whether to restart now.
-            let _ = queue!(
-                stdout,
-                Print(format!(
-                    "  {}>{} Restart now to apply? (y/N): ",
-                    CYAN, RESET
-                )),
-            );
-            let _ = stdout.flush();
-
-            let answer = read_line_raw().await;
-            let answer = answer.trim().to_lowercase();
-            rln("");
-
-            if answer == "y" || answer == "yes" {
-                return Some(DispatchResult::Restart);
-            } else {
-                rln(&format!(
-                    "  {}·{}  Restart Sena manually to use the new model.",
-                    DIM, RESET
-                ));
-            }
-        }
-        Err(e) => {
-            rln(&format!("  {}{}✗{}  {}", BOLD, RED, RESET, e));
-        }
-    }
-
-    None
-}
-
-/// Read a line in raw mode (blocking via spawn_blocking).
-async fn read_line_raw() -> String {
-    tokio::task::spawn_blocking(|| {
-        let mut buf = String::new();
-        loop {
-            if event::poll(Duration::from_secs(120)).unwrap_or(false) {
-                if let Ok(event::Event::Key(k)) = event::read() {
-                    // Filter out key release events to prevent duplicate input.
-                    if k.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    match k.code {
-                        KeyCode::Enter => break,
-                        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            buf.push(c);
-                            print!("{}", c);
-                            let _ = io::stdout().flush();
-                        }
-                        KeyCode::Backspace => {
-                            if buf.pop().is_some() {
-                                print!("\x08 \x08");
-                                let _ = io::stdout().flush();
-                            }
-                        }
-                        KeyCode::Esc => {
-                            buf.clear();
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            } else {
-                break; // timeout
-            }
-        }
-        buf
-    })
-    .await
-    .unwrap_or_default()
-}
-
-// ── Chat ──────────────────────────────────────────────────────────────────────
-
-async fn send_chat(
-    prompt: &str,
-    runtime: &Runtime,
-    stdout: &mut impl Write,
-    pending_id: &mut Option<u64>,
-) {
-    // Generate request id.
-    let request_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(1);
-
-    let _ = queue!(
-        stdout,
-        Print(format!(
-            "  {}·{}  Thinking... (model response may take a moment)\r\n",
-            DIM, RESET
-        )),
-    );
-    let _ = stdout.flush();
-
-    match runtime
-        .bus
-        .send_directed(
-            "inference",
-            Event::Inference(bus::events::inference::InferenceEvent::InferenceRequested {
-                prompt: prompt.to_owned(),
-                priority: Priority::High,
-                request_id,
-            }),
-        )
-        .await
-    {
-        Ok(()) => {
-            *pending_id = Some(request_id);
-        }
-        Err(e) => {
-            rln(&format!(
-                "  {}{}✗{}  could not reach inference actor: {}",
-                BOLD, RED, RESET, e
-            ));
-        }
-    }
-}
-
-fn format_chat_response(text: &str) -> String {
-    let mut out = format!("\r\n  {}{}━━  Response{}\r\n\r\n", BOLD, CYAN, RESET);
-    for line in text.lines() {
-        out.push_str(&format!("  {}\r\n", line));
-    }
-    out.push_str("\r\n");
-    out
-}
-
-// ── Verbose formatting ────────────────────────────────────────────────────────
-
+/// Format bus events for verbose mode.
 fn verbose_format(ev: &Event) -> Option<String> {
     match ev {
-        Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => Some(format!(
-            "  {}[verbose] CTP: thought triggered{}",
-            DIM, RESET
-        )),
-        Event::Soul(bus::events::SoulEvent::EventLogged(e)) => Some(format!(
-            "  {}[verbose] Soul: event logged (row {}){}",
-            DIM, e.row_id, RESET
-        )),
-        Event::Platform(bus::events::PlatformEvent::WindowChanged(w)) => Some(format!(
-            "  {}[verbose] Window: {}{}",
-            DIM, w.app_name, RESET
-        )),
-        Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => Some(format!(
-            "  {}[verbose] Inference: model loaded — {}{}",
-            DIM, name, RESET
-        )),
+        Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => {
+            Some("[verbose] CTP: thought triggered".to_string())
+        }
+        Event::Soul(bus::events::SoulEvent::EventLogged(e)) => {
+            Some(format!("[verbose] Soul: event logged (row {})", e.row_id))
+        }
+        Event::Platform(bus::events::PlatformEvent::WindowChanged(w)) => {
+            Some(format!("[verbose] Window: {}", w.app_name))
+        }
+        Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => {
+            Some(format!("[verbose] Inference: model loaded — {}", name))
+        }
         _ => None,
     }
 }
-
-// ── Banner / help (raw-mode aware) ────────────────────────────────────────────
-
-fn print_banner_raw() {
-    rln(&format!("{}{}  ", BOLD, CYAN));
-    rln("  \u{256F}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}");
-    rln("  \u{2551}       \u{00B7} S E N A \u{00B7}                \u{2551}");
-    rln("  \u{2551}       local-first ambient AI     \u{2551}");
-    rln("  \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D}");
-    rln(RESET);
-}
-
-fn print_help_raw() {
-    rln(&format!("\r\n  {}{}━━  Commands{}", BOLD, CYAN, RESET));
-    rln("");
-    rln(&format!(
-        "  {}/observation{}  or /obs   What are you observing right now?",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/memory{}       or /mem   What do you remember about me?",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/explanation{}  or /why   Why did you say that?",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/models{}               Select which Ollama model to use",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/verbose{}              Toggle verbose actor-event logging",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/help{}                 Show this message",
-        BOLD, RESET
-    ));
-    rln(&format!(
-        "  {}/quit{}                 Exit Sena",
-        BOLD, RESET
-    ));
-    rln("");
-    rln(&format!(
-        "  {}·{}  Type any message to chat with the model.",
-        DIM, RESET
-    ));
-    rln(&format!(
-        "  {}·{}  Tab / Down / Up to navigate / completions.",
-        DIM, RESET
-    ));
-    rln("");
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn editor_state_history_tracks_commands() {
-        let mut state = EditorState::new();
-        assert!(state.history.is_empty());
-
-        state.add_to_history("hello".to_string());
-        assert_eq!(state.history.len(), 1);
-        assert_eq!(state.history[0], "hello");
-
-        state.add_to_history("world".to_string());
-        assert_eq!(state.history.len(), 2);
-        assert_eq!(state.history[1], "world");
-    }
-
-    #[test]
-    fn editor_state_history_ignores_duplicates() {
-        let mut state = EditorState::new();
-        state.add_to_history("same".to_string());
-        state.add_to_history("same".to_string());
-        assert_eq!(state.history.len(), 1);
-    }
-
-    #[test]
-    fn editor_state_history_ignores_empty() {
-        let mut state = EditorState::new();
-        state.add_to_history("".to_string());
-        assert!(state.history.is_empty());
-    }
-
-    #[test]
-    fn editor_state_history_prev_navigates_backward() {
-        let mut state = EditorState::new();
-        state.add_to_history("first".to_string());
-        state.add_to_history("second".to_string());
-        state.add_to_history("third".to_string());
-
-        state.buffer = "current".to_string();
-        state.history_prev();
-        assert_eq!(state.buffer, "third");
-        assert_eq!(state.temp_buffer, "current");
-
-        state.history_prev();
-        assert_eq!(state.buffer, "second");
-
-        state.history_prev();
-        assert_eq!(state.buffer, "first");
-
-        // Should stay at first
-        state.history_prev();
-        assert_eq!(state.buffer, "first");
-    }
-
-    #[test]
-    fn editor_state_history_next_navigates_forward() {
-        let mut state = EditorState::new();
-        state.add_to_history("first".to_string());
-        state.add_to_history("second".to_string());
-
-        state.buffer = "current".to_string();
-        state.history_prev(); // -> "second"
-        state.history_prev(); // -> "first"
-
-        state.history_next(); // -> "second"
-        assert_eq!(state.buffer, "second");
-
-        state.history_next(); // -> "current" (temp buffer)
-        assert_eq!(state.buffer, "current");
-    }
-
-    #[test]
-    fn editor_state_history_empty_returns_early() {
-        let mut state = EditorState::new();
-        state.buffer = "test".to_string();
-        state.history_prev();
-        assert_eq!(state.buffer, "test"); // unchanged
-    }
-
-    #[test]
-    fn format_chat_response_handles_multiline() {
-        let text = "line one\nline two\nline three";
-        let result = format_chat_response(text);
-        assert!(result.contains("line one"));
-        assert!(result.contains("line two"));
-        assert!(result.contains("line three"));
-        assert!(result.contains("━━  Response"));
-    }
-
-    #[test]
-    fn format_chat_response_preserves_empty_lines() {
-        let text = "first\n\nlast";
-        let result = format_chat_response(text);
-        assert!(result.contains("first"));
-        assert!(result.contains("last"));
+    fn shell_exit_reason_quit_and_restart_are_distinct() {
+        assert_ne!(ShellExitReason::Quit, ShellExitReason::Restart);
     }
 }

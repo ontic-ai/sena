@@ -8,6 +8,7 @@ mod display;
 mod model_selector;
 mod query;
 mod shell;
+mod tui_state;
 
 use std::time::Duration;
 
