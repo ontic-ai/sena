@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
     let runtime = runtime::boot().await?;
 
     println!("Sena started. Press Ctrl+C to shutdown.");
+    println!("To test Sena interactively, use: sena --interactive (implemented in Phase 4 M4.3)");
 
     // Wait for Ctrl+C
     runtime::wait_for_sigint().await?;
