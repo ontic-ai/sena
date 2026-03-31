@@ -163,7 +163,7 @@ impl MemoryActor {
                     .await;
             }
             Err(e) => {
-                eprintln!("[memory] consolidation (decay) failed: {e}");
+                let _ = e;
             }
         }
     }
@@ -377,7 +377,7 @@ impl Actor for MemoryActor {
                                             .duration_since(std::time::UNIX_EPOCH)                                            .map(|d| d.as_nanos() as u64)
                                             .unwrap_or(1);
 
-                                        if let Err(e) = transparency_query::handle_transparency_query(
+                                        if let Err(_e) = transparency_query::handle_transparency_query(
                                             s,
                                             Arc::clone(&b),
                                             &mut bcast_rx,
@@ -385,7 +385,6 @@ impl Actor for MemoryActor {
                                         )
                                         .await
                                         {
-                                            eprintln!("[memory] transparency query failed: {e}");
                                             let _ = b
                                                 .broadcast(Event::Transparency(
                                                     TransparencyEvent::MemoryResponded(
@@ -427,27 +426,21 @@ impl Actor for MemoryActor {
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
                                     tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_write(s, req, b).await {
-                                            eprintln!("[memory] write failed: {e}");
-                                        }
+                                            let _ = Self::handle_write(s, req, b).await;
                                     });
                                 }
                                 MemoryEvent::SemanticIngestRequested(req) => {
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
                                     tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_semantic_ingest(s, req, b).await {
-                                            eprintln!("[memory] semantic ingest failed: {e}");
-                                        }
+                                            let _ = Self::handle_semantic_ingest(s, req, b).await;
                                     });
                                 }
                                 MemoryEvent::QueryRequested(req) => {
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
                                     tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_query(s, req, b).await {
-                                            eprintln!("[memory] query failed: {e}");
-                                        }
+                                            let _ = Self::handle_query(s, req, b).await;
                                     });
                                 }
                                 // Outbound-only events — ignore if directed back.
