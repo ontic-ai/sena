@@ -18,16 +18,23 @@ pub(crate) const CYAN: &str = "\x1b[36m";
 
 // ── Structural print functions ────────────────────────────────────────────────
 
-/// Print the Sena boot banner.
+/// Print the Sena boot banner with version and branding.
 pub fn banner() {
-    println!("{BOLD}{CYAN}");
-    println!(r"   ___  ___ _ __   __ _ ");
-    println!(r"  / __|/ _ \ '_ \ / _` |");
-    println!(r"  \__ \  __/ | | | (_| |");
-    println!(r"  |___/\___|_| |_|\__,_|");
+    let version = env!("CARGO_PKG_VERSION");
+
     println!();
-    println!("  local-first ambient intelligence");
-    println!("{RESET}");
+    println!("{BOLD}{CYAN}  ╭────────────────────────────────────────╮{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}                                        {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}     {BOLD}{CYAN}___  ___ _ __   __ _{RESET}            {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}    {BOLD}{CYAN}/ __|/ _ \\ '_ \\ / _` |{RESET}           {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}    {BOLD}{CYAN}\\__ \\  __/ | | | (_| |{RESET}           {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}    {BOLD}{CYAN}|___/\\___|_| |_|\\__,_|{RESET}           {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}                                        {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}   {DIM}local-first ambient intelligence{RESET}  {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}   {DIM}version {version}{RESET}                        {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  │{RESET}                                        {BOLD}{CYAN}│{RESET}");
+    println!("{BOLD}{CYAN}  ╰────────────────────────────────────────╯{RESET}");
+    println!();
 }
 
 /// Print the interactive prompt (`sena ›`). Does NOT add a newline.
@@ -88,15 +95,15 @@ pub fn help() {
     println!("  {BOLD}{CYAN}/explanation{RESET}  {DIM}or{RESET} /why   Why did you say that?");
     println!("  {BOLD}{CYAN}/models{RESET}               Select which Ollama model to use");
     println!("  {BOLD}{CYAN}/help{RESET}                 Show this message");
-    println!("  {BOLD}{CYAN}/quit{RESET}                 Exit Sena");
+    println!("  {BOLD}{CYAN}/close{RESET} {DIM}or{RESET} /quit  Close CLI session");
+    println!("  {BOLD}{CYAN}/shutdown{RESET}             Shut down Sena completely");
     println!();
 }
 
-/// Print the session summary after TUI exit.
-///
-/// Displays session metrics: duration, messages sent, tokens received.
-/// Uses ANSI colors for visual clarity. The "~" prefix on tokens indicates
-/// it's an estimate (some responses may not return exact token counts).
+// Print the session summary after TUI exit.
+// Displays session metrics: duration, messages sent, tokens received.
+// Uses ANSI colors for visual clarity. The "~" prefix on tokens indicates
+// it's an estimate (some responses may not return exact token counts).
 pub fn print_session_summary(stats: &crate::tui_state::SessionStats) {
     println!();
     println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
@@ -126,6 +133,12 @@ mod tests {
         assert!(!RESET.is_empty());
         assert!(!BOLD.is_empty());
         assert!(!CYAN.is_empty());
+    }
+
+    #[test]
+    fn banner_does_not_panic() {
+        // Should not panic when called
+        banner();
     }
 
     #[test]
