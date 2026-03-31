@@ -21,10 +21,12 @@ pub(crate) const CYAN: &str = "\x1b[36m";
 /// Print the Sena boot banner.
 pub fn banner() {
     println!("{BOLD}{CYAN}");
-    println!("  ╔══════════════════════════════════╗");
-    println!("  ║       · S E N A ·                ║");
-    println!("  ║       local-first ambient AI     ║");
-    println!("  ╚══════════════════════════════════╝");
+    println!(r"   ___  ___ _ __   __ _ ");
+    println!(r"  / __|/ _ \ '_ \ / _` |");
+    println!(r"  \__ \  __/ | | | (_| |");
+    println!(r"  |___/\___|_| |_|\__,_|");
+    println!();
+    println!("  local-first ambient intelligence");
     println!("{RESET}");
 }
 

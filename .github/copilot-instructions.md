@@ -61,6 +61,7 @@ Before adding any dependency, ask:
 | OS signals (file watch) | `notify` |
 | OS signals (clipboard) | `arboard` |
 | OS signals (keystroke timing) | `rdev` |
+| Interactive TUI layout (CLI) | `ratatui` |
 | System tray (Phase 4) | `tray-icon` |
 | LLM inference | `llama-cpp-rs` |
 | Async trait | `async-trait` |
@@ -313,6 +314,24 @@ If the architecture graph does not have an arrow for the import you want, the ar
 2. If still unsure, implement the minimal thing that satisfies the current milestone and leave a `// TODO: <question>` comment with a specific question.
 3. Do NOT make an assumption that results in a cross-crate dependency violation, a privacy type violation, or a static prompt string. These are the three categories of mistake that cause the most damage.
 4. Surface the ambiguity in the PR description.
+
+### 10.1 Feature Completeness
+
+All implemented features MUST be fully integrated and plugged in. Coded ≠ integrated.
+
+**Requirements:**
+- Events emitted must have handlers that respond to them
+- Actors must use the features they implement
+- No dead code in production paths — if it's coded, it must be reachable
+- After implementing any feature, verify the end-to-end flow works
+
+**Examples of incomplete integration:**
+- Adding a `MemoryThresholdExceeded` event but no shell handler displays it to the user
+- Implementing a consolidation algorithm but never calling it from the actor run loop
+- Creating a prompt segment type that no prompt composer uses
+- Broadcasting an event that no actor subscribes to
+
+Before marking work complete: trace the code path from trigger to user-visible effect or persistent state change.
 
 ---
 

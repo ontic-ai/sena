@@ -331,7 +331,7 @@ ech0 is fetched as a Git dependency:
 
 ```toml
 [dependencies]
-ech0 = { git = "https://github.com/<org>/ech0", features = ["full"] }
+ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.0", features = ["full"] }
 ```
 
 ech0 is never forked or vendored unless a breaking upstream change requires it. All ech0 feature flags are enabled via `"full"`.

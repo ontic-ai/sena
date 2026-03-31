@@ -27,8 +27,10 @@ pub async fn run_wizard(
     bus: &std::sync::Arc<EventBus>,
     models_available: bool,
 ) -> Result<OnboardingResult> {
+    eprintln!("[DEBUG] First boot detected — starting onboarding wizard...");
+
     let stdin = io::stdin();
-    let stdout = io::stdout();
+    let mut stdout = io::stdout();
 
     // Welcome message
     println!();
@@ -36,6 +38,7 @@ pub async fn run_wizard(
     println!("║     Welcome to Sena — First Setup    ║");
     println!("╚══════════════════════════════════════╝");
     println!();
+    stdout.flush().context("flush welcome banner")?;
 
     // Check models first
     if !models_available {

@@ -61,11 +61,8 @@ pub async fn query_on_bus(query: TransparencyQuery, bus: &Arc<EventBus>) -> Resu
 ///
 /// # Implementation
 /// 1. Boots runtime (actors are wired inside boot())
-/// 2. Creates bus receiver for responses
-/// 3. Broadcasts TransparencyQuery on bus
-/// 4. Waits for matching response with 5-second timeout
-/// 5. Formats response according to query type
-/// 6. Gracefully shuts down runtime
+/// 2. Sends query via bus and waits for formatted response
+/// 3. Gracefully shuts down runtime
 ///
 /// # Arguments
 /// * `query` - The TransparencyQuery to send
@@ -81,31 +78,14 @@ pub async fn execute_query(query: TransparencyQuery) -> Result<String> {
     // Boot runtime (actors are wired inside boot())
     let runtime = runtime::boot().await?;
 
-    // Get the bus from runtime (publicly available)
-    let bus = &runtime.bus;
-    let mut rx = bus.subscribe_broadcast();
-
-    // Send the query on the bus
-    bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
-        query.clone(),
-    )))
-    .await?;
-
-    // Await response with 5-second timeout
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), wait_for_response(query, &mut rx)).await;
+    // Run the query against the live bus
+    let result = query_on_bus(query, &runtime.bus).await;
 
     // Shutdown: wait for actors to stop
     let shutdown_timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
     runtime::shutdown(runtime, shutdown_timeout).await?;
 
-    match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(anyhow!(
-            "query timed out after 5 seconds. No response received."
-        )),
-    }
+    result
 }
 
 /// Wait for a response matching the query type.
@@ -210,16 +190,15 @@ fn format_memory_response(resp: &MemoryResponse) -> String {
          {BOLD}Interests{RESET}      {interests}"
     );
 
-    out.push_str(&format!(
-        "\n\n{BOLD}{CYAN}Recent Memories{RESET}"
-    ));
+    out.push_str(&format!("\n\n{BOLD}{CYAN}Recent Memories{RESET}"));
 
     if resp.memory_chunks.is_empty() {
         out.push_str(&format!("\n  {DIM}(no memories retrieved){RESET}"));
     } else {
         for (i, chunk) in resp.memory_chunks.iter().enumerate() {
-            let preview = if chunk.text.len() > 120 {
-                format!("{}...", &chunk.text[..120])
+            let preview = if chunk.text.chars().count() > 120 {
+                let truncated: String = chunk.text.chars().take(120).collect();
+                format!("{}...", truncated)
             } else {
                 chunk.text.clone()
             };
@@ -236,13 +215,15 @@ fn format_memory_response(resp: &MemoryResponse) -> String {
 
 /// Format InferenceExplanation response with ANSI labels.
 fn format_inference_explanation_response(resp: &InferenceExplanationResponse) -> String {
-    let request = if resp.request_context.len() > 200 {
-        format!("{}...", &resp.request_context[..200])
+    let request = if resp.request_context.chars().count() > 200 {
+        let truncated: String = resp.request_context.chars().take(200).collect();
+        format!("{}...", truncated)
     } else {
         resp.request_context.clone()
     };
-    let response = if resp.response_text.len() > 299 {
-        format!("{}...", &resp.response_text[..299])
+    let response = if resp.response_text.chars().count() > 299 {
+        let truncated: String = resp.response_text.chars().take(299).collect();
+        format!("{}...", truncated)
     } else {
         resp.response_text.clone()
     };
@@ -256,24 +237,20 @@ fn format_inference_explanation_response(resp: &InferenceExplanationResponse) ->
     );
 
     if resp.working_memory_context.is_empty() {
-        out.push_str(&format!(
-            "\n{BOLD}Memory{RESET}    {DIM}(none used){RESET}"
-        ));
+        out.push_str(&format!("\n{BOLD}Memory{RESET}    {DIM}(none used){RESET}"));
     } else {
         out.push_str(&format!(
             "\n{BOLD}Memory{RESET}    {YELLOW}{} chunks used{RESET}",
             resp.working_memory_context.len()
         ));
         for (i, chunk) in resp.working_memory_context.iter().enumerate() {
-            let preview = if chunk.text.len() > 80 {
-                format!("{}…", &chunk.text[..80])
+            let preview = if chunk.text.chars().count() > 80 {
+                let truncated: String = chunk.text.chars().take(80).collect();
+                format!("{}…", truncated)
             } else {
                 chunk.text.clone()
             };
-            out.push_str(&format!(
-                "\n          {DIM}[{}] {preview}{RESET}",
-                i + 1
-            ));
+            out.push_str(&format!("\n          {DIM}[{}] {preview}{RESET}", i + 1));
         }
     }
 
@@ -393,6 +370,7 @@ mod tests {
     fn format_memory_response_with_chunks() {
         let resp = MemoryResponse {
             soul_summary: bus::events::transparency::SoulSummaryForTransparency {
+                user_name: None,
                 inference_cycle_count: 10,
                 work_patterns: vec!["early_morning".to_string(), "coding_bursts".to_string()],
                 tool_preferences: vec!["cargo".to_string(), "vscode".to_string()],
@@ -427,6 +405,7 @@ mod tests {
     fn format_memory_response_no_chunks() {
         let resp = MemoryResponse {
             soul_summary: bus::events::transparency::SoulSummaryForTransparency {
+                user_name: None,
                 inference_cycle_count: 0,
                 work_patterns: vec![],
                 tool_preferences: vec![],

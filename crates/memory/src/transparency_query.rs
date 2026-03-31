@@ -85,6 +85,7 @@ async fn wait_for_soul_summary(
     match result {
         Ok(Some(summary)) => summary,
         Ok(None) | Err(_) => SoulSummaryForTransparency {
+            user_name: None,
             inference_cycle_count: 0,
             work_patterns: vec![],
             tool_preferences: vec![],
@@ -167,6 +168,7 @@ mod tests {
     #[test]
     fn default_soul_summary_is_empty() {
         let summary = SoulSummaryForTransparency {
+            user_name: None,
             inference_cycle_count: 0,
             work_patterns: vec![],
             tool_preferences: vec![],

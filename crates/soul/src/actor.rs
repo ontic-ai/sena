@@ -708,7 +708,10 @@ mod tests {
 
         let result = actor.handle_initialize_with_name("".to_string(), &bus);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid user name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid user name"));
 
         actor.stop().await.expect("stop should succeed");
     }
@@ -729,7 +732,10 @@ mod tests {
         let long_name = "a".repeat(51);
         let result = actor.handle_initialize_with_name(long_name, &bus);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid user name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid user name"));
 
         actor.stop().await.expect("stop should succeed");
     }

@@ -653,6 +653,18 @@ impl Shell {
                     self.add_message(MessageRole::System, "Boot complete".to_string());
                 }
             }
+            Event::System(bus::events::SystemEvent::MemoryThresholdExceeded {
+                current_mb,
+                limit_mb,
+            }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "Memory usage {}MB exceeds limit {}MB — consider restarting",
+                        current_mb, limit_mb
+                    ),
+                );
+            }
             // ── Transparency query responses (async, non-blocking) ─────────────
             Event::Transparency(TransparencyEvent::ObservationResponded(resp)) => {
                 self.transparency_loading = false;
@@ -905,10 +917,43 @@ impl Shell {
             "/quit                  Exit Sena".to_string(),
         );
         self.add_message(MessageRole::System, "".to_string());
+        self.add_message(MessageRole::System, "━━  Keyboard Shortcuts".to_string());
+        self.add_message(
+            MessageRole::System,
+            "Ctrl+Y                 Copy last response to clipboard".to_string(),
+        );
+        self.add_message(MessageRole::System, "".to_string());
         self.add_message(
             MessageRole::System,
             "Type any message to chat with the model.".to_string(),
         );
+    }
+
+    /// Copy the most recent Sena response to the system clipboard.
+    fn copy_last_response(&mut self) {
+        let last_response = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Sena))
+            .map(|m| m.text.clone());
+
+        match last_response {
+            Some(text) => match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+                Ok(_) => {
+                    self.add_message(
+                        MessageRole::System,
+                        "Last response copied to clipboard.".to_string(),
+                    );
+                }
+                Err(e) => {
+                    self.add_message(MessageRole::Warning, format!("Copy failed: {}", e));
+                }
+            },
+            None => {
+                self.add_message(MessageRole::System, "No response to copy yet.".to_string());
+            }
+        }
     }
 }
 
@@ -1090,6 +1135,11 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                 }
                             }
 
+                            // Ctrl+Y — copy last response to clipboard
+                            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                                shell.copy_last_response();
+                            }
+
             // Ctrl+D
                             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                                 break;
@@ -1110,7 +1160,19 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                             (KeyCode::Enter, _) if shell.model_popup.is_some() => {
                                 // Apply selection
                                 if let Some(popup) = shell.model_popup.take() {
-                                    if let Some(selected) = popup.selected() {
+                                    if popup.is_change_dir_selected() {
+                                        // Show config file location so user can edit models_dir
+                                        let config_path = runtime::config::config_path()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|_| "<unknown>".to_string());
+                                        shell.add_message(
+                                            MessageRole::System,
+                                            format!(
+                                                "To change the model directory, edit 'models_dir' in: {}",
+                                                config_path
+                                            ),
+                                        );
+                                    } else if let Some(selected) = popup.selected() {
                                         let model_name = selected.name.clone();
                                         // Update config
                                         let mut config = shell.runtime.config.clone();
@@ -1404,8 +1466,9 @@ fn format_memory_tui(resp: &MemoryResponse) -> String {
         out.push_str("\n  (no memories retrieved)");
     } else {
         for (i, chunk) in resp.memory_chunks.iter().enumerate() {
-            let preview = if chunk.text.len() > 120 {
-                format!("{}...", &chunk.text[..120])
+            let preview = if chunk.text.chars().count() > 120 {
+                let truncated: String = chunk.text.chars().take(120).collect();
+                format!("{}...", truncated)
             } else {
                 chunk.text.clone()
             };
@@ -1421,13 +1484,15 @@ fn format_memory_tui(resp: &MemoryResponse) -> String {
 
 /// Format InferenceExplanationResponse for TUI display (no ANSI codes).
 fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
-    let request = if resp.request_context.len() > 200 {
-        format!("{}...", &resp.request_context[..200])
+    let request = if resp.request_context.chars().count() > 200 {
+        let truncated: String = resp.request_context.chars().take(200).collect();
+        format!("{}...", truncated)
     } else {
         resp.request_context.clone()
     };
-    let response = if resp.response_text.len() > 299 {
-        format!("{}...", &resp.response_text[..299])
+    let response = if resp.response_text.chars().count() > 299 {
+        let truncated: String = resp.response_text.chars().take(299).collect();
+        format!("{}...", truncated)
     } else {
         resp.response_text.clone()
     };
@@ -1443,8 +1508,9 @@ fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
             resp.working_memory_context.len()
         ));
         for (i, chunk) in resp.working_memory_context.iter().enumerate() {
-            let preview = if chunk.text.len() > 80 {
-                format!("{}...", &chunk.text[..80])
+            let preview = if chunk.text.chars().count() > 80 {
+                let truncated: String = chunk.text.chars().take(80).collect();
+                format!("{}...", truncated)
             } else {
                 chunk.text.clone()
             };

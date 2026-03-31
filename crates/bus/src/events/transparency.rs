@@ -40,6 +40,8 @@ pub struct MemoryResponse {
 /// Only includes high-level aggregates, never raw identity data.
 #[derive(Debug, Clone)]
 pub struct SoulSummaryForTransparency {
+    /// User's chosen name from onboarding. None if not yet set.
+    pub user_name: Option<String>,
     /// Number of inference cycles completed.
     pub inference_cycle_count: usize,
     /// Top work patterns observed (e.g., "morning_coder", "late_night_writer").
@@ -91,6 +93,7 @@ mod tests {
     #[test]
     fn soul_summary_for_transparency_redacts_raw_data() {
         let summary = SoulSummaryForTransparency {
+            user_name: Some("Alice".to_string()),
             inference_cycle_count: 42,
             work_patterns: vec!["morning_coder".into()],
             tool_preferences: vec!["vscode".into()],

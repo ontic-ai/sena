@@ -2,6 +2,11 @@
 # Workspace-level build configuration
 target-dir = "target"
 
+[target.x86_64-pc-windows-msvc]
+# /DEBUG:FASTLINK avoids LNK1318 "PDB LIMIT" errors on large debug builds by
+# storing references to object files instead of copying all debug info into the PDB.
+rustflags = ["-C", "link-arg=/DEBUG:FASTLINK"]
+
 [term]
 # Better terminal output
 verbose = false

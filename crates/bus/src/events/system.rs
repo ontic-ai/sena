@@ -47,6 +47,8 @@ pub enum SystemEvent {
     TrayReady,
     /// Tray initialization failed (non-fatal — Sena continues without tray).
     TrayUnavailable { reason: String },
+    /// Memory usage exceeded configured threshold.
+    MemoryThresholdExceeded { current_mb: usize, limit_mb: usize },
 }
 
 #[cfg(test)]

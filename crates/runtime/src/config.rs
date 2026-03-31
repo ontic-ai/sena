@@ -74,6 +74,22 @@ pub struct SenaConfig {
     /// If the preferred model is not found at boot, Sena falls back to the largest discovered model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_model: Option<String>,
+
+    /// Interval in seconds between memory usage checks.
+    /// Default: 60
+    #[serde(default = "default_memory_monitor_interval_secs")]
+    pub memory_monitor_interval_secs: u64,
+
+    /// Memory limit in MB. If exceeded, MemoryThresholdExceeded event is broadcast.
+    /// Default: 2048 (2 GB)
+    #[serde(default = "default_memory_limit_mb")]
+    pub memory_limit_mb: usize,
+
+    /// CPU usage threshold (percent) below which platform actor reduces polling frequency.
+    /// When CPU usage falls below this value, platform polling slows to 2 seconds.
+    /// Default: 10.0
+    #[serde(default = "default_platform_idle_cpu_threshold_percent")]
+    pub platform_idle_cpu_threshold_percent: f32,
 }
 
 impl Default for SenaConfig {
@@ -91,6 +107,9 @@ impl Default for SenaConfig {
             ctp_trigger_sensitivity: default_ctp_trigger_sensitivity(),
             max_reflection_rounds: default_max_reflection_rounds(),
             preferred_model: None,
+            memory_monitor_interval_secs: default_memory_monitor_interval_secs(),
+            memory_limit_mb: default_memory_limit_mb(),
+            platform_idle_cpu_threshold_percent: default_platform_idle_cpu_threshold_percent(),
         }
     }
 }
@@ -124,6 +143,15 @@ fn default_ctp_trigger_sensitivity() -> f64 {
 }
 fn default_max_reflection_rounds() -> usize {
     2
+}
+fn default_memory_monitor_interval_secs() -> u64 {
+    60
+}
+fn default_memory_limit_mb() -> usize {
+    2048
+}
+fn default_platform_idle_cpu_threshold_percent() -> f32 {
+    10.0
 }
 
 /// Configuration-related errors.

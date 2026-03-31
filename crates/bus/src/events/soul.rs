@@ -127,6 +127,7 @@ mod tests {
             SoulEvent::ReadRequested(SoulReadRequest { request_id: 3 }),
             SoulEvent::ReadCompleted(SoulReadCompleted {
                 summary: crate::events::transparency::SoulSummaryForTransparency {
+                    user_name: None,
                     inference_cycle_count: 42,
                     work_patterns: vec![],
                     tool_preferences: vec![],

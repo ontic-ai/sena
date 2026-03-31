@@ -48,16 +48,18 @@ impl ModelSelectorPopup {
 
     /// Move selection down (arrow down).
     pub fn next(&mut self) {
-        if !self.models.is_empty() {
-            self.selected_index = (self.selected_index + 1) % self.models.len();
+        let total_items = self.models.len() + 1; // models + "Change Directory" option
+        if total_items > 0 {
+            self.selected_index = (self.selected_index + 1) % total_items;
         }
     }
 
     /// Move selection up (arrow up).
     pub fn prev(&mut self) {
-        if !self.models.is_empty() {
+        let total_items = self.models.len() + 1; // models + "Change Directory" option
+        if total_items > 0 {
             if self.selected_index == 0 {
-                self.selected_index = self.models.len() - 1;
+                self.selected_index = total_items - 1;
             } else {
                 self.selected_index -= 1;
             }
@@ -67,6 +69,11 @@ impl ModelSelectorPopup {
     /// Get the currently selected model.
     pub fn selected(&self) -> Option<&ModelInfo> {
         self.models.get(self.selected_index)
+    }
+
+    /// Returns true if the currently selected item is the "Change Directory" option.
+    pub fn is_change_dir_selected(&self) -> bool {
+        self.selected_index == self.models.len() // last item = change dir
     }
 }
 
@@ -82,8 +89,8 @@ pub fn render_popup(popup: &ModelSelectorPopup, frame: &mut ratatui::Frame) {
     // Clear the area
     frame.render_widget(Clear, area);
 
-    // Build the list items
-    let items: Vec<ListItem> = popup
+    // Build the list items — models + "Change Directory" option
+    let mut items: Vec<ListItem> = popup
         .models
         .iter()
         .enumerate()
@@ -103,6 +110,17 @@ pub fn render_popup(popup: &ModelSelectorPopup, frame: &mut ratatui::Frame) {
             ListItem::new(display).style(style)
         })
         .collect();
+
+    // Add "Change Model Directory" option at the end
+    let change_dir_display = "[ Change Model Directory ]".to_string();
+    let change_dir_style = if popup.selected_index == popup.models.len() {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    items.push(ListItem::new(change_dir_display).style(change_dir_style));
 
     let list = List::new(items).block(
         Block::default()
