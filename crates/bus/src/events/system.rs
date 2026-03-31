@@ -9,6 +9,19 @@ pub struct ActorFailureInfo {
     pub error_msg: String,
 }
 
+/// Items in the system tray context menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrayMenuItem {
+    /// Show session status (uptime, messages sent).
+    ShowStatus,
+    /// Show last thought summary.
+    ShowLastThought,
+    /// Open CLI in a new terminal window.
+    OpenCli,
+    /// Quit Sena.
+    Quit,
+}
+
 /// System lifecycle and control events.
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
@@ -26,6 +39,12 @@ pub enum SystemEvent {
     EncryptionFailed { reason: String },
     /// OS keychain was unavailable (fell back to passphrase mode).
     KeychainUnavailable,
+    /// User clicked a tray menu item.
+    TrayMenuClicked(TrayMenuItem),
+    /// Tray initialized successfully.
+    TrayReady,
+    /// Tray initialization failed (non-fatal — Sena continues without tray).
+    TrayUnavailable { reason: String },
 }
 
 #[cfg(test)]

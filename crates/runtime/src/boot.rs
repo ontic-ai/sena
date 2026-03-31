@@ -15,6 +15,7 @@ pub struct Runtime {
     pub bus: Arc<EventBus>,
     pub registry: ActorRegistry,
     pub config: SenaConfig,
+    pub tray_manager: crate::tray::TrayManager,
     #[allow(dead_code)]
     pub(crate) master_key: MasterKey,
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
@@ -102,8 +103,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     spawn_actor(&bus, &mut registry, Box::new(ctp_actor));
 
     // Step 8: Initialize and spawn memory actor
-    let config_dir = platform::config_dir()
-        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    let config_dir =
+        platform::config_dir().map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_dir = config_dir.join("memory");
     std::fs::create_dir_all(&memory_dir)
         .map_err(|e| BootError::MemoryInitFailed(format!("failed to create memory dir: {e}")))?;
@@ -122,22 +123,21 @@ pub async fn boot() -> Result<Runtime, BootError> {
     spawn_actor(&bus, &mut registry, Box::new(memory_actor));
 
     // Step 9: Initialize and spawn inference actor
-    let models_dir = platform::ollama_models_dir()
-        .map_err(|e| BootError::InferenceInitFailed(e.to_string()))?;
+    let models_dir =
+        platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?;
     let inference_backend = inference::LlamaBackend::new();
-    let inference_backend_type = inference::BackendType::Cpu;
-    let inference_actor = inference::InferenceActor::new(
-        models_dir,
-        Box::new(inference_backend),
-        inference_backend_type,
-    )
-    .with_preferred_model(config.preferred_model.clone());
+    let inference_actor = inference::InferenceActor::new(models_dir, Box::new(inference_backend))
+        .with_preferred_model(config.preferred_model.clone());
     spawn_actor(&bus, &mut registry, Box::new(inference_actor));
 
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
-    // Step 11: Broadcast BootComplete
+    // Step 11: Initialize system tray (non-fatal — Sena works without it).
+    let tray_manager =
+        crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
+
+    // Step 12: Broadcast BootComplete
     bus.broadcast(Event::System(SystemEvent::BootComplete))
         .await
         .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
@@ -146,6 +146,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         bus,
         registry,
         config,
+        tray_manager,
         master_key,
         _keep_alive: keep_alive,
     })
@@ -234,10 +235,14 @@ mod tests {
             .await
             .expect("broadcast should succeed");
 
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
+
         let runtime = Runtime {
             bus,
             registry,
             config,
+            tray_manager,
             master_key,
             _keep_alive: keep_alive,
         };
@@ -352,10 +357,14 @@ mod tests {
 
         assert_eq!(registry.actor_count(), 2);
 
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
+
         let runtime = Runtime {
             bus,
             registry,
             config,
+            tray_manager,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };

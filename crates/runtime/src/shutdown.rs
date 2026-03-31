@@ -83,10 +83,13 @@ mod tests {
 
         // Simulate runtime
         let registry = ActorRegistry::new();
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
         let runtime = Runtime {
             bus: bus.clone(),
             registry,
             config: SenaConfig::default(),
+            tray_manager,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
@@ -115,10 +118,13 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let keep_alive = bus.subscribe_broadcast();
         let registry = ActorRegistry::new();
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
         let runtime = Runtime {
             bus,
             registry,
             config: SenaConfig::default(),
+            tray_manager,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
@@ -141,10 +147,14 @@ mod tests {
         });
         registry.register("fast_actor", handle);
 
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
+
         let runtime = Runtime {
             bus: bus.clone(),
             registry,
             config: SenaConfig::default(),
+            tray_manager,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: _rx,
         };
