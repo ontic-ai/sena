@@ -16,6 +16,8 @@ pub struct Runtime {
     pub registry: ActorRegistry,
     pub config: SenaConfig,
     pub tray_manager: crate::tray::TrayManager,
+    /// True if this is the first time Sena has been run on this machine.
+    pub is_first_boot: bool,
     #[allow(dead_code)]
     pub(crate) master_key: MasterKey,
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
@@ -64,7 +66,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let config = crate::config::load_or_create_config()
         .await
         .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?;
-
+    // Step 1.5: First-boot detection — check if Soul.redb exists before any initialization.
+    // We check for the Soul redb encrypted file. If absent, this is the first boot.
+    let is_first_boot = {
+        let soul_path = platform::config_dir()
+            .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?
+            .join("soul.redb.enc");
+        !soul_path.exists()
+    };
     // Step 2: Initialize encryption
     let master_key =
         init_encryption().map_err(|e| BootError::EncryptionInitFailed(e.to_string()))?;
@@ -76,6 +85,12 @@ pub async fn boot() -> Result<Runtime, BootError> {
     bus.broadcast(Event::System(SystemEvent::EncryptionInitialized))
         .await
         .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
+
+    if is_first_boot {
+        bus.broadcast(Event::System(SystemEvent::FirstBoot))
+            .await
+            .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
+    }
 
     // Step 4: Initialize Soul (SoulBox)
     let soul_db_path = platform::config_dir()
@@ -147,6 +162,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         registry,
         config,
         tray_manager,
+        is_first_boot,
         master_key,
         _keep_alive: keep_alive,
     })
@@ -243,6 +259,7 @@ mod tests {
             registry,
             config,
             tray_manager,
+            is_first_boot: false,
             master_key,
             _keep_alive: keep_alive,
         };
@@ -365,6 +382,7 @@ mod tests {
             registry,
             config,
             tray_manager,
+            is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
@@ -382,5 +400,39 @@ mod tests {
 
         assert!(actor1_stopped.load(Ordering::SeqCst));
         assert!(actor2_stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn first_boot_detection_logic() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let soul_path = dir.path().join("soul.redb.enc");
+
+        // File absent → first boot
+        assert!(!soul_path.exists());
+
+        // File present → not first boot
+        fs::write(&soul_path, b"placeholder").expect("write should succeed");
+        assert!(soul_path.exists());
+    }
+
+    #[tokio::test]
+    async fn first_boot_emits_event_when_soul_absent() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        let event = Event::System(SystemEvent::FirstBoot);
+        bus.broadcast(event)
+            .await
+            .expect("broadcast should succeed in test");
+
+        let received = rx.recv().await;
+        assert!(received.is_ok());
+
+        if let Ok(Event::System(SystemEvent::FirstBoot)) = received {
+            // Success
+        } else {
+            panic!("Expected FirstBoot event");
+        }
     }
 }

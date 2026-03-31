@@ -90,6 +90,7 @@ mod tests {
             registry,
             config: SenaConfig::default(),
             tray_manager,
+            is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
@@ -125,6 +126,7 @@ mod tests {
             registry,
             config: SenaConfig::default(),
             tray_manager,
+            is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
         };
@@ -155,6 +157,7 @@ mod tests {
             registry,
             config: SenaConfig::default(),
             tray_manager,
+            is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: _rx,
         };

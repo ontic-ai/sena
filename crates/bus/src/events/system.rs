@@ -29,6 +29,8 @@ pub enum SystemEvent {
     ShutdownSignal,
     /// Boot sequence completed successfully.
     BootComplete,
+    /// Emitted when this is the first time Sena has been run (no prior Soul database found).
+    FirstBoot,
     /// An actor has failed.
     ActorFailed(ActorFailureInfo),
     /// Emitted by each actor when it has successfully started and is ready.
