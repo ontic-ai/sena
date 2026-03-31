@@ -238,14 +238,14 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 ### Milestones
 
 #### M4.1 — System Tray
-- [ ] `tray-icon` crate integration
-- [ ] Tray icon on all 3 OS's
-- [ ] Menu: status, last thought, open CLI, quit
+- [x] `tray-icon` crate integration
+- [x] Tray icon on all 3 OS's
+- [x] Menu: status, last thought, open CLI, quit
 
 #### M4.2 — Onboarding Flow
-- [ ] First-boot experience: no models found → clear instructions
-- [ ] First-boot: Soul initialized with user name (only piece of pre-seeded data, user-provided)
-- [ ] Config wizard: set file watch paths, clipboard observation opt-in
+- [x] First-boot experience: no models found → clear instructions
+- [x] First-boot: Soul initialized with user name (only piece of pre-seeded data, user-provided)
+- [x] Config wizard: set file watch paths, clipboard observation opt-in
 
 #### M4.3 — Transparency UI ✅
 - [x] User can query: "what are you observing right now?" (via `/observation` slash command)

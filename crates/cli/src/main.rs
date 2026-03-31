@@ -50,11 +50,13 @@ async fn interactive_mode() -> Result<()> {
 
             let result = onboarding::run_wizard(&runtime.bus, models_available).await?;
 
+            let user_name = result.user_name.clone();
             let mut updated_config = runtime.config.clone();
             updated_config.file_watch_paths = result.file_watch_paths;
             updated_config.clipboard_observation_enabled = result.clipboard_observation_enabled;
 
             runtime::save_config(&updated_config).await?;
+            display::success(&format!("Onboarding saved for {}.", user_name));
         }
 
         let exit_reason = shell::run(runtime).await?;

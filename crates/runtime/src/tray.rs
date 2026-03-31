@@ -115,7 +115,7 @@ fn run_tray_loop(
     command_rx: std::sync::mpsc::Receiver<TrayCommand>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), TrayError> {
-    use tray_icon::menu::{Menu, MenuItem};
+    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
     // Create a simple 16x16 green square as the tray icon.
@@ -128,7 +128,7 @@ fn run_tray_loop(
     let item_status = MenuItem::new("Show Status", true, None);
     let item_thought = MenuItem::new("Show Last Thought", true, None);
     let item_cli = MenuItem::new("Open CLI", true, None);
-    let separator = MenuItem::new("---", false, None);
+    let separator = PredefinedMenuItem::separator();
     let item_quit = MenuItem::new("Quit", true, None);
 
     menu.append(&item_status)

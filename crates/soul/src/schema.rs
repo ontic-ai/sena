@@ -123,6 +123,9 @@ mod tests {
         read_txn
             .open_table(PREFERENCES)
             .expect("preferences should exist");
+        read_txn
+            .open_table(USER_IDENTITY)
+            .expect("user_identity should exist");
     }
 
     #[test]

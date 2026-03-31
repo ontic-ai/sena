@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use bus::{Event, EventBus, SoulEvent};
 
 /// Result of the onboarding wizard.
-#[allow(dead_code)] // TODO M4.2: fields will be used when config persistence is implemented
 pub struct OnboardingResult {
     /// User's chosen name.
     pub user_name: String,
