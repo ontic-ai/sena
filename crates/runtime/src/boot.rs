@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::MasterKey;
-use rand::Rng;
+use rand::RngCore;
 
 use crate::config::SenaConfig;
 use crate::registry::ActorRegistry;
@@ -200,7 +200,7 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
     // Case 3: First run — generate a fresh random master key and store it.
     // The key is never written to disk; only the keychain holds it.
     let mut raw = [0u8; 32];
-    rand::rng().fill_bytes(&mut raw);
+    rand::thread_rng().fill_bytes(&mut raw);
     let key = crypto::MasterKey::from_bytes(raw);
     crypto::keychain::store_master_key(&key)?;
     Ok(key)
