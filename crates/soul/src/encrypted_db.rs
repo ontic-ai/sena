@@ -90,8 +90,12 @@ impl EncryptedDb {
     ///
     /// After this call, the EncryptedDb is consumed and the working file is removed.
     pub fn close(mut self) -> Result<(), SoulError> {
-        // Drop the database to release the file handle
-        self.db.take();
+        // Drop the database to release the file handle and all locks
+        drop(self.db.take());
+
+        // On Windows, file locks may not release immediately. Give a brief moment
+        // for the OS to release the lock before we try to read the file.
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Read and encrypt to persistent location
         let plaintext = std::fs::read(&self.working_path)?;

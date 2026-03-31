@@ -25,6 +25,7 @@ use ech0::{SearchOptions, Store, StoreConfig, StorePathConfig};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::embedder::{SenaEmbedder, EMBEDDING_DIMENSIONS};
+use crate::encrypted_store::EncryptedStore;
 use crate::error::MemoryError;
 use crate::extractor::SenaExtractor;
 use crate::transparency_query;
@@ -36,10 +37,11 @@ const MEMORY_CHANNEL_CAPACITY: usize = 256;
 ///
 /// Spawned by the runtime after the inference actor is ready.
 pub struct MemoryActor {
-    store_graph_path: std::path::PathBuf,
-    store_vector_path: std::path::PathBuf,
+    encrypted_dir: std::path::PathBuf,
+    master_key: Option<crypto::MasterKey>,
     consolidation_interval: Duration,
     consolidation_idle_threshold: Duration,
+    encrypted_store: Option<EncryptedStore>,
     store: Option<Arc<Store<SenaEmbedder, SenaExtractor>>>,
     bus: Option<Arc<EventBus>>,
     broadcast_rx: Option<broadcast::Receiver<Event>>,
@@ -47,30 +49,27 @@ pub struct MemoryActor {
 }
 
 impl MemoryActor {
-    /// Construct with explicit paths for the ech0 graph and vector index.
+    /// Construct with explicit directory for encrypted memory storage.
     /// Uses a default consolidation interval of 5 minutes.
     pub fn new(
-        store_graph_path: impl Into<std::path::PathBuf>,
-        store_vector_path: impl Into<std::path::PathBuf>,
+        encrypted_dir: impl Into<std::path::PathBuf>,
+        master_key: crypto::MasterKey,
     ) -> Self {
-        Self::with_consolidation_interval(
-            store_graph_path,
-            store_vector_path,
-            Duration::from_secs(300),
-        )
+        Self::with_consolidation_interval(encrypted_dir, master_key, Duration::from_secs(300))
     }
 
     /// Construct with a custom consolidation interval.
     pub fn with_consolidation_interval(
-        store_graph_path: impl Into<std::path::PathBuf>,
-        store_vector_path: impl Into<std::path::PathBuf>,
+        encrypted_dir: impl Into<std::path::PathBuf>,
+        master_key: crypto::MasterKey,
         consolidation_interval: Duration,
     ) -> Self {
         Self {
-            store_graph_path: store_graph_path.into(),
-            store_vector_path: store_vector_path.into(),
+            encrypted_dir: encrypted_dir.into(),
+            master_key: Some(master_key),
             consolidation_interval,
             consolidation_idle_threshold: Duration::from_secs(120),
+            encrypted_store: None,
             store: None,
             bus: None,
             broadcast_rx: None,
@@ -273,10 +272,24 @@ impl Actor for MemoryActor {
     }
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {
+        let master_key = self
+            .master_key
+            .take()
+            .ok_or_else(|| ActorError::StartupFailed("MemoryActor already started".into()))?;
+
+        // Open encrypted store first
+        let encrypted_store = EncryptedStore::open(&self.encrypted_dir, &master_key)
+            .map_err(|e| ActorError::StartupFailed(format!("encrypted store init: {e}")))?;
+
+        // Use working directory for ech0 Store paths
+        let working_dir = encrypted_store.working_dir();
+        let graph_path = working_dir.join("graph.redb");
+        let vector_path = working_dir.join("vector.usearch");
+
         let config = StoreConfig {
             store: StorePathConfig {
-                graph_path: self.store_graph_path.to_string_lossy().into_owned(),
-                vector_path: self.store_vector_path.to_string_lossy().into_owned(),
+                graph_path: graph_path.to_string_lossy().into_owned(),
+                vector_path: vector_path.to_string_lossy().into_owned(),
                 vector_dimensions: EMBEDDING_DIMENSIONS,
             },
             ..Default::default()
@@ -289,6 +302,7 @@ impl Actor for MemoryActor {
             .await
             .map_err(|e| ActorError::StartupFailed(format!("ech0 store init: {e}")))?;
 
+        self.encrypted_store = Some(encrypted_store);
         self.store = Some(Arc::new(store));
         self.broadcast_rx = Some(bus.subscribe_broadcast());
 
@@ -338,8 +352,63 @@ impl Actor for MemoryActor {
         consolidation_ticker.tick().await;
         let mut last_activity = Instant::now();
 
+        // Periodic wakeup to ensure shutdown responsibility (50ms)
+        let mut wakeup = tokio::time::interval(std::time::Duration::from_millis(50));
+        wakeup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        wakeup.tick().await;
+
         loop {
             tokio::select! {
+                biased;
+
+                bcast = broadcast_rx.recv() => {
+                    match bcast {
+                        Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
+                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(query))) => {
+                            // Handle transparency queries on broadcast
+                            match query {
+                                TransparencyQuery::UserMemory => {
+                                    let s = Arc::clone(&store);
+                                    let b = Arc::clone(&bus);
+                                    let mut bcast_rx = broadcast_rx.resubscribe();
+                                    tokio::spawn(async move {
+                                        // Generate a simple request_id based on timestamp
+                                        let request_id = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)                                            .map(|d| d.as_nanos() as u64)
+                                            .unwrap_or(1);
+
+                                        if let Err(e) = transparency_query::handle_transparency_query(
+                                            s,
+                                            Arc::clone(&b),
+                                            &mut bcast_rx,
+                                            request_id,
+                                        )
+                                        .await
+                                        {
+                                            eprintln!("[memory] transparency query failed: {e}");
+                                            let _ = b
+                                                .broadcast(Event::Transparency(
+                                                    TransparencyEvent::MemoryResponded(
+                                                        transparency_query::empty_memory_response(),
+                                                    ),
+                                                ))
+                                                .await;
+                                        }
+                                    });
+                                }
+                                _ => {
+                                    // Other transparency queries handled by different actors
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    }
+                }
+                _ = wakeup.tick() => {
+                    // Periodic wakeup for shutdown responsiveness
+                }
                 _ = consolidation_ticker.tick() => {
                     if last_activity.elapsed() >= self.consolidation_idle_threshold {
                         let s = Arc::clone(&store);
@@ -389,52 +458,6 @@ impl Actor for MemoryActor {
                         None => break,
                     }
                 }
-                bcast = broadcast_rx.recv() => {
-                    match bcast {
-                        Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
-                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(query))) => {
-                            // Handle transparency queries on broadcast
-                            match query {
-                                TransparencyQuery::UserMemory => {
-                                    let s = Arc::clone(&store);
-                                    let b = Arc::clone(&bus);
-                                    let mut bcast_rx = broadcast_rx.resubscribe();
-                                    tokio::spawn(async move {
-                                        // Generate a simple request_id based on timestamp
-                                        let request_id = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_nanos() as u64)
-                                            .unwrap_or(1);
-
-                                        if let Err(e) = transparency_query::handle_transparency_query(
-                                            s,
-                                            Arc::clone(&b),
-                                            &mut bcast_rx,
-                                            request_id,
-                                        )
-                                        .await
-                                        {
-                                            eprintln!("[memory] transparency query failed: {e}");
-                                            let _ = b
-                                                .broadcast(Event::Transparency(
-                                                    TransparencyEvent::MemoryResponded(
-                                                        transparency_query::empty_memory_response(),
-                                                    ),
-                                                ))
-                                                .await;
-                                        }
-                                    });
-                                }
-                                _ => {
-                                    // Other transparency queries handled by different actors
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    }
-                }
             }
         }
 
@@ -442,7 +465,16 @@ impl Actor for MemoryActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
+        // Drop the ech0 store first to release any file handles
         self.store = None;
+
+        // Explicitly close encrypted store for guaranteed encryption and cleanup
+        if let Some(encrypted_store) = self.encrypted_store.take() {
+            encrypted_store.close().map_err(|e| {
+                ActorError::RuntimeError(format!("failed to close encrypted store: {e}"))
+            })?;
+        }
+
         Ok(())
     }
 }
@@ -466,13 +498,16 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn test_master_key() -> crypto::MasterKey {
+        crypto::MasterKey::from_bytes([42u8; 32])
+    }
+
     #[tokio::test]
     async fn memory_actor_lifecycle_start_stop() {
         let dir = tempdir().expect("tempdir");
-        let graph_path = dir.path().join("graph");
-        let vector_path = dir.path().join("vector.usearch");
+        let memory_dir = dir.path().join("memory");
 
-        let mut actor = MemoryActor::new(&graph_path, &vector_path);
+        let mut actor = MemoryActor::new(&memory_dir, test_master_key());
         let bus = Arc::new(EventBus::new());
 
         actor
@@ -487,10 +522,9 @@ mod tests {
         use bus::events::transparency::TransparencyQuery;
 
         let dir = tempdir().expect("tempdir");
-        let graph_path = dir.path().join("graph");
-        let vector_path = dir.path().join("vector.usearch");
+        let memory_dir = dir.path().join("memory");
 
-        let mut actor = MemoryActor::new(&graph_path, &vector_path);
+        let mut actor = MemoryActor::new(&memory_dir, test_master_key());
         let bus = Arc::new(EventBus::new());
 
         actor
@@ -504,7 +538,7 @@ mod tests {
             query,
         )))
         .await
-        .expect("broadcast sh   ould succeed");
+        .expect("broadcast should succeed");
 
         // Give the memory actor a moment to process
         tokio::time::sleep(Duration::from_millis(100)).await;

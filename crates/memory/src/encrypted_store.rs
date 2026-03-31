@@ -93,6 +93,10 @@ impl EncryptedStore {
     /// Close the store: encrypt all working files and clean up.
     pub fn close(mut self) -> Result<(), MemoryError> {
         self.encrypt_working_files()?;
+
+        // Give Windows a moment to release file locks before removing directory
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
         let _ = std::fs::remove_dir_all(&self.working_dir);
         self.closed = true;
         Ok(())

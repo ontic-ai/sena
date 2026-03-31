@@ -130,15 +130,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let memory_dir = config_dir.join("memory");
     std::fs::create_dir_all(&memory_dir)
         .map_err(|e| BootError::MemoryInitFailed(format!("failed to create memory dir: {e}")))?;
-    let memory_graph_path = memory_dir.join("graph");
-    let memory_vector_path = memory_dir.join("vector.usearch");
 
     let memory_consolidation_interval =
         Duration::from_secs(config.memory_consolidation_interval_secs);
     let memory_idle_threshold = Duration::from_secs(config.memory_consolidation_idle_secs);
+    let memory_master_key = MasterKey::from_bytes(*master_key.as_bytes());
     let memory_actor = memory::MemoryActor::with_consolidation_interval(
-        memory_graph_path,
-        memory_vector_path,
+        memory_dir,
+        memory_master_key,
         memory_consolidation_interval,
     )
     .with_consolidation_idle_threshold(memory_idle_threshold);

@@ -48,14 +48,14 @@ fn create_mock_ollama_structure(model_dir: &std::path::Path) {
 async fn end_to_end_thought_triggers_inference_cycle() {
     let dir = tempdir().expect("tempdir");
     let soul_path = dir.path().join("soul.redb.enc");
-    let graph_path = dir.path().join("graph.redb.enc");
-    let vector_path = dir.path().join("vector.usearch.enc");
+    let memory_dir = dir.path().join("memory");
 
     let bus = Arc::new(EventBus::new());
     let master_key = crypto::MasterKey::from_bytes([0u8; 32]);
 
     // Initialize Soul
-    let soul_actor = soul::SoulActor::new(&soul_path, master_key);
+    let soul_master_key = crypto::MasterKey::from_bytes([0u8; 32]);
+    let soul_actor = soul::SoulActor::new(&soul_path, soul_master_key);
     let mut soul_box = Box::new(soul_actor);
     soul_box.start(Arc::clone(&bus)).await.expect("soul start");
     let soul_handle = tokio::spawn(async move {
@@ -64,7 +64,8 @@ async fn end_to_end_thought_triggers_inference_cycle() {
     });
 
     // Initialize Memory (ech0 placeholder)
-    let memory_actor = memory::MemoryActor::new(&graph_path, &vector_path);
+    let memory_master_key = crypto::MasterKey::from_bytes([0u8; 32]);
+    let memory_actor = memory::MemoryActor::new(&memory_dir, memory_master_key);
     let mut memory_box = Box::new(memory_actor);
     memory_box
         .start(Arc::clone(&bus))

@@ -55,11 +55,14 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
     let bus = Arc::new(EventBus::new());
     let master_key = crypto::MasterKey::from_bytes([1u8; 32]);
 
-    let mut soul = Box::new(soul::SoulActor::new(&soul_path, master_key));
+    let soul_master_key = crypto::MasterKey::from_bytes([1u8; 32]);
+    let mut soul = Box::new(soul::SoulActor::new(&soul_path, soul_master_key));
     soul.start(Arc::clone(&bus)).await.expect("soul start");
     let soul_handle = tokio::spawn(async move { soul.run().await });
 
-    let mut memory = Box::new(memory::MemoryActor::new(&graph_path, &vector_path));
+    let memory_dir = dir.path().join("memory");
+    let memory_master_key = crypto::MasterKey::from_bytes([1u8; 32]);
+    let mut memory = Box::new(memory::MemoryActor::new(&memory_dir, memory_master_key));
     memory.start(Arc::clone(&bus)).await.expect("memory start");
     let memory_handle = tokio::spawn(async move { memory.run().await });
 

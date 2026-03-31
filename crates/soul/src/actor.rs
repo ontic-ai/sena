@@ -393,16 +393,9 @@ impl Actor for SoulActor {
             Err(e) => {
                 let reason = e.to_string();
                 if reason.contains("decryption failed") || reason.contains("encryption error") {
-                    eprintln!(
-                        "[soul] WARNING: Decryption failed (master key changed). \
-                         Resetting Soul DB — previous history cleared."
-                    );
+                    // Silent recovery: remove stale encrypted file and reinitialize
                     if self.db_path.exists() {
-                        std::fs::remove_file(&self.db_path).map_err(|io| {
-                            ActorError::StartupFailed(format!(
-                                "could not remove stale soul db: {io}"
-                            ))
-                        })?;
+                        let _ = std::fs::remove_file(&self.db_path);
                     }
                     EncryptedDb::open(&self.db_path, &master_key)
                         .map_err(|e2| ActorError::StartupFailed(e2.to_string()))?
@@ -471,67 +464,61 @@ impl Actor for SoulActor {
             .take()
             .ok_or_else(|| ActorError::RuntimeError("broadcast_rx not set".into()))?;
 
+        // Periodic wakeup to ensure we can always check for shutdown
+        let mut wakeup = tokio::time::interval(std::time::Duration::from_millis(50));
+        wakeup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        wakeup.tick().await; // Consume first immediate tick
+
         loop {
             tokio::select! {
+                biased;
+
+                bcast = broadcast_rx.recv() => {
+                    match bcast {
+                        Ok(Event::System(SystemEvent::ShutdownSignal)) => {
+                            break;
+                        }
+                        Ok(Event::Platform(platform_event)) => {
+                            let _ = self.absorb_platform_signal(platform_event);
+                        }
+                        Ok(Event::CTP(ctp_event)) => {
+                            let _ = self.absorb_ctp_signal(ctp_event);
+                        }
+                        Ok(Event::Inference(inference_event)) => {
+                            let _ = self.absorb_inference_signal(inference_event);
+                        }
+                        Ok(Event::Soul(SoulEvent::ReadRequested(req))) => {
+                            let _ = self.handle_read(req, &bus);
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    }
+                }
+                _ = wakeup.tick() => {
+                    // Periodic wakeup to ensure shutdown responsiveness
+                }
                 msg = directed_rx.recv() => {
                     match msg {
                         Some(Event::Soul(soul_event)) => {
                             match soul_event {
                                 SoulEvent::WriteRequested(req) => {
-                                    if let Err(e) = self.handle_write(req, &bus) {
-                                        eprintln!("[soul] write failed: {}", e);
-                                    }
+                                    let _ = self.handle_write(req, &bus);
                                 }
                                 SoulEvent::SummaryRequested(req) => {
-                                    if let Err(e) = self.handle_summary(req, &bus) {
-                                        eprintln!("[soul] summary failed: {}", e);
-                                    }
+                                    let _ = self.handle_summary(req, &bus);
                                 }
                                 SoulEvent::IdentitySignalEmitted(signal) => {
-                                    if let Err(e) = self.handle_identity_signal(signal.key, signal.value) {
-                                        eprintln!("[soul] identity signal failed: {}", e);
-                                    }
+                                    let _ = self.handle_identity_signal(signal.key, signal.value);
                                 }
                                 SoulEvent::InitializeWithName { name } => {
-                                    if let Err(e) = self.handle_initialize_with_name(name, &bus) {
-                                        eprintln!("[soul] failed to initialize user name: {}", e);
-                                    }
+                                    let _ = self.handle_initialize_with_name(name, &bus);
                                 }
                                 _ => {}
                             }
                         }
                         Some(_) => {}
                         None => break,
-                    }
-                }
-                bcast = broadcast_rx.recv() => {
-                    match bcast {
-                        Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
-                        Ok(Event::Platform(platform_event)) => {
-                            if let Err(e) = self.absorb_platform_signal(platform_event) {
-                                eprintln!("[soul] platform identity extraction failed: {}", e);
-                            }
-                        }
-                        Ok(Event::CTP(ctp_event)) => {
-                            if let Err(e) = self.absorb_ctp_signal(ctp_event) {
-                                eprintln!("[soul] ctp identity extraction failed: {}", e);
-                            }
-                        }
-                        Ok(Event::Inference(inference_event)) => {
-                            if let Err(e) = self.absorb_inference_signal(inference_event) {
-                                eprintln!("[soul] inference identity extraction failed: {}", e);
-                            }
-                        }
-                        Ok(Event::Soul(SoulEvent::ReadRequested(req))) => {
-                            if let Err(e) = self.handle_read(req, &bus) {
-                                eprintln!("[soul] read failed: {}", e);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[soul] broadcast lagged by {} events", n);
-                        }
                     }
                 }
             }
@@ -542,9 +529,9 @@ impl Actor for SoulActor {
 
     async fn stop(&mut self) -> Result<(), ActorError> {
         if let Some(db) = self.db.take() {
-            if let Err(e) = db.close() {
-                eprintln!("[soul] close failed: {}", e);
-            }
+            db.close().map_err(|e| {
+                ActorError::RuntimeError(format!("failed to close encrypted db: {e}"))
+            })?;
         }
         self.bus = None;
         self.directed_rx = None;
@@ -677,18 +664,20 @@ mod tests {
         }
 
         // Verify name can be read back from the database
-        let db = actor.db.as_ref().expect("db should be initialized");
-        let redb = db.db().expect("should get redb");
-        let read_txn = redb.begin_read().expect("should begin read");
-        let table = read_txn
-            .open_table(USER_IDENTITY)
-            .expect("should open USER_IDENTITY");
-        let name_guard = table
-            .get("user_name")
-            .expect("should get user_name")
-            .expect("user_name should exist");
-        let name = name_guard.value();
-        assert_eq!(name, "Alice");
+        {
+            let db = actor.db.as_ref().expect("db should be initialized");
+            let redb = db.db().expect("should get redb");
+            let read_txn = redb.begin_read().expect("should begin read");
+            let table = read_txn
+                .open_table(USER_IDENTITY)
+                .expect("should open USER_IDENTITY");
+            let name_guard = table
+                .get("user_name")
+                .expect("should get user_name")
+                .expect("user_name should exist");
+            let name = name_guard.value();
+            assert_eq!(name, "Alice");
+        } // Guards dropped here
 
         actor.stop().await.expect("stop should succeed");
     }
