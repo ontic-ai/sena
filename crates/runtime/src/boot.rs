@@ -106,7 +106,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 6: Initialize and spawn platform adapter
     let platform_adapter = platform::create_platform_adapter();
     let platform_actor = platform::PlatformActor::new(platform_adapter)
-        .with_poll_interval(Duration::from_millis(500));
+        .with_poll_interval(Duration::from_millis(500))
+        .with_clipboard_enabled(config.clipboard_observation_enabled);
     spawn_actor(&bus, &mut registry, Box::new(platform_actor));
 
     // Step 7: Initialize and spawn CTP actor

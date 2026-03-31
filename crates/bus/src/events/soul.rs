@@ -2,6 +2,13 @@
 
 use std::time::SystemTime;
 
+/// Emitted by onboarding wizard: Soul actor will persist user's name.
+#[derive(Debug, Clone)]
+pub struct SoulNameInitialized {
+    /// The name stored successfully.
+    pub name: String,
+}
+
 /// A structured event to be written to the Soul event log.
 #[derive(Debug, Clone)]
 pub struct SoulWriteRequest {
@@ -66,6 +73,12 @@ pub enum SoulEvent {
     IdentitySignalEmitted(IdentitySignalEmitted),
     ReadRequested(SoulReadRequest),
     ReadCompleted(SoulReadCompleted),
+    /// Request Soul to store the user's chosen name. Emitted during first-boot onboarding only.
+    InitializeWithName {
+        name: String,
+    },
+    /// Soul actor confirms name was persisted.
+    NameInitialized(SoulNameInitialized),
 }
 
 #[cfg(test)]

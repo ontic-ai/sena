@@ -6,6 +6,7 @@
 
 mod display;
 mod model_selector;
+mod onboarding;
 mod query;
 mod shell;
 mod tui_state;
@@ -38,6 +39,14 @@ async fn interactive_mode() -> Result<()> {
         display::info("Booting runtime...");
         let runtime = runtime::boot().await?;
         display::success("Runtime ready.");
+
+        // First-boot onboarding
+        if runtime.is_first_boot {
+            // TODO M4.2: check actual model availability via inference actor registry
+            let models_available = true;
+            let _result = onboarding::run_wizard(&runtime.bus, models_available).await?;
+            // TODO M4.2: persist OnboardingResult (file_watch_paths, clipboard_enabled) to config
+        }
 
         let exit_reason = shell::run(runtime).await?;
 

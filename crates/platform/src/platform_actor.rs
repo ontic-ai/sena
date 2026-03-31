@@ -17,6 +17,7 @@ pub struct PlatformActor {
     poll_interval: Duration,
     last_window: Option<WindowContext>,
     last_clipboard: Option<ClipboardDigest>,
+    clipboard_enabled: bool,
 }
 
 impl PlatformActor {
@@ -29,12 +30,22 @@ impl PlatformActor {
             poll_interval: Duration::from_millis(500),
             last_window: None,
             last_clipboard: None,
+            clipboard_enabled: true,
         }
     }
 
     /// Set the polling interval for checking platform signals.
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    /// Enable or disable clipboard observation.
+    ///
+    /// When disabled, the platform actor will not poll or emit clipboard events.
+    /// This respects user privacy preferences from the config.
+    pub fn with_clipboard_enabled(mut self, enabled: bool) -> Self {
+        self.clipboard_enabled = enabled;
         self
     }
 
@@ -62,7 +73,11 @@ impl PlatformActor {
     }
 
     /// Check for clipboard changes and emit event if changed.
+    /// No-op if clipboard observation is disabled via config.
     async fn check_clipboard_change(&mut self) -> Result<(), ActorError> {
+        if !self.clipboard_enabled {
+            return Ok(());
+        }
         if let Some(current) = self.adapter.clipboard_digest() {
             let should_emit = self
                 .last_clipboard
@@ -111,7 +126,10 @@ impl Actor for PlatformActor {
             tokio::select! {
                 _ = interval.tick() => {
                     self.check_window_change().await?;
-                    self.check_clipboard_change().await?;
+                    // Only poll clipboard if enabled in config
+                    if self.clipboard_enabled {
+                        self.check_clipboard_change().await?;
+                    }
                 }
                 event = async {
                     match &mut self.bus_rx {
