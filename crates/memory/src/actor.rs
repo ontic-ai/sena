@@ -297,7 +297,14 @@ impl Actor for MemoryActor {
             .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
         self.directed_rx = Some(rx);
 
-        self.bus = Some(bus);
+        self.bus = Some(bus.clone());
+
+        bus.broadcast(Event::System(SystemEvent::ActorReady {
+            actor_name: "Memory",
+        }))
+        .await
+        .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
+
         Ok(())
     }
 

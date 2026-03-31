@@ -492,7 +492,14 @@ impl Actor for InferenceActor {
             }
         }
 
-        self.bus = Some(bus);
+        self.bus = Some(bus.clone());
+
+        bus.broadcast(Event::System(SystemEvent::ActorReady {
+            actor_name: "Inference",
+        }))
+        .await
+        .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
+
         Ok(())
     }
 

@@ -8,6 +8,7 @@
 //! - Verbose mode for actor event logging
 //! - All transparency queries and model selection
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,7 +31,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::tui_state::{EditorState, Message, MessageRole, SessionStats};
+use crate::tui_state::{ActorStatus, EditorState, Message, MessageRole, SessionStats};
 use crate::{display, model_selector, query};
 use runtime::boot::Runtime;
 
@@ -75,6 +76,10 @@ struct Shell {
     current_model: Option<String>,
     /// Model selector popup (visible when not None).
     model_popup: Option<model_selector::ModelSelectorPopup>,
+    /// Actor health status tracking.
+    actor_health: HashMap<&'static str, ActorStatus>,
+    /// Actors health popup visibility flag.
+    actors_popup_visible: bool,
     /// Runtime reference for config access.
     runtime: Arc<Runtime>,
 }
@@ -93,6 +98,14 @@ impl Shell {
             ),
         ];
 
+        // Pre-populate actor health with all known actors as Starting
+        let mut actor_health = HashMap::new();
+        actor_health.insert("Platform", ActorStatus::Starting);
+        actor_health.insert("Inference", ActorStatus::Starting);
+        actor_health.insert("CTP", ActorStatus::Starting);
+        actor_health.insert("Memory", ActorStatus::Starting);
+        actor_health.insert("Soul", ActorStatus::Starting);
+
         Self {
             bus: runtime.bus.clone(),
             editor: EditorState::new(),
@@ -105,6 +118,8 @@ impl Shell {
             verbose: false,
             current_model: runtime.config.preferred_model.clone(),
             model_popup: None,
+            actor_health,
+            actors_popup_visible: false,
             runtime,
         }
     }
@@ -132,6 +147,11 @@ impl Shell {
         // Model selector popup (rendered on top if visible)
         if let Some(popup) = &self.model_popup {
             model_selector::render_popup(popup, frame);
+        }
+
+        // Actors health popup (rendered on top if visible)
+        if self.actors_popup_visible {
+            self.render_actors_popup(frame);
         }
     }
 
@@ -310,6 +330,71 @@ impl Shell {
         }
     }
 
+    /// Render the actors health popup.
+    fn render_actors_popup(&self, frame: &mut ratatui::Frame) {
+        use ratatui::widgets::{Cell, Clear, Row, Table};
+
+        // Create a centered popup (60% width, 50% height)
+        let area = centered_rect(60, 50, frame.area());
+
+        // Clear the area
+        frame.render_widget(Clear, area);
+
+        // Build table rows — fixed order: Platform, Inference, CTP, Memory, Soul
+        let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
+        let mut rows = Vec::new();
+
+        for name in &actor_names {
+            let status = self
+                .actor_health
+                .get(name)
+                .unwrap_or(&ActorStatus::Starting);
+            let (symbol, status_text, status_color) = match status {
+                ActorStatus::Ready => ("✓", "Ready", Color::Green),
+                ActorStatus::Starting => ("◦", "Starting", Color::Yellow),
+                ActorStatus::Failed(reason) => ("✗", reason.as_str(), Color::Red),
+            };
+
+            rows.push(Row::new(vec![
+                Cell::from(name.to_string()),
+                Cell::from(format!("{} {}", symbol, status_text))
+                    .style(Style::default().fg(status_color)),
+            ]));
+        }
+
+        let widths = [Constraint::Percentage(30), Constraint::Percentage(70)];
+        let table = Table::new(rows, widths)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("  Actor Health  "),
+            )
+            .header(
+                Row::new(vec!["Actor", "Status"])
+                    .style(Style::default().add_modifier(Modifier::BOLD))
+                    .bottom_margin(1),
+            )
+            .column_spacing(2);
+
+        frame.render_widget(table, area);
+
+        // Render footer hint at bottom of popup
+        let footer_area = ratatui::layout::Rect {
+            x: area.x + 2,
+            y: area.y + area.height.saturating_sub(2),
+            width: area.width.saturating_sub(4),
+            height: 1,
+        };
+
+        let footer = Paragraph::new(Line::from(Span::styled(
+            "[any key to dismiss]",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        frame.render_widget(footer, footer_area);
+    }
+
     /// Add a message to the conversation log.
     fn add_message(&mut self, role: MessageRole, text: String) {
         self.messages.push(Message::new(role, text));
@@ -322,6 +407,17 @@ impl Shell {
     /// Handle bus events and update internal state.
     fn handle_bus_event(&mut self, event: &Event) {
         match event {
+            Event::System(bus::events::SystemEvent::ActorReady { actor_name }) => {
+                if let Some(status) = self.actor_health.get_mut(actor_name) {
+                    *status = ActorStatus::Ready;
+                }
+                if self.verbose {
+                    self.add_message(
+                        MessageRole::System,
+                        format!("[verbose] Actor ready: {}", actor_name),
+                    );
+                }
+            }
             Event::Inference(InferenceEvent::InferenceCompleted {
                 text,
                 request_id,
@@ -431,10 +527,7 @@ impl Shell {
                 DispatchResult::Continue
             }
             "/actors" => {
-                self.add_message(
-                    MessageRole::System,
-                    "Actor health: use the /actors command (coming soon)".to_string(),
-                );
+                self.actors_popup_visible = true;
                 DispatchResult::Continue
             }
             "/quit" | "/exit" | "/q" => DispatchResult::Quit,
@@ -536,7 +629,7 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "/actors                Show actor health (coming soon)".to_string(),
+            "/actors                Show actor health status".to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -699,6 +792,12 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                 );
                             }
 
+                            // ── Actors Popup Key Handlers ─────────────────────────────
+                            // Any key dismisses the actors health popup
+                            _ if shell.actors_popup_visible && shell.model_popup.is_none() => {
+                                shell.actors_popup_visible = false;
+                            }
+
                             // ── Normal Key Handlers (when popup is NOT visible) ──────
                             // Enter — submit line
                             (KeyCode::Enter, _) => {
@@ -785,6 +884,31 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     display::success("Sena stopped cleanly.");
 
     Ok(exit_reason)
+}
+
+/// Helper to create a centered rect using percentage of the available rect.
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 /// Format bus events for verbose mode.

@@ -93,7 +93,14 @@ impl Actor for PlatformActor {
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {
         self.bus_rx = Some(bus.subscribe_broadcast());
-        self.bus = Some(bus);
+        self.bus = Some(bus.clone());
+
+        bus.broadcast(Event::System(SystemEvent::ActorReady {
+            actor_name: "Platform",
+        }))
+        .await
+        .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
+
         Ok(())
     }
 

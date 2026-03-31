@@ -18,6 +18,8 @@ pub enum SystemEvent {
     BootComplete,
     /// An actor has failed.
     ActorFailed(ActorFailureInfo),
+    /// Emitted by each actor when it has successfully started and is ready.
+    ActorReady { actor_name: &'static str },
     /// Encryption subsystem initialized successfully.
     EncryptionInitialized,
     /// Encryption initialization failed.
@@ -70,6 +72,19 @@ mod tests {
         let cloned = info.clone();
         assert_eq!(cloned.actor_name, "actor1");
         assert_eq!(cloned.error_msg, "error1");
+    }
+
+    #[test]
+    fn actor_ready_constructs_and_clones() {
+        let event = SystemEvent::ActorReady {
+            actor_name: "Platform",
+        };
+        let cloned = event.clone();
+        if let SystemEvent::ActorReady { actor_name } = cloned {
+            assert_eq!(actor_name, "Platform");
+        } else {
+            panic!("Expected ActorReady variant");
+        }
     }
 
     // Compile-time verification: SystemEvent and ActorFailureInfo are Send

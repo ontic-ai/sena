@@ -1,9 +1,11 @@
-﻿//! SoulActor: owns the EncryptedDb and handles all Soul subsystem events.
+//! SoulActor: owns the EncryptedDb and handles all Soul subsystem events.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bus::events::soul::{SoulEventLogged, SoulReadCompleted, SoulSummary, SoulSummaryRequested, SoulWriteRequest};
+use bus::events::soul::{
+    SoulEventLogged, SoulReadCompleted, SoulSummary, SoulSummaryRequested, SoulWriteRequest,
+};
 use bus::events::transparency::SoulSummaryForTransparency;
 use bus::events::{CTPEvent, InferenceEvent, PlatformEvent};
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SystemEvent};
@@ -43,11 +45,18 @@ impl SoulActor {
         }
     }
 
-    fn handle_write(&mut self, req: SoulWriteRequest, bus: &Arc<EventBus>) -> Result<(), SoulError> {
+    fn handle_write(
+        &mut self,
+        req: SoulWriteRequest,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
         let row_id = self.next_event_id;
         self.next_event_id += 1;
 
-        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
 
         let entry = format!(
@@ -66,14 +75,24 @@ impl SoulActor {
         let bus_clone = Arc::clone(bus);
         tokio::spawn(async move {
             let _ = bus_clone
-                .broadcast(Event::Soul(SoulEvent::EventLogged(SoulEventLogged { row_id, request_id })))
+                .broadcast(Event::Soul(SoulEvent::EventLogged(SoulEventLogged {
+                    row_id,
+                    request_id,
+                })))
                 .await;
         });
         Ok(())
     }
 
-    fn handle_summary(&self, req: SoulSummaryRequested, bus: &Arc<EventBus>) -> Result<(), SoulError> {
-        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+    fn handle_summary(
+        &self,
+        req: SoulSummaryRequested,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
 
         let read_txn = redb.begin_read()?;
@@ -83,10 +102,12 @@ impl SoulActor {
             .iter()?
             .rev()
             .take(req.max_events)
-            .map(|r: Result<(redb::AccessGuard<'_, u64>, redb::AccessGuard<'_, &[u8]>), _>| {
-                let (_, v) = r?;
-                Ok(String::from_utf8_lossy(v.value()).into_owned())
-            })
+            .map(
+                |r: Result<(redb::AccessGuard<'_, u64>, redb::AccessGuard<'_, &[u8]>), _>| {
+                    let (_, v) = r?;
+                    Ok(String::from_utf8_lossy(v.value()).into_owned())
+                },
+            )
             .collect::<Result<Vec<_>, redb::StorageError>>()?;
 
         entries.reverse();
@@ -105,7 +126,11 @@ impl SoulActor {
         let bus_clone = Arc::clone(bus);
         tokio::spawn(async move {
             let _ = bus_clone
-                .broadcast(Event::Soul(SoulEvent::SummaryReady(SoulSummary { content, event_count, request_id })))
+                .broadcast(Event::Soul(SoulEvent::SummaryReady(SoulSummary {
+                    content,
+                    event_count,
+                    request_id,
+                })))
                 .await;
         });
         Ok(())
@@ -116,7 +141,10 @@ impl SoulActor {
     }
 
     fn write_identity_signal(&self, key: &str, value: &str) -> Result<(), SoulError> {
-        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
         let write_txn = redb.begin_write()?;
         {
@@ -128,7 +156,10 @@ impl SoulActor {
     }
 
     fn increment_identity_counter(&self, key: &str, delta: u64) -> Result<(), SoulError> {
-        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
         let write_txn = redb.begin_write()?;
         {
@@ -190,8 +221,15 @@ impl SoulActor {
     }
 
     /// Handle a transparency ReadRequested — build a redacted summary and broadcast ReadCompleted.
-    fn handle_read(&self, req: bus::events::soul::SoulReadRequest, bus: &Arc<EventBus>) -> Result<(), SoulError> {
-        let db = self.db.as_ref().ok_or_else(|| SoulError::Database("not initialized".into()))?;
+    fn handle_read(
+        &self,
+        req: bus::events::soul::SoulReadRequest,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
         let redb = db.db()?;
 
         let signals = read_identity_signals(redb)?;
@@ -203,15 +241,21 @@ impl SoulActor {
         for (key, value) in &signals {
             if key.starts_with("task_pref::") {
                 if let Ok(n) = value.parse::<u64>() {
-                    if n > 0 { work_patterns.push(key.trim_start_matches("task_pref::").to_string()); }
+                    if n > 0 {
+                        work_patterns.push(key.trim_start_matches("task_pref::").to_string());
+                    }
                 }
             } else if key.starts_with("tool_pref::") {
                 if let Ok(n) = value.parse::<u64>() {
-                    if n > 0 { tool_preferences.push(key.trim_start_matches("tool_pref::").to_string()); }
+                    if n > 0 {
+                        tool_preferences.push(key.trim_start_matches("tool_pref::").to_string());
+                    }
                 }
             } else if key.starts_with("interest::") {
                 if let Ok(n) = value.parse::<u64>() {
-                    if n > 0 { interest_clusters.push(key.trim_start_matches("interest::").to_string()); }
+                    if n > 0 {
+                        interest_clusters.push(key.trim_start_matches("interest::").to_string());
+                    }
                 }
             } else if key == "inference_cycle_count" {
                 inference_cycle_count = value.parse().unwrap_or(0);
@@ -228,7 +272,10 @@ impl SoulActor {
         let bus_clone = Arc::clone(bus);
         tokio::spawn(async move {
             let _ = bus_clone
-                .broadcast(Event::Soul(SoulEvent::ReadCompleted(SoulReadCompleted { summary, request_id })))
+                .broadcast(Event::Soul(SoulEvent::ReadCompleted(SoulReadCompleted {
+                    summary,
+                    request_id,
+                })))
                 .await;
         });
         Ok(())
@@ -255,7 +302,11 @@ fn infer_interest_topics(text: &str) -> Vec<&'static str> {
     if lower.contains("rust") || lower.contains("cargo") || lower.contains("tokio") {
         topics.push("rust");
     }
-    if lower.contains("llm") || lower.contains("embedding") || lower.contains("prompt") || lower.contains("model") {
+    if lower.contains("llm")
+        || lower.contains("embedding")
+        || lower.contains("prompt")
+        || lower.contains("model")
+    {
         topics.push("ai");
     }
     if lower.contains("sql") || lower.contains("database") || lower.contains("redb") {
@@ -292,7 +343,9 @@ impl Actor for SoulActor {
                     );
                     if self.db_path.exists() {
                         std::fs::remove_file(&self.db_path).map_err(|io| {
-                            ActorError::StartupFailed(format!("could not remove stale soul db: {io}"))
+                            ActorError::StartupFailed(format!(
+                                "could not remove stale soul db: {io}"
+                            ))
                         })?;
                     }
                     EncryptedDb::open(&self.db_path, &master_key)
@@ -304,13 +357,16 @@ impl Actor for SoulActor {
         };
 
         schema::apply_schema(
-            db.db().map_err(|e| ActorError::StartupFailed(e.to_string()))?,
+            db.db()
+                .map_err(|e| ActorError::StartupFailed(e.to_string()))?,
         )
         .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
 
         // Recover next_event_id from the database.
         {
-            let redb = db.db().map_err(|e| ActorError::StartupFailed(e.to_string()))?;
+            let redb = db
+                .db()
+                .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
             if let Ok(read_txn) = redb.begin_read() {
                 if let Ok(log) = read_txn.open_table(EVENT_LOG) {
                     if let Some(Ok((k, _))) = log
@@ -331,6 +387,12 @@ impl Actor for SoulActor {
         bus.register_directed(SOUL_ACTOR_NAME, tx)
             .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
         self.directed_rx = Some(rx);
+
+        bus.broadcast(Event::System(SystemEvent::ActorReady {
+            actor_name: "Soul",
+        }))
+        .await
+        .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
 
         self.bus = Some(bus);
         Ok(())
@@ -449,7 +511,10 @@ mod tests {
         let mut actor = SoulActor::new(&db_path, test_key());
         let bus = Arc::new(EventBus::new());
 
-        actor.start(Arc::clone(&bus)).await.expect("start should succeed");
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
         actor.stop().await.expect("stop should succeed");
 
         assert!(db_path.exists());
@@ -464,7 +529,20 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut rx = bus.subscribe_broadcast();
 
-        actor.start(Arc::clone(&bus)).await.expect("start should succeed");
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Consume the ActorReady event emitted during start()
+        let ready_event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("should receive ActorReady within timeout")
+            .expect("should receive event");
+        assert!(matches!(
+            ready_event,
+            Event::System(SystemEvent::ActorReady { actor_name: "Soul" })
+        ));
 
         let req = SoulWriteRequest {
             description: "user opened editor".to_string(),
@@ -480,8 +558,13 @@ mod tests {
             .expect("should receive event");
         assert!(matches!(event, Event::Soul(SoulEvent::EventLogged(_))));
 
-        let summary_req = SoulSummaryRequested { max_events: 10, request_id: 2 };
-        actor.handle_summary(summary_req, &bus).expect("summary should succeed");
+        let summary_req = SoulSummaryRequested {
+            max_events: 10,
+            request_id: 2,
+        };
+        actor
+            .handle_summary(summary_req, &bus)
+            .expect("summary should succeed");
 
         let summary_event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await

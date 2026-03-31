@@ -2,6 +2,18 @@
 
 use std::time::Instant;
 
+/// Status of an actor in the system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorStatus {
+    /// Actor is starting up.
+    Starting,
+    /// Actor is ready and operational.
+    Ready,
+    /// Actor failed to start or encountered a fatal error.
+    #[allow(dead_code)]
+    Failed(String),
+}
+
 /// Session statistics displayed in the TUI.
 #[derive(Debug, Clone)]
 pub struct SessionStats {

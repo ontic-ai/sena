@@ -69,7 +69,14 @@ impl Actor for CTPActor {
         // Subscribe to broadcast channel for all events
         let rx = bus.subscribe_broadcast();
         self.bus_rx = Some(rx);
-        self.bus = Some(bus);
+        self.bus = Some(bus.clone());
+
+        bus.broadcast(Event::System(SystemEvent::ActorReady { actor_name: "CTP" }))
+            .await
+            .map_err(|e| {
+                ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e))
+            })?;
+
         Ok(())
     }
 
@@ -224,7 +231,10 @@ mod tests {
         );
 
         let bus = Arc::new(EventBus::new());
-        actor.start(bus.clone()).await.unwrap();
+        actor
+            .start(bus.clone())
+            .await
+            .expect("actor start should succeed in test");
 
         // Spawn actor run in background
         let run_handle = tokio::spawn(async move { actor.run().await });
@@ -235,14 +245,14 @@ mod tests {
         // Send shutdown signal
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await
-            .unwrap();
+            .expect("shutdown signal broadcast should succeed in test");
 
         // Wait for actor to complete
         let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
 
         // Actor should have stopped cleanly
         assert!(result.is_ok());
-        assert!(result.unwrap().is_ok());
+        assert!(result.expect("run_handle should complete").is_ok());
     }
 
     #[test]
@@ -267,7 +277,10 @@ mod tests {
         let mut bus_rx = bus.subscribe_broadcast();
 
         // Start the actor
-        actor.start(bus.clone()).await.unwrap();
+        actor
+            .start(bus.clone())
+            .await
+            .expect("actor start should succeed in test");
 
         // Spawn actor run in background
         let run_handle = tokio::spawn(async move { actor.run().await });
@@ -281,7 +294,7 @@ mod tests {
             query,
         )))
         .await
-        .unwrap();
+        .expect("transparency query broadcast should succeed in test");
 
         // Receive events until we get the response
         let mut found_response = false;
@@ -306,7 +319,7 @@ mod tests {
         // Send shutdown signal
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await
-            .unwrap();
+            .expect("shutdown signal broadcast should succeed in test");
 
         // Wait for actor to stop
         let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
