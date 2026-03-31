@@ -80,12 +80,39 @@ pub fn prompt_inline(text: &str) {
 pub fn help() {
     section("Commands");
     println!("  {BOLD}{CYAN}/observation{RESET}  {DIM}or{RESET} /obs   What are you observing right now?");
-    println!("  {BOLD}{CYAN}/memory{RESET}       {DIM}or{RESET} /mem   What do you remember about me?");
+    println!(
+        "  {BOLD}{CYAN}/memory{RESET}       {DIM}or{RESET} /mem   What do you remember about me?"
+    );
     println!("  {BOLD}{CYAN}/explanation{RESET}  {DIM}or{RESET} /why   Why did you say that?");
     println!("  {BOLD}{CYAN}/models{RESET}               Select which Ollama model to use");
     println!("  {BOLD}{CYAN}/help{RESET}                 Show this message");
     println!("  {BOLD}{CYAN}/quit{RESET}                 Exit Sena");
     println!();
+}
+
+/// Print the session summary after TUI exit.
+///
+/// Displays session metrics: duration, messages sent, tokens received.
+/// Uses ANSI colors for visual clarity. The "~" prefix on tokens indicates
+/// it's an estimate (some responses may not return exact token counts).
+pub fn print_session_summary(stats: &crate::tui_state::SessionStats) {
+    println!();
+    println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
+    println!("  {BOLD}{CYAN}Session Summary{RESET}");
+    println!("  {DIM}──────────────────────────────────{RESET}");
+    println!(
+        "  Duration   {DIM}│{RESET}  {BOLD}{}{RESET}",
+        stats.elapsed_formatted()
+    );
+    println!(
+        "  Messages   {DIM}│{RESET}  {BOLD}{}{RESET}",
+        stats.messages_sent
+    );
+    println!(
+        "  Tokens     {DIM}│{RESET}  {BOLD}~{}{RESET}",
+        stats.tokens_received
+    );
+    println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
 }
 
 #[cfg(test)]
@@ -97,5 +124,18 @@ mod tests {
         assert!(!RESET.is_empty());
         assert!(!BOLD.is_empty());
         assert!(!CYAN.is_empty());
+    }
+
+    #[test]
+    fn print_session_summary_does_not_panic() {
+        use crate::tui_state::SessionStats;
+
+        // Create a mock SessionStats with some data
+        let mut stats = SessionStats::new();
+        stats.messages_sent = 5;
+        stats.tokens_received = 1234;
+
+        // Call should not panic
+        print_session_summary(&stats);
     }
 }

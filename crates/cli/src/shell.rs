@@ -869,9 +869,17 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     drop(_guard); // Restore terminal
     drop(terminal); // Drop terminal before printing to stdout
 
+    // Extract stats before dropping shell
+    let stats = shell.stats.clone();
+
     // Drop shell to release Arc<Runtime> reference
     let timeout_secs = runtime.config.shutdown_timeout_secs;
     drop(shell);
+
+    // Print session summary only for Quit (not Restart)
+    if exit_reason == ShellExitReason::Quit {
+        display::print_session_summary(&stats);
+    }
 
     println!();
     display::info("Shutting down actors...");
