@@ -22,6 +22,13 @@ use crate::extractor::SenaExtractor;
 const TRANSPARENCY_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const TOP_MEMORY_CHUNKS: usize = 8;
 
+pub(crate) fn empty_memory_response() -> MemoryResponse {
+    MemoryResponse {
+        soul_summary: default_soul_summary(),
+        memory_chunks: Vec::new(),
+    }
+}
+
 /// Handle a transparency query for user memory: fetch Soul summary + recent memory chunks.
 ///
 /// # Timeouts
@@ -36,9 +43,15 @@ pub async fn handle_transparency_query(
 ) -> Result<(), MemoryError> {
     // Step 1: Request Soul summary
     let soul_request = SoulReadRequest { request_id };
-    bus.broadcast(Event::Soul(SoulEvent::ReadRequested(soul_request)))
+    if let Err(error) = bus
+        .broadcast(Event::Soul(SoulEvent::ReadRequested(soul_request)))
         .await
-        .map_err(|e| MemoryError::Store(format!("failed to emit SoulReadRequest: {e}")))?;
+    {
+        eprintln!(
+            "[memory transparency] soul summary request failed ({}), using default summary",
+            error
+        );
+    }
 
     // Step 2: Wait for Soul response with timeout
     let soul_summary = wait_for_soul_summary(broadcast_rx, request_id).await;
@@ -76,21 +89,33 @@ async fn wait_for_soul_summary(
     broadcast_rx: &mut broadcast::Receiver<Event>,
     request_id: u64,
 ) -> SoulSummaryForTransparency {
+    wait_for_soul_summary_with_timeout(broadcast_rx, request_id, TRANSPARENCY_QUERY_TIMEOUT).await
+}
+
+async fn wait_for_soul_summary_with_timeout(
+    broadcast_rx: &mut broadcast::Receiver<Event>,
+    request_id: u64,
+    timeout_duration: Duration,
+) -> SoulSummaryForTransparency {
     let result = timeout(
-        TRANSPARENCY_QUERY_TIMEOUT,
+        timeout_duration,
         wait_for_soul_event(broadcast_rx, request_id),
     )
     .await;
 
     match result {
         Ok(Some(summary)) => summary,
-        Ok(None) | Err(_) => SoulSummaryForTransparency {
-            user_name: None,
-            inference_cycle_count: 0,
-            work_patterns: vec![],
-            tool_preferences: vec![],
-            interest_clusters: vec![],
-        },
+        Ok(None) | Err(_) => default_soul_summary(),
+    }
+}
+
+fn default_soul_summary() -> SoulSummaryForTransparency {
+    SoulSummaryForTransparency {
+        user_name: None,
+        inference_cycle_count: 0,
+        work_patterns: vec![],
+        tool_preferences: vec![],
+        interest_clusters: vec![],
     }
 }
 
@@ -167,15 +192,31 @@ mod tests {
 
     #[test]
     fn default_soul_summary_is_empty() {
-        let summary = SoulSummaryForTransparency {
-            user_name: None,
-            inference_cycle_count: 0,
-            work_patterns: vec![],
-            tool_preferences: vec![],
-            interest_clusters: vec![],
-        };
+        let summary = default_soul_summary();
         assert_eq!(summary.inference_cycle_count, 0);
         assert!(summary.work_patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_for_soul_summary_timeout_returns_default_summary() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        let summary =
+            wait_for_soul_summary_with_timeout(&mut rx, 42, Duration::from_millis(10)).await;
+
+        assert_eq!(summary.inference_cycle_count, 0);
+        assert!(summary.work_patterns.is_empty());
+        assert!(summary.tool_preferences.is_empty());
+        assert!(summary.interest_clusters.is_empty());
+    }
+
+    #[test]
+    fn empty_memory_response_has_no_chunks() {
+        let response = empty_memory_response();
+
+        assert_eq!(response.soul_summary.inference_cycle_count, 0);
+        assert!(response.memory_chunks.is_empty());
     }
 
     #[test]

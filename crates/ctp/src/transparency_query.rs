@@ -4,38 +4,45 @@
 //! (`UserMemory`, `InferenceExplanation`) are handled by the memory and
 //! inference actors respectively; CTP silently ignores them.
 
-use std::time::Instant;
-
+use bus::events::ctp::ContextSnapshot;
 use bus::events::transparency::ObservationResponse;
-
-use crate::context_assembler::ContextAssembler;
-use crate::signal_buffer::SignalBuffer;
 
 /// Assemble a `CurrentObservation` response from the current signal buffer.
 ///
 /// This is the only transparency query CTP owns. All other query types
 /// must be routed to their respective actors.
-pub fn handle_current_observation(
-    buffer: &SignalBuffer,
-    assembler: &ContextAssembler,
-    session_start: Instant,
-) -> ObservationResponse {
-    let snapshot = assembler.assemble(buffer, session_start);
+pub fn handle_current_observation(snapshot: ContextSnapshot) -> ObservationResponse {
     ObservationResponse { snapshot }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use bus::events::platform::{KeystrokeCadence, WindowContext};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn handle_current_observation_returns_snapshot() {
-        let buffer = SignalBuffer::new(Duration::from_secs(300));
-        let assembler = ContextAssembler::new();
-        let session_start = Instant::now();
+        let snapshot = ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Code".to_string(),
+                window_title: None,
+                bundle_id: None,
+                timestamp: Instant::now(),
+            },
+            recent_files: Vec::new(),
+            clipboard_digest: Some("digest".to_string()),
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 42.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(1),
+            },
+            session_duration: Duration::from_secs(5),
+            inferred_task: None,
+            timestamp: Instant::now(),
+        };
 
-        let response = handle_current_observation(&buffer, &assembler, session_start);
-        assert_eq!(response.snapshot.active_app.app_name, "Unknown");
+        let response = handle_current_observation(snapshot);
+        assert_eq!(response.snapshot.active_app.app_name, "Code");
     }
 }

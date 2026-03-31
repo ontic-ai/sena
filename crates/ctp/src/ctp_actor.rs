@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bus::events::ctp::ContextSnapshot;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
@@ -23,6 +24,7 @@ pub struct CTPActor {
     buffer: SignalBuffer,
     assembler: ContextAssembler,
     gate: TriggerGate,
+    latest_snapshot: Option<ContextSnapshot>,
     session_start: Instant,
     bus: Option<Arc<EventBus>>,
     bus_rx: Option<broadcast::Receiver<Event>>,
@@ -45,6 +47,7 @@ impl CTPActor {
             buffer: SignalBuffer::new(buffer_window),
             assembler: ContextAssembler::new(),
             gate: TriggerGate::new(trigger_interval),
+            latest_snapshot: None,
             session_start: Instant::now(),
             bus: None,
             bus_rx: None,
@@ -134,11 +137,7 @@ impl Actor for CTPActor {
 
                 // Periodic trigger check
                 _ = ticker.tick() => {
-                    // Prune old events from buffer
-                    self.buffer.prune();
-
-                    // Assemble context snapshot
-                    let snapshot = self.assembler.assemble(&self.buffer, self.session_start);
+                    let snapshot = self.refresh_snapshot();
 
                     // Emit ContextSnapshotReady event on each tick so downstream
                     // actors can observe context evolution even when no trigger fires.
@@ -169,6 +168,17 @@ impl Actor for CTPActor {
 }
 
 impl CTPActor {
+    fn refresh_snapshot(&mut self) -> ContextSnapshot {
+        self.buffer.prune();
+        let snapshot = self.assembler.assemble_with_previous(
+            &self.buffer,
+            self.session_start,
+            self.latest_snapshot.as_ref(),
+        );
+        self.latest_snapshot = Some(snapshot.clone());
+        snapshot
+    }
+
     /// Handle a platform event by pushing it into the signal buffer.
     fn handle_platform_event(&mut self, event: PlatformEvent) {
         match event {
@@ -185,12 +195,13 @@ impl CTPActor {
                 self.buffer.push_keystroke(cadence);
             }
         }
+
+        self.refresh_snapshot();
     }
 
     /// Handle a `CurrentObservation` transparency query and broadcast the response.
-    async fn handle_observation_query(&self, bus: &Arc<EventBus>) -> Result<(), String> {
-        let response =
-            handle_current_observation(&self.buffer, &self.assembler, self.session_start);
+    async fn handle_observation_query(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
+        let response = handle_current_observation(self.refresh_snapshot());
 
         bus.broadcast(Event::Transparency(
             TransparencyEvent::ObservationResponded(response),
@@ -203,6 +214,7 @@ impl CTPActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::platform::{ClipboardDigest, KeystrokeCadence, PlatformEvent, WindowContext};
     use bus::events::transparency::TransparencyQuery;
 
     #[tokio::test]
@@ -322,6 +334,94 @@ mod tests {
             .expect("shutdown signal broadcast should succeed in test");
 
         // Wait for actor to stop
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn observation_query_reflects_latest_platform_context() {
+        let mut actor = CTPActor::new(
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            Duration::from_millis(100),
+        );
+
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("actor start should succeed in test");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        bus.broadcast(Event::Platform(PlatformEvent::WindowChanged(
+            WindowContext {
+                app_name: "Code".to_string(),
+                window_title: Some("shell.rs".to_string()),
+                bundle_id: Some("com.microsoft.VSCode".to_string()),
+                timestamp: Instant::now(),
+            },
+        )))
+        .await
+        .expect("window event broadcast should succeed in test");
+
+        bus.broadcast(Event::Platform(PlatformEvent::ClipboardChanged(
+            ClipboardDigest {
+                digest: Some("digest-abc".to_string()),
+                char_count: 12,
+                timestamp: Instant::now(),
+            },
+        )))
+        .await
+        .expect("clipboard event broadcast should succeed in test");
+
+        bus.broadcast(Event::Platform(PlatformEvent::KeystrokePattern(
+            KeystrokeCadence {
+                events_per_minute: 144.0,
+                burst_detected: true,
+                idle_duration: Duration::from_secs(3),
+            },
+        )))
+        .await
+        .expect("keystroke event broadcast should succeed in test");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            TransparencyQuery::CurrentObservation,
+        )))
+        .await
+        .expect("transparency query broadcast should succeed in test");
+
+        let mut response = None;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(250), bus_rx.recv()).await {
+                Ok(Ok(Event::Transparency(TransparencyEvent::ObservationResponded(resp)))) => {
+                    response = Some(resp);
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => continue,
+            }
+        }
+
+        let response = response.expect("observation response should be received");
+        assert_eq!(response.snapshot.active_app.app_name, "Code");
+        assert_eq!(
+            response.snapshot.clipboard_digest.as_deref(),
+            Some("digest-abc")
+        );
+        assert_eq!(response.snapshot.keystroke_cadence.events_per_minute, 144.0);
+        assert!(response.snapshot.keystroke_cadence.burst_detected);
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown signal broadcast should succeed in test");
+
         let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
         assert!(result.is_ok());
     }

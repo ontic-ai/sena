@@ -408,13 +408,20 @@ impl Actor for MemoryActor {
 
                                         if let Err(e) = transparency_query::handle_transparency_query(
                                             s,
-                                            b,
+                                            Arc::clone(&b),
                                             &mut bcast_rx,
                                             request_id,
                                         )
                                         .await
                                         {
                                             eprintln!("[memory] transparency query failed: {e}");
+                                            let _ = b
+                                                .broadcast(Event::Transparency(
+                                                    TransparencyEvent::MemoryResponded(
+                                                        transparency_query::empty_memory_response(),
+                                                    ),
+                                                ))
+                                                .await;
                                         }
                                     });
                                 }

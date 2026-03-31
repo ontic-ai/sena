@@ -16,6 +16,8 @@ use tokio::sync::broadcast;
 
 use crate::display::{BOLD, CYAN, DIM, GREEN, RESET, YELLOW};
 
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Parse query type string to TransparencyQuery enum.
 ///
 /// # Arguments
@@ -47,14 +49,36 @@ pub fn parse_query_type(query_type: &str) -> Result<TransparencyQuery> {
 /// - Bus send failure
 /// - No matching response within 5-second timeout
 pub async fn query_on_bus(query: TransparencyQuery, bus: &Arc<EventBus>) -> Result<String> {
+    query_on_bus_with_timeout(query, bus, QUERY_TIMEOUT).await
+}
+
+async fn query_on_bus_with_timeout(
+    query: TransparencyQuery,
+    bus: &Arc<EventBus>,
+    timeout_duration: Duration,
+) -> Result<String> {
     let mut rx = bus.subscribe_broadcast();
-    bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
-        query.clone(),
-    )))
-    .await?;
-    tokio::time::timeout(Duration::from_secs(5), wait_for_response(query, &mut rx))
+
+    if let Err(error) = bus
+        .broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            query.clone(),
+        )))
         .await
-        .map_err(|_| anyhow!("query timed out — no response in 5 seconds"))?
+    {
+        return Ok(fallback_query_output(
+            &query,
+            &format!("Query dispatch failed: {error}"),
+        ));
+    }
+
+    match tokio::time::timeout(timeout_duration, wait_for_response(query.clone(), &mut rx)).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Ok(fallback_query_output(&query, &error.to_string())),
+        Err(_) => Ok(fallback_query_output(
+            &query,
+            "The transparency response timed out.",
+        )),
+    }
 }
 
 /// Execute a transparency query and return formatted output.
@@ -193,7 +217,10 @@ fn format_memory_response(resp: &MemoryResponse) -> String {
     out.push_str(&format!("\n\n{BOLD}{CYAN}Recent Memories{RESET}"));
 
     if resp.memory_chunks.is_empty() {
-        out.push_str(&format!("\n  {DIM}(no memories retrieved){RESET}"));
+        out.push_str(&format!(
+            "\n  {DIM}{}{RESET}",
+            empty_memory_message(summary)
+        ));
     } else {
         for (i, chunk) in resp.memory_chunks.iter().enumerate() {
             let preview = if chunk.text.chars().count() > 120 {
@@ -237,10 +264,12 @@ fn format_inference_explanation_response(resp: &InferenceExplanationResponse) ->
     );
 
     if resp.working_memory_context.is_empty() {
-        out.push_str(&format!("\n{BOLD}Memory{RESET}    {DIM}(none used){RESET}"));
+        out.push_str(&format!(
+            "\n{BOLD}Working Memory{RESET}  {DIM}(none used in the last completed cycle){RESET}"
+        ));
     } else {
         out.push_str(&format!(
-            "\n{BOLD}Memory{RESET}    {YELLOW}{} chunks used{RESET}",
+            "\n{BOLD}Working Memory{RESET}  {YELLOW}{} chunks used in the last completed cycle{RESET}",
             resp.working_memory_context.len()
         ));
         for (i, chunk) in resp.working_memory_context.iter().enumerate() {
@@ -255,6 +284,34 @@ fn format_inference_explanation_response(resp: &InferenceExplanationResponse) ->
     }
 
     out
+}
+
+fn fallback_query_output(query: &TransparencyQuery, reason: &str) -> String {
+    match query {
+        TransparencyQuery::CurrentObservation => format!(
+            "{BOLD}{CYAN}Observation{RESET}\n{DIM}Observation is temporarily unavailable. {reason}{RESET}"
+        ),
+        TransparencyQuery::UserMemory => format!(
+            "{BOLD}{CYAN}Memory{RESET}\n{DIM}Memory is temporarily unavailable right now. {reason}{RESET}"
+        ),
+        TransparencyQuery::InferenceExplanation => format!(
+            "{BOLD}{CYAN}Last Inference{RESET}\n{DIM}Explanation is temporarily unavailable right now. {reason}{RESET}"
+        ),
+    }
+}
+
+fn empty_memory_message(
+    summary: &bus::events::transparency::SoulSummaryForTransparency,
+) -> &'static str {
+    if summary.inference_cycle_count == 0
+        && summary.work_patterns.is_empty()
+        && summary.tool_preferences.is_empty()
+        && summary.interest_clusters.is_empty()
+    {
+        "No user memory is available yet. Sena has not retained any memories for this profile."
+    } else {
+        "No retrievable memory snippets are available right now."
+    }
 }
 
 #[cfg(test)]
@@ -418,7 +475,7 @@ mod tests {
 
         assert!(output.contains("Soul Summary"));
         assert!(output.contains("(none detected)"));
-        assert!(output.contains("(no memories retrieved)"));
+        assert!(output.contains("No user memory is available yet"));
     }
 
     #[test]
@@ -442,7 +499,9 @@ mod tests {
         assert!(output.contains("Rounds: 2"));
         assert!(output.contains("Summarize my work patterns"));
         assert!(output.contains("Rust developer"));
+        assert!(output.contains("Working Memory"));
         assert!(output.contains("1 chunks"));
+        assert!(output.contains("recent pattern analysis"));
     }
 
     #[test]
@@ -460,5 +519,21 @@ mod tests {
         // Should be truncated to 200 chars + "..."
         assert!(output.contains("..."));
         assert!(!output.contains(&long_text)); // Full text should not appear
+    }
+
+    #[tokio::test]
+    async fn query_on_bus_memory_timeout_returns_safe_message() {
+        let bus = Arc::new(EventBus::new());
+
+        let output = query_on_bus_with_timeout(
+            TransparencyQuery::UserMemory,
+            &bus,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("timeout fallback should still return text");
+
+        assert!(output.contains("Memory"));
+        assert!(output.contains("temporarily unavailable"));
     }
 }

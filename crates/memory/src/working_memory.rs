@@ -2,7 +2,9 @@
 //!
 //! WorkingMemory holds the current ContextSnapshot plus a rolling window of
 //! recent InferenceExchanges, enforcing a token budget by evicting the oldest
-//! exchanges when the budget is exceeded. NEVER persisted, NEVER passed to ech0.
+//! exchanges when the budget is exceeded. It is retained across multiple
+//! responses within the same cycle and only reset when a new cycle begins.
+//! NEVER persisted, NEVER passed to ech0.
 
 use bus::events::ctp::ContextSnapshot;
 
@@ -69,6 +71,10 @@ impl WorkingMemory {
     }
 
     pub fn clear(&mut self) {
+        self.reset_cycle();
+    }
+
+    pub fn reset_cycle(&mut self) {
         self.exchanges.clear();
         self.context = None;
         self.total_tokens = 0;
@@ -88,10 +94,41 @@ impl WorkingMemory {
 
     /// Produce text chunks for prompt assembly (oldest-first).
     pub fn to_chunks(&self) -> Vec<String> {
-        self.exchanges
-            .iter()
-            .map(|e| format!("Prompt: {}\nResponse: {}", e.prompt, e.response))
-            .collect()
+        let mut chunks = Vec::new();
+
+        if let Some(context) = &self.context {
+            let mut lines = vec![format!(
+                "Active application: {}",
+                context.active_app.app_name
+            )];
+
+            if let Some(task) = &context.inferred_task {
+                lines.push(format!(
+                    "Inferred task: {} ({:.0}%)",
+                    task.category,
+                    task.confidence * 100.0
+                ));
+            }
+
+            if context.clipboard_digest.is_some() {
+                lines.push("Clipboard digest available".to_string());
+            }
+
+            lines.push(format!(
+                "Keyboard cadence: {:.1} events/min",
+                context.keystroke_cadence.events_per_minute
+            ));
+
+            chunks.push(format!("Context:\n{}", lines.join("\n")));
+        }
+
+        chunks.extend(
+            self.exchanges
+                .iter()
+                .map(|e| format!("Prompt: {}\nResponse: {}", e.prompt, e.response)),
+        );
+
+        chunks
     }
 }
 
@@ -190,10 +227,33 @@ mod tests {
     #[test]
     fn to_chunks_returns_formatted_pairs() {
         let mut wm = WorkingMemory::new(10, 4096);
+        wm.add_context(make_snap());
         wm.add_exchange(ex("hello", "world"));
         let chunks = wm.to_chunks();
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].contains("hello") && chunks[0].contains("world"));
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("Active application: Test"));
+        assert!(chunks[1].contains("hello") && chunks[1].contains("world"));
+    }
+
+    #[test]
+    fn working_memory_retains_multiple_responses_until_cycle_reset() {
+        let mut wm = WorkingMemory::new(10, 4096);
+
+        wm.add_context(make_snap());
+        wm.add_exchange(ex("first prompt", "first response"));
+        wm.add_exchange(ex("second prompt", "second response"));
+
+        assert_eq!(wm.exchange_count(), 2);
+        assert!(wm.context().is_some());
+
+        let chunks = wm.to_chunks();
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[1].contains("first prompt"));
+        assert!(chunks[2].contains("second prompt"));
+
+        wm.reset_cycle();
+        assert!(wm.context().is_none());
+        assert_eq!(wm.exchange_count(), 0);
     }
 
     #[test]

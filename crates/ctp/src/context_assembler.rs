@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use bus::events::ctp::{ContextSnapshot, TaskHint};
-use bus::events::platform::KeystrokeCadence;
+use bus::events::platform::{KeystrokeCadence, WindowContext};
 
 use crate::signal_buffer::SignalBuffer;
 
@@ -28,17 +28,31 @@ impl ContextAssembler {
     /// # Returns
     /// A fully populated ContextSnapshot with defaults for missing signals.
     pub fn assemble(&self, buffer: &SignalBuffer, session_start: Instant) -> ContextSnapshot {
+        self.assemble_with_previous(buffer, session_start, None)
+    }
+
+    /// Assemble a ContextSnapshot from current buffer state while preserving
+    /// the last known observation when a signal is temporarily absent.
+    pub fn assemble_with_previous(
+        &self,
+        buffer: &SignalBuffer,
+        session_start: Instant,
+        previous_snapshot: Option<&ContextSnapshot>,
+    ) -> ContextSnapshot {
         let now = Instant::now();
 
-        // Get active app context, or create a default
-        let active_app = buffer.latest_window().cloned().unwrap_or_else(|| {
-            bus::events::platform::WindowContext {
+        // Preserve the last known active app when the rolling buffer no longer
+        // contains a recent window event.
+        let active_app = buffer
+            .latest_window()
+            .cloned()
+            .or_else(|| previous_snapshot.map(|snapshot| snapshot.active_app.clone()))
+            .unwrap_or_else(|| WindowContext {
                 app_name: "Unknown".to_string(),
                 window_title: None,
                 bundle_id: None,
                 timestamp: now,
-            }
-        });
+            });
 
         // Get recent file events
         let recent_files = buffer.recent_files();
@@ -46,18 +60,20 @@ impl ContextAssembler {
         // Get clipboard digest string
         let clipboard_digest = buffer
             .latest_clipboard()
-            .and_then(|digest| digest.digest.clone());
+            .and_then(|digest| digest.digest.clone())
+            .or_else(|| previous_snapshot.and_then(|snapshot| snapshot.clipboard_digest.clone()));
 
-        // Get keystroke cadence, or create a default
-        let keystroke_cadence =
-            buffer
-                .latest_keystroke()
-                .cloned()
-                .unwrap_or_else(|| KeystrokeCadence {
-                    events_per_minute: 0.0,
-                    burst_detected: false,
-                    idle_duration: Duration::from_secs(0),
-                });
+        // Preserve the last observed cadence when no new pattern event has
+        // arrived since the previous snapshot.
+        let keystroke_cadence = buffer
+            .latest_keystroke()
+            .cloned()
+            .or_else(|| previous_snapshot.map(|snapshot| snapshot.keystroke_cadence.clone()))
+            .unwrap_or_else(|| KeystrokeCadence {
+                events_per_minute: 0.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(0),
+            });
 
         // Calculate session duration
         let session_duration = now.duration_since(session_start);
@@ -136,6 +152,7 @@ impl Default for ContextAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::ctp::TaskHint;
     use bus::events::platform::{ClipboardDigest, FileEvent, FileEventKind, WindowContext};
     use std::path::PathBuf;
     use std::thread::sleep;
@@ -242,5 +259,40 @@ mod tests {
         assert_eq!(snapshot.clipboard_digest, Some("abc123".to_string()));
         assert_eq!(snapshot.recent_files.len(), 1);
         assert_eq!(snapshot.keystroke_cadence.events_per_minute, 180.5);
+    }
+
+    #[test]
+    fn assemble_with_previous_preserves_last_known_signals() {
+        let assembler = ContextAssembler::new();
+        let buffer = SignalBuffer::new(Duration::from_secs(1));
+        let session_start = Instant::now();
+        let previous_snapshot = ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Code".to_string(),
+                window_title: Some("lib.rs".to_string()),
+                bundle_id: Some("com.microsoft.VSCode".to_string()),
+                timestamp: Instant::now(),
+            },
+            recent_files: Vec::new(),
+            clipboard_digest: Some("digest-123".to_string()),
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 88.0,
+                burst_detected: true,
+                idle_duration: Duration::from_secs(2),
+            },
+            session_duration: Duration::from_secs(30),
+            inferred_task: Some(TaskHint {
+                category: "coding".to_string(),
+                confidence: 0.8,
+            }),
+            timestamp: Instant::now(),
+        };
+
+        let snapshot =
+            assembler.assemble_with_previous(&buffer, session_start, Some(&previous_snapshot));
+
+        assert_eq!(snapshot.active_app.app_name, "Code");
+        assert_eq!(snapshot.clipboard_digest.as_deref(), Some("digest-123"));
+        assert_eq!(snapshot.keystroke_cadence.events_per_minute, 88.0);
     }
 }
