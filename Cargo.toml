@@ -36,6 +36,7 @@ redb = "2"
 llama-cpp-2 = "0.1"
 ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.0" }
 arboard = "3"
+rdev = "0.5"
 ratatui = { version = "0.28", features = ["crossterm"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

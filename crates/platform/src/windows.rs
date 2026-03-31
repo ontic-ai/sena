@@ -1,4 +1,4 @@
-﻿//! Windows platform adapter implementation.
+//! Windows platform adapter implementation.
 
 #[cfg(target_os = "windows")]
 use std::hash::{Hash, Hasher};
@@ -36,7 +36,6 @@ impl WindowsPlatform {
         if hwnd.is_null() {
             return None;
         }
-
 
         let mut buf = [0u16; 512];
         // Safety: hwnd is a valid nonzero window handle; buf is properly sized.
@@ -94,8 +93,86 @@ impl PlatformAdapter for WindowsPlatform {
         // TODO M1.5: implement via notify crate
     }
 
-    fn subscribe_keystroke_patterns(&self, _tx: mpsc::Sender<KeystrokeCadence>) {
-        // TODO M1.5: implement via rdev crate (timing only)
+    fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
+        std::thread::spawn(move || {
+            use rdev::{listen, EventType};
+            use std::sync::{Arc, Mutex};
+            use std::time::{Duration, Instant};
+
+            // Counts keypresses, never captures which key
+            let event_count = Arc::new(Mutex::new(0u64));
+            let last_event_time = Arc::new(Mutex::new(Instant::now()));
+            let window_start = Arc::new(Mutex::new(Instant::now()));
+
+            let event_count_clone = Arc::clone(&event_count);
+            let last_event_clone = Arc::clone(&last_event_time);
+            let window_clone = Arc::clone(&window_start);
+            let tx_clone = tx.clone();
+
+            // Spawn a reporter thread: every 10 seconds, emit a KeystrokeCadence
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(10));
+
+                    let count = {
+                        let mut c = event_count_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let val = *c;
+                        *c = 0; // reset
+                        val
+                    };
+
+                    let window_elapsed = {
+                        let mut ws = window_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let elapsed = ws.elapsed();
+                        *ws = Instant::now();
+                        elapsed
+                    };
+
+                    let elapsed_mins = window_elapsed.as_secs_f64() / 60.0;
+                    let events_per_minute = if elapsed_mins > 0.0 {
+                        count as f64 / elapsed_mins
+                    } else {
+                        0.0
+                    };
+
+                    let idle_duration = {
+                        let last = last_event_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        last.elapsed()
+                    };
+
+                    let burst_detected = events_per_minute > 200.0; // typing burst threshold
+
+                    let cadence = KeystrokeCadence {
+                        events_per_minute,
+                        burst_detected,
+                        idle_duration,
+                    };
+
+                    // Send cadence - if channel is closed, stop the reporter
+                    if tx_clone.blocking_send(cadence).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // rdev listen loop - ONLY count events, NEVER capture char content
+            // This callback receives EventType which includes KeyPress(Key) but we ONLY COUNT
+            let result = listen(move |event| {
+                if let EventType::KeyPress(_) = event.event_type {
+                    // Count only - no character capture
+                    if let Ok(mut c) = event_count.lock() {
+                        *c += 1;
+                    }
+                    if let Ok(mut t) = last_event_time.lock() {
+                        *t = Instant::now();
+                    }
+                }
+            });
+
+            if let Err(e) = result {
+                eprintln!("[platform/windows] rdev listen error: {:?}", e);
+            }
+        });
     }
 }
 
@@ -116,6 +193,3 @@ mod tests {
         let _ = platform.active_window();
     }
 }
-
-
-

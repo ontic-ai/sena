@@ -1,7 +1,7 @@
 //! Platform actor: polls OS signals and emits events on the bus.
 
 use async_trait::async_trait;
-use bus::events::platform::{ClipboardDigest, WindowContext};
+use bus::events::platform::{ClipboardDigest, KeystrokeCadence, WindowContext};
 use bus::{Actor, ActorError, Event, EventBus, PlatformEvent, SystemEvent};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,7 @@ pub struct PlatformActor {
     normal_poll_interval: Duration,
     /// First CPU reading is always inaccurate — skip threshold logic on first tick
     first_tick: bool,
+    keystroke_rx: Option<tokio::sync::mpsc::Receiver<KeystrokeCadence>>,
 }
 
 impl PlatformActor {
@@ -42,6 +43,7 @@ impl PlatformActor {
             idle_threshold: 10.0,
             normal_poll_interval: default_poll_interval,
             first_tick: true,
+            keystroke_rx: None,
         }
     }
 
@@ -129,6 +131,11 @@ impl Actor for PlatformActor {
         self.bus_rx = Some(bus.subscribe_broadcast());
         self.bus = Some(bus.clone());
 
+        // Start keystroke pattern subscription
+        let (keystroke_tx, keystroke_rx) = tokio::sync::mpsc::channel(32);
+        self.adapter.subscribe_keystroke_patterns(keystroke_tx);
+        self.keystroke_rx = Some(keystroke_rx);
+
         bus.broadcast(Event::System(SystemEvent::ActorReady {
             actor_name: "Platform",
         }))
@@ -183,6 +190,20 @@ impl Actor for PlatformActor {
                             return Err(ActorError::ChannelClosed("bus channel closed".to_string()));
                         }
                         _ => {}
+                    }
+                }
+                cadence = async {
+                    match &mut self.keystroke_rx {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    if let Some(cadence) = cadence {
+                        if let Some(bus) = &self.bus {
+                            let _ = bus.broadcast(Event::Platform(
+                                PlatformEvent::KeystrokePattern(cadence)
+                            )).await;
+                        }
                     }
                 }
             }
