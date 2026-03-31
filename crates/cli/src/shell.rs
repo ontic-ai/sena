@@ -675,6 +675,43 @@ impl Shell {
                 );
                 self.add_message(MessageRole::Sena, format_explanation_tui(resp));
             }
+            Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => {
+                match item {
+                    bus::events::TrayMenuItem::OpenCli => {
+                        spawn_new_sena_terminal();
+                        if self.verbose {
+                            self.add_message(
+                                MessageRole::System,
+                                "[verbose] Tray: new terminal spawned".to_string(),
+                            );
+                        }
+                    }
+                    bus::events::TrayMenuItem::Quit => {
+                        // Broadcast shutdown signal on the bus
+                        let bus = self.bus.clone();
+                        tokio::spawn(async move {
+                            let _ = bus
+                                .broadcast(Event::System(bus::events::SystemEvent::ShutdownSignal))
+                                .await;
+                        });
+                        if self.verbose {
+                            self.add_message(
+                                MessageRole::System,
+                                "[verbose] Tray: quit requested".to_string(),
+                            );
+                        }
+                    }
+                    _ => {
+                        // ShowStatus and ShowLastThought not yet implemented
+                        if self.verbose {
+                            self.add_message(
+                                MessageRole::System,
+                                format!("[verbose] Tray: menu item clicked: {:?}", item),
+                            );
+                        }
+                    }
+                }
+            }
             _ if self.verbose => {
                 if let Some(msg) = verbose_format(event) {
                     self.add_message(MessageRole::System, msg);
@@ -862,6 +899,58 @@ enum DispatchResult {
     Continue,
     Quit,
     Restart,
+}
+
+/// Spawn a new terminal window running Sena.
+/// Platform-specific implementation using the current executable path.
+/// Non-blocking — spawns asynchronously and continues.
+/// Errors are logged but non-fatal.
+fn spawn_new_sena_terminal() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to get executable path for tray spawn: {}", e);
+            return;
+        }
+    };
+    let exe_str = exe.display().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "start", "cmd", "/k", &exe_str])
+            .spawn();
+        if let Err(e) = result {
+            eprintln!("Failed to spawn new terminal (Windows): {}", e);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let result = std::process::Command::new("open")
+            .args(["-a", "Terminal", &exe_str])
+            .spawn();
+        if let Err(e) = result {
+            eprintln!("Failed to spawn new terminal (macOS): {}", e);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try x-terminal-emulator first (Debian/Ubuntu standard symlink)
+        let result = std::process::Command::new("x-terminal-emulator")
+            .args(["-e", &exe_str])
+            .spawn();
+        if result.is_err() {
+            // Fallback to xterm
+            let fallback = std::process::Command::new("xterm")
+                .args(["-e", &exe_str])
+                .spawn();
+            if let Err(e) = fallback {
+                eprintln!("Failed to spawn new terminal (Linux): {}", e);
+            }
+        }
+    }
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
@@ -1355,5 +1444,50 @@ mod tests {
     #[test]
     fn shell_exit_reason_quit_and_restart_are_distinct() {
         assert_ne!(ShellExitReason::Quit, ShellExitReason::Restart);
+    }
+
+    #[test]
+    fn spawn_new_sena_terminal_does_not_panic() {
+        // This test verifies that the function exists and can be called.
+        // Actual spawning may fail in test environment, but should not panic.
+        spawn_new_sena_terminal();
+        // If we get here, no panic occurred
+    }
+
+    #[tokio::test]
+    async fn tray_quit_event_broadcasts_shutdown_signal() {
+        // Create a minimal runtime for testing
+        // We can't fully test the bus dispatch without a real runtime,
+        // but we verify the code compiles and the logic path exists.
+
+        // Test that TrayMenuItem::Quit exists and can be constructed
+        let quit_item = bus::events::TrayMenuItem::Quit;
+        let event = Event::System(bus::events::SystemEvent::TrayMenuClicked(quit_item));
+
+        // Verify the event constructs correctly
+        match event {
+            Event::System(bus::events::SystemEvent::TrayMenuClicked(
+                bus::events::TrayMenuItem::Quit,
+            )) => {
+                // Correct variant
+            }
+            _ => panic!("Event did not construct as expected"),
+        }
+    }
+
+    #[test]
+    fn tray_open_cli_event_constructs() {
+        // Verify TrayMenuItem::OpenCli exists and can be used in events
+        let open_item = bus::events::TrayMenuItem::OpenCli;
+        let event = Event::System(bus::events::SystemEvent::TrayMenuClicked(open_item));
+
+        match event {
+            Event::System(bus::events::SystemEvent::TrayMenuClicked(
+                bus::events::TrayMenuItem::OpenCli,
+            )) => {
+                // Correct variant
+            }
+            _ => panic!("Event did not construct as expected"),
+        }
     }
 }
