@@ -35,6 +35,11 @@ pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), Shu
         .await
         .map_err(|e| ShutdownError::BroadcastFailed(e.to_string()))?;
 
+    // Step 1.5: Abort memory monitor task if running
+    if let Some(handle) = runtime.memory_monitor_handle.take() {
+        handle.abort();
+    }
+
     // Step 2: Wait for all actors
     let results = runtime.registry.wait_all(timeout).await;
 
@@ -93,6 +98,7 @@ mod tests {
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
+            memory_monitor_handle: None,
         };
 
         // Spawn shutdown task
@@ -129,6 +135,7 @@ mod tests {
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
+            memory_monitor_handle: None,
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -160,6 +167,7 @@ mod tests {
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: _rx,
+            memory_monitor_handle: None,
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;

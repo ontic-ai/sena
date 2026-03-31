@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bus::{Event, EventBus, SystemEvent, TrayMenuItem};
+use tray_icon::Icon;
 
 /// Commands sent to the tray thread from the main process.
 enum TrayCommand {
@@ -103,6 +104,30 @@ enum TrayError {
     InitFailed(String),
 }
 
+// Load logo from compiled-in bytes — path relative to WORKSPACE ROOT
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/logo.png");
+
+/// Load the tray icon from the compiled-in logo PNG.
+///
+/// Returns an Icon suitable for use with tray-icon. Falls back to a green square
+/// if decoding fails (should never happen with a valid PNG).
+fn load_icon() -> Result<Icon, TrayError> {
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let img = ImageReader::new(Cursor::new(LOGO_PNG))
+        .with_guessed_format()
+        .map_err(|e| TrayError::IconCreationFailed(format!("PNG read error: {}", e)))?
+        .decode()
+        .map_err(|e| TrayError::IconCreationFailed(format!("PNG decode error: {}", e)))?;
+
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+
+    Icon::from_rgba(rgba.into_raw(), width, height)
+        .map_err(|e| TrayError::IconCreationFailed(e.to_string()))
+}
+
 /// Run the tray event loop in a dedicated thread.
 ///
 /// This function creates the tray icon and menu, then polls for:
@@ -116,12 +141,15 @@ fn run_tray_loop(
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), TrayError> {
     use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
-    // Create a simple 16x16 green square as the tray icon.
-    let icon_rgba = [0u8, 128, 0, 255].repeat(16 * 16);
-    let icon = Icon::from_rgba(icon_rgba, 16, 16)
-        .map_err(|e| TrayError::IconCreationFailed(e.to_string()))?;
+    // Load icon from assets/logo.png — compiled in at build time.
+    // Falls back to a green square if decode fails.
+    let icon = load_icon().unwrap_or_else(|e| {
+        eprintln!("[tray] icon load failed ({}), using fallback", e);
+        let fallback_rgba = [0u8, 128, 0, 255].repeat(16 * 16);
+        Icon::from_rgba(fallback_rgba, 16, 16).expect("fallback icon always valid")
+    });
 
     // Build the tray menu.
     let menu = Menu::new();

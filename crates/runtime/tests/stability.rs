@@ -63,10 +63,14 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
     memory.start(Arc::clone(&bus)).await.expect("memory start");
     let memory_handle = tokio::spawn(async move { memory.run().await });
 
-    let mut inference = Box::new(
-        inference::InferenceActor::new(model_dir, Box::new(inference::MockBackend::new())),
-    );
-    inference.start(Arc::clone(&bus)).await.expect("inference start");
+    let mut inference = Box::new(inference::InferenceActor::new(
+        model_dir,
+        Box::new(inference::MockBackend::new()),
+    ));
+    inference
+        .start(Arc::clone(&bus))
+        .await
+        .expect("inference start");
     let inference_handle = tokio::spawn(async move { inference.run().await });
 
     // ── Telemetry ─────────────────────────────────────────────────────────────

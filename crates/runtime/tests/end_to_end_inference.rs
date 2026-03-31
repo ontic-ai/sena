@@ -83,7 +83,6 @@ async fn end_to_end_thought_triggers_inference_cycle() {
     let inference_actor = inference::InferenceActor::new(
         model_dir,
         Box::new(inference::MockBackend::new()), // Mock backend
-        inference::BackendType::Cpu,
     );
     let mut inference_box = Box::new(inference_actor);
     inference_box
