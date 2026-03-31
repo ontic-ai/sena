@@ -1,6 +1,6 @@
 //! Redb table definitions and schema migration for the Soul store.
 //!
-//! Schema version: 1
+//! Schema version: 2
 //!
 //! Tables:
 //! - `_schema_meta`      : (&str -> u64)  â€” schema version metadata
@@ -136,7 +136,7 @@ mod tests {
         let read_txn = db.begin_read().expect("should begin read");
         let meta = read_txn.open_table(SCHEMA_META).expect("meta should exist");
         let version = meta.get(VERSION_KEY).expect("get should succeed");
-        assert_eq!(version.unwrap().value(), 1);
+        assert_eq!(version.unwrap().value(), SCHEMA_VERSION);
     }
 
     #[test]

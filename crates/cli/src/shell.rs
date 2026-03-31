@@ -906,6 +906,14 @@ enum DispatchResult {
 /// Non-blocking — spawns asynchronously and continues.
 /// Errors are logged but non-fatal.
 fn spawn_new_sena_terminal() {
+    // Never spawn external terminals from test binaries.
+    // `cargo test` executes test harness binaries from `target/*/deps/*`.
+    // Spawning the current test executable recursively can create endless
+    // windows/processes, so we hard-disable terminal spawning in that context.
+    if cfg!(test) {
+        return;
+    }
+
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -913,6 +921,16 @@ fn spawn_new_sena_terminal() {
             return;
         }
     };
+
+    // Additional runtime guard for non-unit test contexts that still execute
+    // from the test-harness location (for example, spawned child test binaries).
+    if exe
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("deps"))
+    {
+        return;
+    }
+
     let exe_str = exe.display().to_string();
 
     #[cfg(target_os = "windows")]
