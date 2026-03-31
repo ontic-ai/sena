@@ -677,6 +677,33 @@ impl Shell {
             }
             Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => {
                 match item {
+                    bus::events::TrayMenuItem::ShowStatus => {
+                        let model = self.current_model.as_deref().unwrap_or("(unknown)");
+                        self.add_message(
+                            MessageRole::System,
+                            format!(
+                                "Status: ready • model={} • messages={} • tokens={}",
+                                model, self.stats.messages_sent, self.stats.tokens_received
+                            ),
+                        );
+                    }
+                    bus::events::TrayMenuItem::ShowLastThought => {
+                        if let Some(last_text) = self
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|m| matches!(m.role, MessageRole::Sena))
+                            .map(|m| m.text.clone())
+                        {
+                            self.add_message(MessageRole::System, "━━  Last Thought".to_string());
+                            self.add_message(MessageRole::Sena, last_text);
+                        } else {
+                            self.add_message(
+                                MessageRole::Warning,
+                                "No thoughts yet in this session.".to_string(),
+                            );
+                        }
+                    }
                     bus::events::TrayMenuItem::OpenCli => {
                         spawn_new_sena_terminal();
                         if self.verbose {
@@ -698,15 +725,6 @@ impl Shell {
                             self.add_message(
                                 MessageRole::System,
                                 "[verbose] Tray: quit requested".to_string(),
-                            );
-                        }
-                    }
-                    _ => {
-                        // ShowStatus and ShowLastThought not yet implemented
-                        if self.verbose {
-                            self.add_message(
-                                MessageRole::System,
-                                format!("[verbose] Tray: menu item clicked: {:?}", item),
                             );
                         }
                     }

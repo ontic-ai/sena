@@ -42,10 +42,19 @@ async fn interactive_mode() -> Result<()> {
 
         // First-boot onboarding
         if runtime.is_first_boot {
-            // TODO M4.2: check actual model availability via inference actor registry
-            let models_available = true;
-            let _result = onboarding::run_wizard(&runtime.bus, models_available).await?;
-            // TODO M4.2: persist OnboardingResult (file_watch_paths, clipboard_enabled) to config
+            let models_available = platform::ollama_models_dir()
+                .ok()
+                .and_then(|models_dir| inference::discover_models(&models_dir).ok())
+                .map(|registry| !registry.is_empty())
+                .unwrap_or(false);
+
+            let result = onboarding::run_wizard(&runtime.bus, models_available).await?;
+
+            let mut updated_config = runtime.config.clone();
+            updated_config.file_watch_paths = result.file_watch_paths;
+            updated_config.clipboard_observation_enabled = result.clipboard_observation_enabled;
+
+            runtime::save_config(&updated_config).await?;
         }
 
         let exit_reason = shell::run(runtime).await?;
