@@ -49,6 +49,10 @@ pub enum SystemEvent {
     TrayUnavailable { reason: String },
     /// Memory usage exceeded configured threshold.
     MemoryThresholdExceeded { current_mb: usize, limit_mb: usize },
+    /// Request to open/attach an interactive CLI session (e.g., from tray menu).
+    CliAttachRequested,
+    /// CLI session has closed without requesting app shutdown.
+    CliSessionClosed,
 }
 
 #[cfg(test)]

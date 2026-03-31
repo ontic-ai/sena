@@ -90,6 +90,16 @@ impl TrayManager {
     }
 }
 
+fn event_for_menu_item(item: TrayMenuItem) -> Event {
+    match item {
+        TrayMenuItem::ShowStatus | TrayMenuItem::ShowLastThought => {
+            Event::System(SystemEvent::TrayMenuClicked(item))
+        }
+        TrayMenuItem::OpenCli => Event::System(SystemEvent::CliAttachRequested),
+        TrayMenuItem::Quit => Event::System(SystemEvent::ShutdownSignal),
+    }
+}
+
 /// Error type for tray initialization.
 #[derive(Debug, thiserror::Error)]
 #[allow(clippy::enum_variant_names)]
@@ -218,10 +228,9 @@ fn run_tray_loop(
             };
 
             if let Some(item) = menu_item {
+                let event = event_for_menu_item(item);
                 runtime_handle.block_on(async {
-                    let _ = bus
-                        .broadcast(Event::System(SystemEvent::TrayMenuClicked(item)))
-                        .await;
+                    let _ = bus.broadcast(event).await;
                 });
             }
         }
@@ -289,5 +298,20 @@ mod tests {
         let manager = TrayManager::new(bus, handle);
         manager.update_status("Test status");
         // Should not panic even if tray is unavailable.
+    }
+
+    #[test]
+    fn open_cli_menu_item_requests_cli_attach() {
+        let event = event_for_menu_item(TrayMenuItem::OpenCli);
+        assert!(matches!(
+            event,
+            Event::System(SystemEvent::CliAttachRequested)
+        ));
+    }
+
+    #[test]
+    fn quit_menu_item_emits_shutdown_signal() {
+        let event = event_for_menu_item(TrayMenuItem::Quit);
+        assert!(matches!(event, Event::System(SystemEvent::ShutdownSignal)));
     }
 }

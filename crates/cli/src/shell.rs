@@ -38,6 +38,8 @@ use crate::tui_state::{ActorStatus, EditorState, Message, MessageRole, SessionSt
 use crate::{display, model_selector};
 use runtime::boot::Runtime;
 
+const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 // ── Slash-command autocomplete ────────────────────────────────────────────────
 
 struct SlashCommand {
@@ -75,14 +77,23 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Show all commands",
     },
     SlashCommand {
-        command: "/quit",
-        description: "Exit Sena",
+        command: "/close",
+        description: "Close CLI (keep tray/runtime alive)",
+    },
+    SlashCommand {
+        command: "/shutdown",
+        description: "Shut down Sena completely",
     },
 ];
 
 struct SlashDropdown {
     filtered: Vec<usize>,
     selected: usize,
+}
+
+struct PendingTransparencyQuery {
+    query: TransparencyQuery,
+    started_at: Instant,
 }
 
 impl SlashDropdown {
@@ -144,8 +155,10 @@ impl SlashDropdown {
 /// Reason the shell exited — drives the restart loop in main.rs.
 #[derive(Debug, PartialEq)]
 pub enum ShellExitReason {
-    Quit,
-    Restart,
+    /// Close the CLI session, but keep runtime and tray alive.
+    Close,
+    /// Request full app shutdown (runtime and tray).
+    Shutdown,
 }
 
 /// RAII guard — restores the terminal unconditionally when dropped.
@@ -190,6 +203,8 @@ struct Shell {
     slash_dropdown: Option<SlashDropdown>,
     /// True while waiting for a transparency query response on the bus.
     transparency_loading: bool,
+    /// The currently pending transparency query, if any.
+    pending_transparency: Option<PendingTransparencyQuery>,
     /// Runtime reference for config access.
     runtime: Arc<Runtime>,
 }
@@ -232,6 +247,7 @@ impl Shell {
             actors_popup_visible: false,
             slash_dropdown: None,
             transparency_loading: false,
+            pending_transparency: None,
             runtime,
         }
     }
@@ -667,6 +683,7 @@ impl Shell {
             }
             // ── Transparency query responses (async, non-blocking) ─────────────
             Event::Transparency(TransparencyEvent::ObservationResponded(resp)) => {
+                self.pending_transparency = None;
                 self.transparency_loading = false;
                 self.add_message(
                     MessageRole::System,
@@ -675,11 +692,13 @@ impl Shell {
                 self.add_message(MessageRole::Sena, format_observation_tui(resp));
             }
             Event::Transparency(TransparencyEvent::MemoryResponded(resp)) => {
+                self.pending_transparency = None;
                 self.transparency_loading = false;
                 self.add_message(MessageRole::System, "\u{2501}\u{2501}  Memory".to_string());
                 self.add_message(MessageRole::Sena, format_memory_tui(resp));
             }
             Event::Transparency(TransparencyEvent::InferenceExplanationResponded(resp)) => {
+                self.pending_transparency = None;
                 self.transparency_loading = false;
                 self.add_message(
                     MessageRole::System,
@@ -687,60 +706,38 @@ impl Shell {
                 );
                 self.add_message(MessageRole::Sena, format_explanation_tui(resp));
             }
-            Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => {
-                match item {
-                    bus::events::TrayMenuItem::ShowStatus => {
-                        let model = self.current_model.as_deref().unwrap_or("(unknown)");
+            Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => match item {
+                bus::events::TrayMenuItem::ShowStatus => {
+                    let model = self.current_model.as_deref().unwrap_or("(unknown)");
+                    self.add_message(
+                        MessageRole::System,
+                        format!(
+                            "Status: ready • model={} • messages={} • tokens={}",
+                            model, self.stats.messages_sent, self.stats.tokens_received
+                        ),
+                    );
+                }
+                bus::events::TrayMenuItem::ShowLastThought => {
+                    if let Some(last_text) = self
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m.role, MessageRole::Sena))
+                        .map(|m| m.text.clone())
+                    {
+                        self.add_message(MessageRole::System, "━━  Last Thought".to_string());
+                        self.add_message(MessageRole::Sena, last_text);
+                    } else {
                         self.add_message(
-                            MessageRole::System,
-                            format!(
-                                "Status: ready • model={} • messages={} • tokens={}",
-                                model, self.stats.messages_sent, self.stats.tokens_received
-                            ),
+                            MessageRole::Warning,
+                            "No thoughts yet in this session.".to_string(),
                         );
                     }
-                    bus::events::TrayMenuItem::ShowLastThought => {
-                        if let Some(last_text) = self
-                            .messages
-                            .iter()
-                            .rev()
-                            .find(|m| matches!(m.role, MessageRole::Sena))
-                            .map(|m| m.text.clone())
-                        {
-                            self.add_message(MessageRole::System, "━━  Last Thought".to_string());
-                            self.add_message(MessageRole::Sena, last_text);
-                        } else {
-                            self.add_message(
-                                MessageRole::Warning,
-                                "No thoughts yet in this session.".to_string(),
-                            );
-                        }
-                    }
-                    bus::events::TrayMenuItem::OpenCli => {
-                        spawn_new_sena_terminal();
-                        if self.verbose {
-                            self.add_message(
-                                MessageRole::System,
-                                "[verbose] Tray: new terminal spawned".to_string(),
-                            );
-                        }
-                    }
-                    bus::events::TrayMenuItem::Quit => {
-                        // Broadcast shutdown signal on the bus
-                        let bus = self.bus.clone();
-                        tokio::spawn(async move {
-                            let _ = bus
-                                .broadcast(Event::System(bus::events::SystemEvent::ShutdownSignal))
-                                .await;
-                        });
-                        if self.verbose {
-                            self.add_message(
-                                MessageRole::System,
-                                "[verbose] Tray: quit requested".to_string(),
-                            );
-                        }
-                    }
                 }
+                bus::events::TrayMenuItem::OpenCli | bus::events::TrayMenuItem::Quit => {}
+            },
+            Event::System(bus::events::SystemEvent::CliAttachRequested) => {
+                self.add_message(MessageRole::System, "CLI session already open.".to_string());
             }
             _ if self.verbose => {
                 if let Some(msg) = verbose_format(event) {
@@ -811,7 +808,8 @@ impl Shell {
                 self.actors_popup_visible = true;
                 DispatchResult::Continue
             }
-            "/quit" | "/exit" | "/q" => DispatchResult::Quit,
+            _ if exit_command_result(cmd).is_some() => exit_command_result(cmd)
+                .expect("exit command helper should return a result for matched commands"),
             _ if line.starts_with('/') => {
                 self.add_message(
                     MessageRole::Warning,
@@ -835,13 +833,34 @@ impl Shell {
         if let Err(e) = self
             .bus
             .broadcast(Event::Transparency(BusTransparencyEvent::QueryRequested(
-                query,
+                query.clone(),
             )))
             .await
         {
+            self.pending_transparency = None;
             self.transparency_loading = false;
             self.add_message(MessageRole::Warning, format!("Failed to send query: {}", e));
+        } else {
+            self.pending_transparency = Some(PendingTransparencyQuery {
+                query,
+                started_at: Instant::now(),
+            });
         }
+    }
+
+    fn handle_transparency_timeout(&mut self) {
+        let Some(pending) = &self.pending_transparency else {
+            return;
+        };
+
+        if pending.started_at.elapsed() < TRANSPARENCY_REQUEST_TIMEOUT {
+            return;
+        }
+
+        let message = transparency_timeout_message(&pending.query);
+        self.pending_transparency = None;
+        self.transparency_loading = false;
+        self.add_message(MessageRole::Warning, message);
     }
 
     /// Send a chat message to the inference actor.
@@ -914,7 +933,11 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "/quit                  Exit Sena".to_string(),
+            "/close or /quit        Close the CLI session".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/shutdown              Shut down Sena completely".to_string(),
         );
         self.add_message(MessageRole::System, "".to_string());
         self.add_message(MessageRole::System, "━━  Keyboard Shortcuts".to_string());
@@ -958,84 +981,23 @@ impl Shell {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
 enum DispatchResult {
     Continue,
-    Quit,
-    Restart,
+    Close,
+    Shutdown,
 }
 
-/// Spawn a new terminal window running Sena.
-/// Platform-specific implementation using the current executable path.
-/// Non-blocking — spawns asynchronously and continues.
-/// Errors are logged but non-fatal.
-fn spawn_new_sena_terminal() {
-    // Never spawn external terminals from test binaries.
-    // `cargo test` executes test harness binaries from `target/*/deps/*`.
-    // Spawning the current test executable recursively can create endless
-    // windows/processes, so we hard-disable terminal spawning in that context.
-    if cfg!(test) {
-        return;
-    }
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Failed to get executable path for tray spawn: {}", e);
-            return;
-        }
-    };
-
-    // Additional runtime guard for non-unit test contexts that still execute
-    // from the test-harness location (for example, spawned child test binaries).
-    if exe
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("deps"))
-    {
-        return;
-    }
-
-    let exe_str = exe.display().to_string();
-
-    #[cfg(target_os = "windows")]
-    {
-        let result = std::process::Command::new("cmd")
-            .args(["/c", "start", "cmd", "/k", &exe_str])
-            .spawn();
-        if let Err(e) = result {
-            eprintln!("Failed to spawn new terminal (Windows): {}", e);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let result = std::process::Command::new("open")
-            .args(["-a", "Terminal", &exe_str])
-            .spawn();
-        if let Err(e) = result {
-            eprintln!("Failed to spawn new terminal (macOS): {}", e);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Try x-terminal-emulator first (Debian/Ubuntu standard symlink)
-        let result = std::process::Command::new("x-terminal-emulator")
-            .args(["-e", &exe_str])
-            .spawn();
-        if result.is_err() {
-            // Fallback to xterm
-            let fallback = std::process::Command::new("xterm")
-                .args(["-e", &exe_str])
-                .spawn();
-            if let Err(e) = fallback {
-                eprintln!("Failed to spawn new terminal (Linux): {}", e);
-            }
-        }
+fn exit_command_result(command: &str) -> Option<DispatchResult> {
+    match command {
+        "/close" | "/quit" | "/exit" | "/q" => Some(DispatchResult::Close),
+        "/shutdown" => Some(DispatchResult::Shutdown),
+        _ => None,
     }
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
-pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
+pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
     // ── Enter raw mode and alternate screen ───────────────────────────────────
     terminal::enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
@@ -1046,8 +1008,7 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     terminal.clear()?;
 
     // ── Initialize shell state ────────────────────────────────────────────────
-    let runtime = Arc::new(runtime);
-    let mut shell = Shell::new(runtime.clone());
+    let mut shell = Shell::new(Arc::clone(&runtime));
 
     // ── Ctrl-C shutdown watch ─────────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1059,7 +1020,7 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     // ── Bus subscriber for events ─────────────────────────────────────────────
     let mut bus_rx = runtime.bus.subscribe_broadcast();
 
-    let mut exit_reason = ShellExitReason::Quit;
+    let mut exit_reason = ShellExitReason::Close;
 
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
@@ -1091,12 +1052,18 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
             // Bus events
             bcast = bus_rx.recv() => {
                 if let Ok(ev) = bcast {
+                    if matches!(ev, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
+                        exit_reason = ShellExitReason::Shutdown;
+                        break;
+                    }
                     shell.handle_bus_event(&ev);
                 }
             }
 
             // Keyboard events (poll in a non-blocking way)
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                shell.handle_transparency_timeout();
+
                 // Poll for crossterm events
                 if event::poll(Duration::from_millis(0))? {
                     match event::read()? {
@@ -1241,12 +1208,12 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                     let result = shell.dispatch_line(line).await;
                                     match result {
                                         DispatchResult::Continue => {}
-                                        DispatchResult::Quit => {
-                                            exit_reason = ShellExitReason::Quit;
+                                        DispatchResult::Close => {
+                                            exit_reason = ShellExitReason::Close;
                                             break;
                                         }
-                                        DispatchResult::Restart => {
-                                            exit_reason = ShellExitReason::Restart;
+                                        DispatchResult::Shutdown => {
+                                            exit_reason = ShellExitReason::Shutdown;
                                             break;
                                         }
                                     }
@@ -1267,12 +1234,12 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
                                     let result = shell.dispatch_line(line).await;
                                     match result {
                                         DispatchResult::Continue => {}
-                                        DispatchResult::Quit => {
-                                            exit_reason = ShellExitReason::Quit;
+                                        DispatchResult::Close => {
+                                            exit_reason = ShellExitReason::Close;
                                             break;
                                         }
-                                        DispatchResult::Restart => {
-                                            exit_reason = ShellExitReason::Restart;
+                                        DispatchResult::Shutdown => {
+                                            exit_reason = ShellExitReason::Shutdown;
                                             break;
                                         }
                                     }
@@ -1368,23 +1335,16 @@ pub async fn run(runtime: Runtime) -> Result<ShellExitReason> {
     let stats = shell.stats.clone();
 
     // Drop shell to release Arc<Runtime> reference
-    let timeout_secs = runtime.config.shutdown_timeout_secs;
     drop(shell);
 
-    // Print session summary only for Quit (not Restart)
-    if exit_reason == ShellExitReason::Quit {
-        display::print_session_summary(&stats);
+    display::print_session_summary(&stats);
+
+    if exit_reason == ShellExitReason::Close {
+        let _ = runtime
+            .bus
+            .broadcast(Event::System(bus::events::SystemEvent::CliSessionClosed))
+            .await;
     }
-
-    println!();
-    display::info("Shutting down actors...");
-
-    // Extract runtime from Arc for shutdown (should succeed after dropping shell)
-    let runtime_owned = Arc::try_unwrap(runtime)
-        .map_err(|_| anyhow::anyhow!("runtime has remaining references at shutdown"))?;
-    let timeout = Duration::from_secs(timeout_secs);
-    runtime::shutdown(runtime_owned, timeout).await?;
-    display::success("Sena stopped cleanly.");
 
     Ok(exit_reason)
 }
@@ -1463,7 +1423,7 @@ fn format_memory_tui(resp: &MemoryResponse) -> String {
     );
     out.push_str("\n\nRecent Memories");
     if resp.memory_chunks.is_empty() {
-        out.push_str("\n  (no memories retrieved)");
+        out.push_str(&format!("\n  {}", empty_memory_message_tui(summary)));
     } else {
         for (i, chunk) in resp.memory_chunks.iter().enumerate() {
             let preview = if chunk.text.chars().count() > 120 {
@@ -1501,10 +1461,10 @@ fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
         resp.rounds_completed
     );
     if resp.working_memory_context.is_empty() {
-        out.push_str("\nMemory    (none used)");
+        out.push_str("\nWorking Memory  (none used in the last completed cycle)");
     } else {
         out.push_str(&format!(
-            "\nMemory    {} chunks used",
+            "\nWorking Memory  {} chunks used in the last completed cycle",
             resp.working_memory_context.len()
         ));
         for (i, chunk) in resp.working_memory_context.iter().enumerate() {
@@ -1518,6 +1478,34 @@ fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
         }
     }
     out
+}
+
+fn empty_memory_message_tui(
+    summary: &bus::events::transparency::SoulSummaryForTransparency,
+) -> &'static str {
+    if summary.inference_cycle_count == 0
+        && summary.work_patterns.is_empty()
+        && summary.tool_preferences.is_empty()
+        && summary.interest_clusters.is_empty()
+    {
+        "No user memory is available yet. Sena has not retained any memories for this profile."
+    } else {
+        "No retrievable memory snippets are available right now."
+    }
+}
+
+fn transparency_timeout_message(query: &TransparencyQuery) -> String {
+    match query {
+        TransparencyQuery::CurrentObservation => {
+            "Observation is taking too long. Sena will keep running; try again in a moment.".to_string()
+        }
+        TransparencyQuery::UserMemory => {
+            "Memory is taking too long to respond. No memory data was returned, but Sena is still running.".to_string()
+        }
+        TransparencyQuery::InferenceExplanation => {
+            "Explanation is taking too long to respond. Try /explanation again after the next completed inference cycle.".to_string()
+        }
+    }
 }
 
 /// Format bus events for verbose mode.
@@ -1544,52 +1532,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_exit_reason_quit_and_restart_are_distinct() {
-        assert_ne!(ShellExitReason::Quit, ShellExitReason::Restart);
+    fn shell_exit_reason_close_and_shutdown_are_distinct() {
+        assert_ne!(ShellExitReason::Close, ShellExitReason::Shutdown);
     }
 
     #[test]
-    fn spawn_new_sena_terminal_does_not_panic() {
-        // This test verifies that the function exists and can be called.
-        // Actual spawning may fail in test environment, but should not panic.
-        spawn_new_sena_terminal();
-        // If we get here, no panic occurred
-    }
-
-    #[tokio::test]
-    async fn tray_quit_event_broadcasts_shutdown_signal() {
-        // Create a minimal runtime for testing
-        // We can't fully test the bus dispatch without a real runtime,
-        // but we verify the code compiles and the logic path exists.
-
-        // Test that TrayMenuItem::Quit exists and can be constructed
-        let quit_item = bus::events::TrayMenuItem::Quit;
-        let event = Event::System(bus::events::SystemEvent::TrayMenuClicked(quit_item));
-
-        // Verify the event constructs correctly
-        match event {
-            Event::System(bus::events::SystemEvent::TrayMenuClicked(
-                bus::events::TrayMenuItem::Quit,
-            )) => {
-                // Correct variant
-            }
-            _ => panic!("Event did not construct as expected"),
-        }
+    fn quit_alias_closes_cli_session() {
+        assert_eq!(exit_command_result("/quit"), Some(DispatchResult::Close));
+        assert_eq!(exit_command_result("/close"), Some(DispatchResult::Close));
     }
 
     #[test]
-    fn tray_open_cli_event_constructs() {
-        // Verify TrayMenuItem::OpenCli exists and can be used in events
-        let open_item = bus::events::TrayMenuItem::OpenCli;
-        let event = Event::System(bus::events::SystemEvent::TrayMenuClicked(open_item));
+    fn shutdown_command_requests_full_app_shutdown() {
+        assert_eq!(
+            exit_command_result("/shutdown"),
+            Some(DispatchResult::Shutdown)
+        );
+    }
 
-        match event {
-            Event::System(bus::events::SystemEvent::TrayMenuClicked(
-                bus::events::TrayMenuItem::OpenCli,
-            )) => {
-                // Correct variant
-            }
-            _ => panic!("Event did not construct as expected"),
-        }
+    #[test]
+    fn format_memory_tui_fresh_state_shows_safe_message() {
+        let output = format_memory_tui(&MemoryResponse {
+            soul_summary: bus::events::transparency::SoulSummaryForTransparency {
+                user_name: None,
+                inference_cycle_count: 0,
+                work_patterns: vec![],
+                tool_preferences: vec![],
+                interest_clusters: vec![],
+            },
+            memory_chunks: vec![],
+        });
+
+        assert!(output.contains("Soul Summary"));
+        assert!(output.contains("No user memory is available yet"));
+    }
+
+    #[test]
+    fn format_explanation_tui_lists_working_memory_when_present() {
+        let output = format_explanation_tui(&InferenceExplanationResponse {
+            request_context: "Explain the last answer".to_string(),
+            response_text: "Here is why the answer was produced.".to_string(),
+            working_memory_context: vec![bus::events::memory::MemoryChunk {
+                text: "recent rust debugging context".to_string(),
+                score: 0.91,
+                timestamp: SystemTime::now(),
+            }],
+            rounds_completed: 1,
+        });
+
+        assert!(output.contains("Working Memory"));
+        assert!(output.contains("recent rust debugging context"));
+        assert!(!output.contains("none used"));
     }
 }

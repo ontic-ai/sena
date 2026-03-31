@@ -43,6 +43,9 @@ pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), Shu
     // Step 2: Wait for all actors
     let results = runtime.registry.wait_all(timeout).await;
 
+    // Step 2.5: Stop the tray thread after broadcast-driven shutdown has begun.
+    runtime.tray_manager.shutdown();
+
     // Step 3: Log actors that failed (or timed out)
     let mut failed_actors = Vec::new();
     for (name, result) in results {

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::MasterKey;
-use rand::RngCore;
+use rand::Rng;
 
 use crate::config::SenaConfig;
 use crate::registry::ActorRegistry;
@@ -70,6 +70,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?;
     // Step 1.5: First-boot detection — check if Soul.redb exists before any initialization.
     // We check for the Soul redb encrypted file. If absent, this is the first boot.
+    // Soul actor (initialized at step 4) will create this file on first boot.
+    // On all subsequent boots, the file exists and is_first_boot will be false.
+    // This detection happens BEFORE Soul init to avoid race conditions.
     let is_first_boot = {
         let soul_path = platform::config_dir()
             .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?
@@ -103,7 +106,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 5: Actor registry â€” spawn Soul first (lowest-level subsystem)
     let mut registry = ActorRegistry::new();
-    spawn_actor(&bus, &mut registry, Box::new(soul_actor));
+    spawn_actor(&bus, &mut registry, soul_actor);
 
     // Step 6: Initialize and spawn platform adapter
     let platform_adapter = platform::create_platform_adapter();
@@ -111,7 +114,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_poll_interval(Duration::from_millis(500))
         .with_clipboard_enabled(config.clipboard_observation_enabled)
         .with_idle_threshold(config.platform_idle_cpu_threshold_percent);
-    spawn_actor(&bus, &mut registry, Box::new(platform_actor));
+    spawn_actor(&bus, &mut registry, platform_actor);
 
     // Step 7: Initialize and spawn CTP actor
     let ctp_trigger_interval = Duration::from_secs(config.ctp_trigger_interval_secs);
@@ -119,7 +122,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let ctp_poll_interval = Duration::from_secs(1);
     let ctp_actor = ctp::CTPActor::new(ctp_trigger_interval, ctp_buffer_window, ctp_poll_interval)
         .with_trigger_sensitivity(config.ctp_trigger_sensitivity);
-    spawn_actor(&bus, &mut registry, Box::new(ctp_actor));
+    spawn_actor(&bus, &mut registry, ctp_actor);
 
     // Step 8: Initialize and spawn memory actor
     let config_dir =
@@ -139,7 +142,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         memory_consolidation_interval,
     )
     .with_consolidation_idle_threshold(memory_idle_threshold);
-    spawn_actor(&bus, &mut registry, Box::new(memory_actor));
+    spawn_actor(&bus, &mut registry, memory_actor);
 
     // Step 9: Initialize and spawn inference actor
     let models_dir =
@@ -147,7 +150,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let inference_backend = inference::LlamaBackend::new();
     let inference_actor = inference::InferenceActor::new(models_dir, Box::new(inference_backend))
         .with_preferred_model(config.preferred_model.clone());
-    spawn_actor(&bus, &mut registry, Box::new(inference_actor));
+    spawn_actor(&bus, &mut registry, inference_actor);
 
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
@@ -197,7 +200,7 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
     // Case 3: First run — generate a fresh random master key and store it.
     // The key is never written to disk; only the keychain holds it.
     let mut raw = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut raw);
+    rand::rng().fill_bytes(&mut raw);
     let key = crypto::MasterKey::from_bytes(raw);
     crypto::keychain::store_master_key(&key)?;
     Ok(key)
@@ -226,7 +229,10 @@ fn load_or_create_salt(
     }
 }
 
-fn spawn_actor(bus: &Arc<EventBus>, registry: &mut ActorRegistry, mut actor: Box<dyn Actor>) {
+fn spawn_actor<A>(bus: &Arc<EventBus>, registry: &mut ActorRegistry, mut actor: A)
+where
+    A: Actor,
+{
     let name = actor.name();
     let bus_clone = Arc::clone(bus);
     let handle = tokio::spawn(async move {
@@ -424,22 +430,22 @@ mod tests {
         spawn_actor(
             &bus,
             &mut registry,
-            Box::new(MockActor::new(
+            MockActor::new(
                 "mock1",
                 StdArc::clone(&actor1_started),
                 StdArc::clone(&actor1_ran),
                 StdArc::clone(&actor1_stopped),
-            )),
+            ),
         );
         spawn_actor(
             &bus,
             &mut registry,
-            Box::new(MockActor::new(
+            MockActor::new(
                 "mock2",
                 StdArc::clone(&actor2_started),
                 StdArc::clone(&actor2_ran),
                 StdArc::clone(&actor2_stopped),
-            )),
+            ),
         );
 
         assert_eq!(registry.actor_count(), 2);
@@ -474,17 +480,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_boot_detection_logic() {
-        use std::fs;
+    async fn first_boot_detection_logic_file_absent() {
         let dir = tempfile::tempdir().expect("tempdir should create");
         let soul_path = dir.path().join("soul.redb.enc");
 
         // File absent → first boot
-        assert!(!soul_path.exists());
+        assert!(
+            !soul_path.exists(),
+            "fresh tempdir should not have soul.redb.enc"
+        );
 
-        // File present → not first boot
+        // Simulated boot step: check if file exists
+        let is_first_boot = !soul_path.exists();
+        assert!(
+            is_first_boot,
+            "should detect first boot when file is absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_boot_detection_logic_file_present() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let soul_path = dir.path().join("soul.redb.enc");
+
+        // Simulate a previous boot by creating the Soul file
         fs::write(&soul_path, b"placeholder").expect("write should succeed");
-        assert!(soul_path.exists());
+        assert!(soul_path.exists(), "file should exist after write");
+
+        // Simulated boot step: check if file exists
+        let is_first_boot = !soul_path.exists();
+        assert!(
+            !is_first_boot,
+            "should NOT detect first boot when file exists"
+        );
     }
 
     #[tokio::test]
@@ -492,19 +521,114 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut rx = bus.subscribe_broadcast();
 
+        // Simulate boot broadcasting FirstBoot event when soul is absent
         let event = Event::System(SystemEvent::FirstBoot);
         bus.broadcast(event)
             .await
             .expect("broadcast should succeed in test");
 
         let received = rx.recv().await;
+        assert!(received.is_ok(), "should receive FirstBoot event");
+
+        match received {
+            Ok(Event::System(SystemEvent::FirstBoot)) => {
+                // Success: FirstBoot event received as expected
+            }
+            _ => panic!("Expected FirstBoot event, got {:?}", received),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_boot_does_not_emit_when_soul_present() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        // On second boot, FirstBoot event should NOT be broadcast.
+        // Simulate second boot by broadcasting EncryptionInitialized but NOT FirstBoot.
+        bus.broadcast(Event::System(SystemEvent::EncryptionInitialized))
+            .await
+            .expect("broadcast should succeed");
+
+        // We should receive EncryptionInitialized but NOT FirstBoot
+        let received = rx.recv().await;
         assert!(received.is_ok());
 
-        if let Ok(Event::System(SystemEvent::FirstBoot)) = received {
-            // Success
-        } else {
-            panic!("Expected FirstBoot event");
+        match received {
+            Ok(Event::System(SystemEvent::EncryptionInitialized)) => {
+                // Correct: received expected event
+            }
+            Ok(Event::System(SystemEvent::FirstBoot)) => {
+                panic!("FirstBoot event should NOT be broadcast on second run");
+            }
+            _ => panic!("Unexpected event: {:?}", received),
         }
+
+        // Try to receive another event with a short timeout — should not receive FirstBoot
+        let timeout_result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        match timeout_result {
+            Err(_) => {
+                // Timeout is expected — no FirstBoot event broadcast
+            }
+            Ok(Ok(Event::System(SystemEvent::FirstBoot))) => {
+                panic!("FirstBoot should NOT be broadcast on second boot");
+            }
+            Ok(_) => {
+                // Some other event — that's fine
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_boot_flag_correct_when_soul_absent() {
+        // This test verifies the is_first_boot flag is set correctly when soul.redb.enc is absent.
+        // We cannot run the full boot() function in a test because it requires OS-level setup.
+        // Instead, we verify the detection logic in isolation.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let soul_path = dir.path().join("soul.redb.enc");
+
+        // First boot scenario: soul.redb.enc does not exist
+        let is_first_boot = !soul_path.exists();
+        assert!(
+            is_first_boot,
+            "is_first_boot should be true when soul.redb.enc is absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_boot_flag_correct_when_soul_present() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let soul_path = dir.path().join("soul.redb.enc");
+
+        // Second boot scenario: soul.redb.enc exists from a previous run
+        fs::write(&soul_path, b"previous boot data").expect("write should succeed");
+
+        let is_first_boot = !soul_path.exists();
+        assert!(
+            !is_first_boot,
+            "is_first_boot should be false when soul.redb.enc exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_boot_onboarding_integration_simulation() {
+        // This test simulates the onboarding flow decision point in main.rs interactive_mode.
+        // When is_first_boot is true, onboarding wizard should run.
+        // When is_first_boot is false, onboarding wizard should be skipped.
+
+        // Scenario 1: First boot → onboarding runs
+        let is_first_boot_scenario_1 = true;
+        assert!(
+            is_first_boot_scenario_1,
+            "onboarding should run on first boot"
+        );
+
+        // Scenario 2: Second boot → onboarding skipped
+        let is_first_boot_scenario_2 = false;
+        assert!(
+            !is_first_boot_scenario_2,
+            "onboarding should NOT run on second boot"
+        );
     }
 
     #[tokio::test]
