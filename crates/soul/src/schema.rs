@@ -13,7 +13,7 @@ use redb::TableDefinition;
 use crate::error::SoulError;
 
 /// Current schema version. Increment when adding new tables or changing layout.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 
 const VERSION_KEY: &str = "schema_version";
 
@@ -34,6 +34,10 @@ pub const IDENTITY_SIGNALS: TableDefinition<&str, &str> = TableDefinition::new("
 /// Key: dot-separated preference path (e.g. "ctp.trigger_interval_secs").
 /// Value: TOML-serialized value.
 pub const PREFERENCES: TableDefinition<&str, &str> = TableDefinition::new("preferences");
+
+/// User identity table — stores user-provided name from first-boot onboarding.
+/// Single-row table. Key: "user_name". Value: UTF-8 encoded name.
+pub const USER_IDENTITY: TableDefinition<&str, &str> = TableDefinition::new("user_identity");
 
 /// Apply all schema migrations up to [`SCHEMA_VERSION`].
 ///
@@ -66,7 +70,19 @@ pub fn apply_schema(db: &redb::Database) -> Result<(), SoulError> {
         }
         {
             let mut meta = write_txn.open_table(SCHEMA_META)?;
-            meta.insert(VERSION_KEY, SCHEMA_VERSION)?;
+            meta.insert(VERSION_KEY, 1u64)?;
+        }
+        write_txn.commit()?;
+    }
+
+    if current_version < 2 {
+        let write_txn = db.begin_write()?;
+        {
+            let _t = write_txn.open_table(USER_IDENTITY)?;
+        }
+        {
+            let mut meta = write_txn.open_table(SCHEMA_META)?;
+            meta.insert(VERSION_KEY, 2u64)?;
         }
         write_txn.commit()?;
     }

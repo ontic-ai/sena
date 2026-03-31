@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::{
     encrypted_db::EncryptedDb,
     error::SoulError,
-    schema::{self, EVENT_LOG, IDENTITY_SIGNALS},
+    schema::{self, EVENT_LOG, IDENTITY_SIGNALS, USER_IDENTITY},
 };
 
 const SOUL_ACTOR_NAME: &str = "soul";
@@ -175,6 +175,52 @@ impl SoulActor {
         Ok(())
     }
 
+    fn handle_initialize_with_name(
+        &mut self,
+        name: String,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
+        // Validate: name must not be empty and max 50 chars
+        if name.is_empty() || name.len() > 50 {
+            return Err(SoulError::Database(format!(
+                "invalid user name: must be 1-50 characters, got {} chars",
+                name.len()
+            )));
+        }
+
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let redb = db.db()?;
+
+        let write_txn = redb.begin_write()?;
+        {
+            let mut table = write_txn.open_table(USER_IDENTITY)?;
+            table.insert("user_name", name.as_str())?;
+            // Store timestamp using SystemTime
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            table.insert("created_at", &*timestamp.to_string())?;
+        }
+        write_txn.commit()?;
+
+        // Emit NameInitialized ack on bus
+        let bus_clone = Arc::clone(bus);
+        let name_clone = name.clone();
+        tokio::spawn(async move {
+            let _ = bus_clone
+                .broadcast(Event::Soul(SoulEvent::NameInitialized(
+                    bus::events::soul::SoulNameInitialized { name: name_clone },
+                )))
+                .await;
+        });
+
+        Ok(())
+    }
+
     fn absorb_platform_signal(&self, event: PlatformEvent) -> Result<(), SoulError> {
         match event {
             PlatformEvent::WindowChanged(window) => {
@@ -262,7 +308,17 @@ impl SoulActor {
             }
         }
 
+        // Read user_name from USER_IDENTITY table
+        let user_name = redb
+            .begin_read()
+            .ok()
+            .and_then(|txn| txn.open_table(USER_IDENTITY).ok())
+            .and_then(|table| table.get("user_name").ok())
+            .and_then(|opt| opt)
+            .map(|g| g.value().to_string());
+
         let summary = SoulSummaryForTransparency {
+            user_name,
             inference_cycle_count,
             work_patterns,
             tool_preferences,
@@ -436,6 +492,11 @@ impl Actor for SoulActor {
                                         eprintln!("[soul] identity signal failed: {}", e);
                                     }
                                 }
+                                SoulEvent::InitializeWithName { name } => {
+                                    if let Err(e) = self.handle_initialize_with_name(name, &bus) {
+                                        eprintln!("[soul] failed to initialize user name: {}", e);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -577,6 +638,98 @@ mod tests {
         } else {
             panic!("Expected SummaryReady, got {:?}", summary_event);
         }
+
+        actor.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn soul_initializes_user_name() {
+        let dir = tempdir().expect("should create tempdir");
+        let db_path = dir.path().join("soul.redb.enc");
+
+        let mut actor = SoulActor::new(&db_path, test_key());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ready = rx.recv().await.expect("should receive ActorReady");
+
+        // Send InitializeWithName
+        actor
+            .handle_initialize_with_name("Alice".to_string(), &bus)
+            .expect("initialize name should succeed");
+
+        // Verify NameInitialized event
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("should receive event");
+
+        if let Event::Soul(SoulEvent::NameInitialized(init)) = event {
+            assert_eq!(init.name, "Alice");
+        } else {
+            panic!("Expected NameInitialized, got {:?}", event);
+        }
+
+        // Verify name can be read back from the database
+        let db = actor.db.as_ref().expect("db should be initialized");
+        let redb = db.db().expect("should get redb");
+        let read_txn = redb.begin_read().expect("should begin read");
+        let table = read_txn
+            .open_table(USER_IDENTITY)
+            .expect("should open USER_IDENTITY");
+        let name_guard = table
+            .get("user_name")
+            .expect("should get user_name")
+            .expect("user_name should exist");
+        let name = name_guard.value();
+        assert_eq!(name, "Alice");
+
+        actor.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn soul_rejects_empty_name() {
+        let dir = tempdir().expect("should create tempdir");
+        let db_path = dir.path().join("soul.redb.enc");
+
+        let mut actor = SoulActor::new(&db_path, test_key());
+        let bus = Arc::new(EventBus::new());
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        let result = actor.handle_initialize_with_name("".to_string(), &bus);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid user name"));
+
+        actor.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn soul_rejects_too_long_name() {
+        let dir = tempdir().expect("should create tempdir");
+        let db_path = dir.path().join("soul.redb.enc");
+
+        let mut actor = SoulActor::new(&db_path, test_key());
+        let bus = Arc::new(EventBus::new());
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        let long_name = "a".repeat(51);
+        let result = actor.handle_initialize_with_name(long_name, &bus);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid user name"));
 
         actor.stop().await.expect("stop should succeed");
     }
