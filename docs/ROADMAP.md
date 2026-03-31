@@ -247,11 +247,11 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [ ] First-boot: Soul initialized with user name (only piece of pre-seeded data, user-provided)
 - [ ] Config wizard: set file watch paths, clipboard observation opt-in
 
-#### M4.3 — Transparency UI
-- [ ] User can query: "what are you observing right now?"
-- [ ] User can query: "what do you remember about me?"
-- [ ] User can query: "why did you say that?" (last inference explanation)
-- [ ] Satisfies PRD Principle P7
+#### M4.3 — Transparency UI ✅
+- [x] User can query: "what are you observing right now?" (via `/observation` slash command)
+- [x] User can query: "what do you remember about me?" (via `/memory` slash command)
+- [x] User can query: "why did you say that?" (via `/explanation` slash command)
+- [x] Satisfies PRD Principle P7
 
 #### M4.4 — Stability and Performance
 - [ ] Memory usage profiled and bounded
