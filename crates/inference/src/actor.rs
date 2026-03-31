@@ -1,8 +1,9 @@
 //! Inference actor: model discovery, lazy loading, and inference execution.
 
 use async_trait::async_trait;
+use bus::events::ctp::{CTPEvent, ContextSnapshot};
 use bus::events::inference::Priority;
-use bus::events::memory::{MemoryChunk, MemoryQueryRequest};
+use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent};
@@ -26,6 +27,9 @@ const DEFAULT_DIRECTED_CAPACITY: usize = 64;
 const ITERATIVE_MAX_HARD_CAP: usize = 6;
 const MEMORY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MEMORY_QUERY_TOKEN_BUDGET: usize = 8;
+/// Shorter timeout for single-round inferences to avoid blocking the actor.
+/// 100ms is enough for memory to respond if it can, or timeout quickly if it needs embeddings.
+const SINGLE_ROUND_MEMORY_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Inference actor manages model discovery, lazy loading, and inference requests.
 ///
@@ -49,6 +53,10 @@ pub struct InferenceActor {
     queue: InferenceQueue,
     /// Captures state from the most recent successful inference cycle.
     last_inference_state: Option<InferenceState>,
+    /// Latest CTP context snapshot.
+    last_snapshot: Option<ContextSnapshot>,
+    /// Recent conversation history (user, assistant pairs), capped at 5.
+    conversation_history: Vec<(String, String)>,
 }
 
 impl InferenceActor {
@@ -72,6 +80,8 @@ impl InferenceActor {
             backend_type,
             queue: InferenceQueue::new(DEFAULT_QUEUE_CAPACITY),
             last_inference_state: None,
+            last_snapshot: None,
+            conversation_history: Vec::new(),
         }
     }
 
@@ -327,10 +337,152 @@ impl InferenceActor {
         result
     }
 
+    /// Build enriched prompt from user message, memory chunks, context snapshot, and history.
+    fn build_enriched_prompt(
+        user_message: &str,
+        memory_chunks: &[MemoryChunk],
+        snapshot: Option<&ContextSnapshot>,
+        history: &[(String, String)],
+    ) -> String {
+        let mut parts = Vec::new();
+
+        // Add active context if available
+        if let Some(snap) = snapshot {
+            let mut ctx_parts = vec![format!("Active application: {}", snap.active_app.app_name)];
+            if let Some(task) = &snap.inferred_task {
+                ctx_parts.push(format!(
+                    "Inferred task: {} ({:.0}%)",
+                    task.category,
+                    task.confidence * 100.0
+                ));
+            }
+            parts.push(format!("## Current Context\n{}", ctx_parts.join("\n")));
+        }
+
+        // Add relevant memory if any
+        if !memory_chunks.is_empty() {
+            let lines: Vec<String> = memory_chunks
+                .iter()
+                .map(|c| format!("- {}", c.text))
+                .collect();
+            parts.push(format!("## Relevant Memory\n{}", lines.join("\n")));
+        }
+
+        // Add recent conversation history
+        if !history.is_empty() {
+            let hist_lines: Vec<String> = history
+                .iter()
+                .map(|(u, a)| format!("User: {}\nAssistant: {}", u, a))
+                .collect();
+            parts.push(format!(
+                "## Recent Conversation\n{}",
+                hist_lines.join("\n\n")
+            ));
+        }
+
+        // Add the current user message last
+        parts.push(format!("## User\n{}", user_message));
+
+        parts.join("\n\n")
+    }
+
+    /// Process a single inference request with memory context enrichment.
+    /// This runs directly in the event loop (not queued) so the actor can handle
+    /// Embed/Extract requests from memory while waiting for query responses.
+    /// Uses a short timeout for memory queries to avoid blocking.
+    async fn process_single_inference_with_context(
+        &mut self,
+        bus: &Arc<EventBus>,
+        prompt: String,
+        request_id: u64,
+    ) -> Result<(String, usize), String> {
+        self.ensure_loaded(bus).await?;
+
+        // Query memory for relevant context with short timeout
+        let memory_request_id = request_id.saturating_mul(1000);
+        let memory_chunks = Self::query_memory_with_timeout(
+            bus,
+            &prompt,
+            memory_request_id,
+            SINGLE_ROUND_MEMORY_TIMEOUT,
+        )
+        .await
+        .unwrap_or_else(|_| Vec::new());
+
+        // Build enriched prompt with context, memory, and conversation history
+        let enriched_prompt = Self::build_enriched_prompt(
+            &prompt,
+            &memory_chunks,
+            self.last_snapshot.as_ref(),
+            &self.conversation_history,
+        );
+
+        // Detect chat template and wrap enriched prompt
+        let template = self
+            .current_model_name
+            .as_ref()
+            .map(|name| ChatTemplate::detect_from_model_name(name))
+            .unwrap_or(ChatTemplate::Raw);
+        let wrapped_prompt = template.wrap(&enriched_prompt);
+
+        let backend_clone = self.backend.clone();
+        let prompt_len = enriched_prompt.len();
+        let result = tokio::task::spawn_blocking(move || {
+            let guard = backend_clone
+                .lock()
+                .map_err(|e| format!("lock poisoned: {}", e))?;
+            guard
+                .infer(&wrapped_prompt, &InferenceParams::default())
+                .map_err(|e| format!("{}", e))
+        })
+        .await
+        .map_err(|e| format!("task panicked: {}", e))??;
+
+        // Update conversation history
+        self.conversation_history
+            .push((prompt.clone(), result.clone()));
+        if self.conversation_history.len() > 5 {
+            self.conversation_history.remove(0);
+        }
+
+        // Write conversation to memory (non-fatal if fails)
+        let memory_write_request_id = request_id.saturating_mul(2000);
+        let conversation_text = format!("User: {}\nAssistant: {}", prompt, result);
+        let _ = bus
+            .send_directed(
+                "memory",
+                Event::Memory(MemoryEvent::WriteRequested(MemoryWriteRequest {
+                    text: conversation_text,
+                    request_id: memory_write_request_id,
+                })),
+            )
+            .await;
+
+        // Capture inference state for transparency queries
+        let token_count = result.split_whitespace().count();
+        self.last_inference_state = Some(InferenceState {
+            request_context: format!("Inference request: {} chars", prompt_len),
+            response_text: result.clone(),
+            working_memory_context: memory_chunks,
+            rounds_completed: 1,
+        });
+
+        Ok((result, token_count))
+    }
+
     async fn query_memory_for_round(
         bus: &Arc<EventBus>,
         query: &str,
         request_id: u64,
+    ) -> Result<Vec<MemoryChunk>, String> {
+        Self::query_memory_with_timeout(bus, query, request_id, MEMORY_QUERY_TIMEOUT).await
+    }
+
+    async fn query_memory_with_timeout(
+        bus: &Arc<EventBus>,
+        query: &str,
+        request_id: u64,
+        timeout: Duration,
     ) -> Result<Vec<MemoryChunk>, String> {
         let mut rx = bus.subscribe_broadcast();
 
@@ -345,7 +497,7 @@ impl InferenceActor {
         .await
         .map_err(|e| format!("memory query dispatch failed: {}", e))?;
 
-        let deadline = tokio::time::Instant::now() + MEMORY_QUERY_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -526,6 +678,9 @@ impl Actor for InferenceActor {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             return Ok(());
                         }
+                        Ok(Event::CTP(CTPEvent::ContextSnapshotReady(snapshot))) => {
+                            self.last_snapshot = Some(snapshot);
+                        }
                         Ok(Event::Transparency(TransparencyEvent::QueryRequested(
                             TransparencyQuery::InferenceExplanation,
                         ))) => {
@@ -554,18 +709,34 @@ impl Actor for InferenceActor {
                 } => {
                     if let Some(event) = directed {
                         match event {
-                            Event::Inference(InferenceEvent::InferenceRequested { prompt, priority, request_id }) => {
-                                let (tx, _rx) = tokio::sync::oneshot::channel();
-                                let enqueue_result = self.queue.enqueue(
-                                    priority,
-                                    request_id,
-                                    WorkKind::Infer { prompt, response_tx: tx },
-                                );
-                                if let Err(e) = enqueue_result {
-                                    let _ = bus.broadcast(Event::Inference(InferenceEvent::InferenceFailed {
-                                        request_id,
-                                        reason: e.to_string(),
-                                    })).await;
+                            Event::Inference(InferenceEvent::InferenceRequested { prompt, priority: _, request_id }) => {
+                                // Process with memory context directly in event handler with short timeout
+                                // to avoid blocking on memory queries that require embeddings
+                                match self
+                                    .process_single_inference_with_context(&bus, prompt, request_id)
+                                    .await
+                                {
+                                    Ok((text, token_count)) => {
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceCompleted {
+                                                    text,
+                                                    request_id,
+                                                    token_count,
+                                                },
+                                            ))
+                                            .await;
+                                    }
+                                    Err(reason) => {
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceFailed {
+                                                    request_id,
+                                                    reason,
+                                                },
+                                            ))
+                                            .await;
+                                    }
                                 }
                             }
                             Event::Inference(InferenceEvent::EmbedRequested { text, request_id }) => {

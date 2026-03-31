@@ -77,7 +77,11 @@ impl ModelRegistry {
     /// If the preferred model exists in the registry, it becomes the default.
     /// If the preferred model is not found, the current default is preserved.
     pub fn set_preferred_model(&mut self, preferred: &str) {
-        if self.models.iter().any(|m| m.name.eq_ignore_ascii_case(preferred)) {
+        if self
+            .models
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(preferred))
+        {
             // Normalise to the exact name as stored in the registry.
             if let Some(name) = self
                 .models

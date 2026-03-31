@@ -16,6 +16,68 @@ pub enum BackendType {
     Cpu,
 }
 
+impl BackendType {
+    /// Auto-detect the best available backend for LLM inference.
+    ///
+    /// Detection logic:
+    /// - macOS → Metal (Apple Silicon native acceleration)
+    /// - Windows/Linux with NVIDIA GPU → CUDA
+    /// - Otherwise → CPU fallback
+    ///
+    /// CUDA detection is lightweight and non-blocking: checks for presence of NVIDIA
+    /// driver files without spawning external processes or loading heavy libraries.
+    pub fn auto_detect() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            BackendType::Metal
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if has_nvidia_gpu_windows() {
+                BackendType::Cuda
+            } else {
+                BackendType::Cpu
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if has_nvidia_gpu_linux() {
+                BackendType::Cuda
+            } else {
+                BackendType::Cpu
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            BackendType::Cpu
+        }
+    }
+}
+
+/// Check for NVIDIA GPU on Windows by detecting presence of CUDA driver DLL.
+#[cfg(target_os = "windows")]
+fn has_nvidia_gpu_windows() -> bool {
+    // nvcuda.dll is the NVIDIA CUDA driver library installed with NVIDIA drivers.
+    // On 64-bit Windows, it lives in System32.
+    let system32 = std::env::var("SystemRoot")
+        .map(|root| std::path::PathBuf::from(root).join("System32"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows\System32"));
+
+    let nvcuda_dll = system32.join("nvcuda.dll");
+    nvcuda_dll.exists()
+}
+
+/// Check for NVIDIA GPU on Linux by detecting NVIDIA driver proc file.
+#[cfg(target_os = "linux")]
+fn has_nvidia_gpu_linux() -> bool {
+    // /proc/driver/nvidia/version exists when NVIDIA proprietary drivers are loaded.
+    // This is a reliable and lightweight signal that CUDA-capable hardware is present.
+    std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
 impl std::fmt::Display for BackendType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -99,6 +161,49 @@ pub trait LlmBackend: Send + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detect_returns_valid_backend() {
+        // Should never panic and always return a valid backend type.
+        let backend = BackendType::auto_detect();
+        match backend {
+            BackendType::Metal | BackendType::Cuda | BackendType::Cpu => {}
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_always_returns_metal() {
+        assert_eq!(BackendType::auto_detect(), BackendType::Metal);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_returns_cuda_or_cpu() {
+        let backend = BackendType::auto_detect();
+        assert!(backend == BackendType::Cuda || backend == BackendType::Cpu);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_returns_cuda_or_cpu() {
+        let backend = BackendType::auto_detect();
+        assert!(backend == BackendType::Cuda || backend == BackendType::Cpu);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn nvidia_check_does_not_panic() {
+        // Should never panic, even if driver files are missing
+        let _ = has_nvidia_gpu_windows();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nvidia_check_does_not_panic() {
+        // Should never panic, even if driver files are missing
+        let _ = has_nvidia_gpu_linux();
+    }
 
     #[test]
     fn backend_type_display() {
