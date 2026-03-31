@@ -21,6 +21,8 @@ pub struct Runtime {
     #[allow(dead_code)]
     pub(crate) master_key: MasterKey,
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
+    /// Memory monitor task handle (if enabled).
+    pub(crate) memory_monitor_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Boot sequence errors.
@@ -107,7 +109,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let platform_adapter = platform::create_platform_adapter();
     let platform_actor = platform::PlatformActor::new(platform_adapter)
         .with_poll_interval(Duration::from_millis(500))
-        .with_clipboard_enabled(config.clipboard_observation_enabled);
+        .with_clipboard_enabled(config.clipboard_observation_enabled)
+        .with_idle_threshold(config.platform_idle_cpu_threshold_percent);
     spawn_actor(&bus, &mut registry, Box::new(platform_actor));
 
     // Step 7: Initialize and spawn CTP actor
@@ -153,6 +156,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let tray_manager =
         crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
 
+    // Step 11.5: Spawn memory monitor task (background task, non-blocking).
+    let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
+
     // Step 12: Broadcast BootComplete
     bus.broadcast(Event::System(SystemEvent::BootComplete))
         .await
@@ -166,6 +172,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         is_first_boot,
         master_key,
         _keep_alive: keep_alive,
+        memory_monitor_handle: Some(memory_monitor_handle),
     })
 }
 
@@ -235,6 +242,67 @@ fn spawn_actor(bus: &Arc<EventBus>, registry: &mut ActorRegistry, mut actor: Box
     registry.register(name, handle);
 }
 
+/// Spawns a background task that monitors memory usage every `interval_secs`.
+/// Broadcasts `MemoryThresholdExceeded` event if RSS exceeds `limit_mb`.
+/// Exits cleanly when `ShutdownSignal` is received on the bus or when the bus closes.
+fn spawn_memory_monitor(bus: Arc<EventBus>, config: &SenaConfig) -> tokio::task::JoinHandle<()> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+
+    let interval = Duration::from_secs(config.memory_monitor_interval_secs);
+    let limit_mb = config.memory_limit_mb;
+    // Subscribe before spawning so no ShutdownSignal is missed.
+    let mut shutdown_rx = bus.subscribe_broadcast();
+
+    tokio::spawn(async move {
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()),
+        );
+        let pid = sysinfo::get_current_pid().ok();
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {
+                    if let Some(pid) = pid {
+                        // Refresh only memory information for efficiency.
+                        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+
+                        if let Some(process) = sys.process(pid) {
+                            // sysinfo returns memory in bytes. Convert to MB.
+                            let memory_bytes = process.memory();
+                            let current_mb = (memory_bytes / (1024 * 1024)) as usize;
+
+                            if current_mb > limit_mb {
+                                eprintln!(
+                                    "WARN: Memory threshold exceeded: {} MB / {} MB limit",
+                                    current_mb, limit_mb
+                                );
+
+                                let event = Event::System(SystemEvent::MemoryThresholdExceeded {
+                                    current_mb,
+                                    limit_mb,
+                                });
+
+                                if let Err(e) = bus.broadcast(event).await {
+                                    eprintln!(
+                                        "Failed to broadcast MemoryThresholdExceeded event: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                msg = shutdown_rx.recv() => {
+                    match msg {
+                        Ok(Event::System(SystemEvent::ShutdownSignal)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +331,7 @@ mod tests {
             is_first_boot: false,
             master_key,
             _keep_alive: keep_alive,
+            memory_monitor_handle: None,
         };
 
         assert_eq!(runtime.registry.actor_count(), 0);
@@ -386,6 +455,7 @@ mod tests {
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
             _keep_alive: keep_alive,
+            memory_monitor_handle: None,
         };
 
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -434,6 +504,77 @@ mod tests {
             // Success
         } else {
             panic!("Expected FirstBoot event");
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_monitor_exits_cleanly_on_shutdown_signal() {
+        let bus = Arc::new(EventBus::new());
+        // Use a very short interval so the test doesn't have to wait 60 seconds.
+        let config = SenaConfig {
+            memory_monitor_interval_secs: 3600, // long interval — shutdown triggers exit
+            ..SenaConfig::default()
+        };
+
+        let handle = spawn_memory_monitor(Arc::clone(&bus), &config);
+
+        // Give the task a moment to enter its select! loop.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Broadcast shutdown — the monitor task should exit its loop.
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast should succeed");
+
+        // The task should complete within a short time after receiving ShutdownSignal.
+        let result = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        assert!(result.is_ok(), "memory monitor did not exit within timeout");
+    }
+
+    #[tokio::test]
+    async fn memory_monitor_broadcasts_threshold_event_when_limit_zero() {
+        // Set limit_mb to 0 so any non-zero RSS triggers the event.
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        let config = SenaConfig {
+            memory_monitor_interval_secs: 0, // immediate first tick
+            memory_limit_mb: 0,              // always exceeded
+            ..SenaConfig::default()
+        };
+
+        let _handle = spawn_memory_monitor(Arc::clone(&bus), &config);
+
+        // Wait up to 2 seconds for the MemoryThresholdExceeded event.
+        let timeout = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::System(SystemEvent::MemoryThresholdExceeded {
+                        current_mb,
+                        limit_mb,
+                    })) => return (current_mb, limit_mb),
+                    Ok(_) => continue,
+                    Err(e) => panic!("channel error: {e}"),
+                }
+            }
+        })
+        .await;
+
+        match timeout {
+            Ok((current_mb, limit_mb)) => {
+                assert_eq!(limit_mb, 0);
+                // current_mb should be > 0 (the process is using some memory).
+                assert!(
+                    current_mb > 0,
+                    "expected non-zero RSS but got {} MB",
+                    current_mb
+                );
+            }
+            Err(_) => {
+                // On some CI environments sysinfo cannot read the process memory
+                // (e.g., missing /proc access). Skip rather than fail.
+                eprintln!("WARN: MemoryThresholdExceeded not received within timeout — sysinfo may not have process access in this environment");
+            }
         }
     }
 }

@@ -5,6 +5,7 @@ use bus::events::platform::{ClipboardDigest, WindowContext};
 use bus::{Actor, ActorError, Event, EventBus, PlatformEvent, SystemEvent};
 use std::sync::Arc;
 use std::time::Duration;
+use sysinfo::System;
 use tokio::sync::broadcast;
 
 use crate::adapter::PlatformAdapter;
@@ -18,25 +19,43 @@ pub struct PlatformActor {
     last_window: Option<WindowContext>,
     last_clipboard: Option<ClipboardDigest>,
     clipboard_enabled: bool,
+    system_info: System,
+    idle_threshold: f32,
+    normal_poll_interval: Duration,
+    /// First CPU reading is always inaccurate — skip threshold logic on first tick
+    first_tick: bool,
 }
 
 impl PlatformActor {
     /// Create a new platform actor with the given adapter.
     pub fn new(adapter: Box<dyn PlatformAdapter>) -> Self {
+        let default_poll_interval = Duration::from_millis(500);
         Self {
             adapter,
             bus_rx: None,
             bus: None,
-            poll_interval: Duration::from_millis(500),
+            poll_interval: default_poll_interval,
             last_window: None,
             last_clipboard: None,
             clipboard_enabled: true,
+            system_info: System::new_all(),
+            idle_threshold: 10.0,
+            normal_poll_interval: default_poll_interval,
+            first_tick: true,
         }
     }
 
     /// Set the polling interval for checking platform signals.
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self.normal_poll_interval = interval;
+        self
+    }
+
+    /// Set the CPU idle threshold percentage for dynamic polling.
+    /// When CPU usage falls below this value, poll interval increases to 2 seconds.
+    pub fn with_idle_threshold(mut self, threshold: f32) -> Self {
+        self.idle_threshold = threshold;
         self
     }
 
@@ -125,6 +144,25 @@ impl Actor for PlatformActor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Dynamic polling based on CPU usage
+                    self.system_info.refresh_cpu_all();
+
+                    if !self.first_tick {
+                        let cpu_usage = self.system_info.global_cpu_usage();
+                        let new_interval = if cpu_usage < self.idle_threshold {
+                            Duration::from_secs(2)
+                        } else {
+                            self.normal_poll_interval
+                        };
+
+                        if new_interval != self.poll_interval {
+                            self.poll_interval = new_interval;
+                            interval = tokio::time::interval(new_interval);
+                        }
+                    } else {
+                        self.first_tick = false;
+                    }
+
                     self.check_window_change().await?;
                     // Only poll clipboard if enabled in config
                     if self.clipboard_enabled {
