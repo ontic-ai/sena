@@ -116,7 +116,12 @@ async fn run_headless_loop(
     mut needs_onboarding: bool,
 ) -> Result<()> {
     let mut bus_rx = runtime.bus.subscribe_broadcast();
-    display::info("Tray/runtime running. Use the tray menu to open the CLI.");
+
+    if needs_onboarding {
+        display::info("🚀 FIRST BOOT: Tray/runtime running. Open the CLI to complete onboarding.");
+    } else {
+        display::info("Tray/runtime running. Use the tray menu to open the CLI.");
+    }
 
     loop {
         tokio::select! {
