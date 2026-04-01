@@ -1,6 +1,7 @@
 //! SoulActor: owns the EncryptedDb and handles all Soul subsystem events.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bus::events::soul::{
@@ -553,11 +554,29 @@ impl Actor for SoulActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
-        // First, drain all outstanding tasks from the task set.
-        // This ensures transparency queries and other spawned work complete
-        // before we close the encrypted database.
-        while self.task_set.join_next().await.is_some() {
-            // Continue draining until all tasks complete
+        // Drain outstanding tasks with a 1-second timeout.
+        // Tasks that don't complete (e.g., blocked on broadcast sends during shutdown)
+        // are aborted to prevent actor stop timeout.
+        let drain_timeout = Duration::from_secs(1);
+        let drain_deadline = tokio::time::Instant::now() + drain_timeout;
+
+        loop {
+            let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                // Timeout reached — abort all remaining tasks
+                self.task_set.abort_all();
+                break;
+            }
+
+            match tokio::time::timeout(remaining, self.task_set.join_next()).await {
+                Ok(Some(_)) => continue, // Task completed, keep draining
+                Ok(None) => break,       // All tasks completed
+                Err(_) => {
+                    // Timeout reached — abort remaining
+                    self.task_set.abort_all();
+                    break;
+                }
+            }
         }
 
         if let Some(db) = self.db.take() {

@@ -152,6 +152,23 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
         }
     }
 
+    // ── Final drain ───────────────────────────────────────────────────────────
+    // Drain any in-flight responses before shutdown to avoid false-positive
+    // sent != responses assertion failure.
+    let final_drain_deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = final_drain_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) => {
+                responses_received += 1;
+            }
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+        }
+    }
+
     // ── Shutdown ──────────────────────────────────────────────────────────────
     bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
         .await
@@ -330,6 +347,23 @@ async fn longevity_72h_no_leak_no_panic() {
                 hours_elapsed, hours_remaining, requests_sent, responses_received, peak_memory_mb
             );
             last_progress_report = Instant::now();
+        }
+    }
+
+    // ── Final drain ───────────────────────────────────────────────────────────
+    // Drain any in-flight responses before shutdown to avoid false-positive
+    // sent != responses assertion failure.
+    let final_drain_deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = final_drain_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) => {
+                responses_received += 1;
+            }
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
         }
     }
 

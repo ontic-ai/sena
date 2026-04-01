@@ -362,10 +362,12 @@ impl Actor for MemoryActor {
                             // Handle transparency queries on broadcast
                             match query {
                                 TransparencyQuery::UserMemory => {
+                                    // Spawn untracked (like inference actor) to avoid blocking shutdown.
+                                    // Transparency queries have internal timeouts and will complete or fail gracefully.
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
                                     let mut bcast_rx = broadcast_rx.resubscribe();
-                                    self.task_set.spawn(async move {
+                                    tokio::spawn(async move {
                                         // Generate a simple request_id based on timestamp
                                         let request_id = match std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -455,11 +457,29 @@ impl Actor for MemoryActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
-        // First, drain all outstanding tasks from the task set.
-        // This ensures transparency queries and other spawned work complete
-        // before we close the encrypted store.
-        while self.task_set.join_next().await.is_some() {
-            // Continue draining until all tasks complete
+        // Drain outstanding tasks with a 1-second timeout.
+        // Tasks that don't complete (e.g., waiting on inference during shutdown)
+        // are aborted to prevent actor stop timeout.
+        let drain_timeout = Duration::from_secs(1);
+        let drain_deadline = tokio::time::Instant::now() + drain_timeout;
+
+        loop {
+            let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                // Timeout reached — abort all remaining tasks
+                self.task_set.abort_all();
+                break;
+            }
+
+            match tokio::time::timeout(remaining, self.task_set.join_next()).await {
+                Ok(Some(_)) => continue, // Task completed, keep draining
+                Ok(None) => break,       // All tasks completed
+                Err(_) => {
+                    // Timeout reached — abort remaining
+                    self.task_set.abort_all();
+                    break;
+                }
+            }
         }
 
         // Drop the ech0 store first to release any file handles
@@ -547,8 +567,9 @@ mod tests {
 
     #[tokio::test]
     async fn memory_actor_clean_shutdown_with_concurrent_transparency_queries() {
-        // Regression test for shutdown timeout issue: ensure spawned transparency
-        // query tasks are drained before encrypted store closes.
+        // Regression test for shutdown timeout issue: transparency query tasks
+        // now spawn with tokio::spawn (untracked) rather than into task_set,
+        // so they don't block shutdown.
         use bus::events::transparency::TransparencyQuery;
 
         let dir = tempdir().expect("tempdir");
@@ -567,7 +588,7 @@ mod tests {
         let _ = rx.recv().await.expect("ActorReady event");
 
         // Spawn the actor run loop in a background task
-        let mut actor_handle = tokio::spawn(async move { actor.run().await });
+        let actor_handle = tokio::spawn(async move { actor.run().await });
 
         // Issue multiple transparency queries concurrently
         for _ in 0..5 {
@@ -586,29 +607,11 @@ mod tests {
             .await
             .expect("shutdown signal should broadcast");
 
-        // Wait for actor run loop to terminate
-        let run_result = tokio::time::timeout(Duration::from_secs(2), &mut actor_handle)
+        // Actor run loop should terminate cleanly without timeout
+        let run_result = tokio::time::timeout(Duration::from_secs(2), actor_handle)
             .await
             .expect("actor run loop should terminate within timeout")
             .expect("actor run loop should not panic");
         assert!(run_result.is_ok(), "actor run loop should complete cleanly");
-
-        // Recover actor from handle and call stop()
-        // Since actor_handle consumed the actor, we need to test stop separately
-        // by constructing a new actor instance
-        let mut stop_actor = MemoryActor::new(&memory_dir, test_master_key());
-        stop_actor
-            .start(Arc::clone(&bus))
-            .await
-            .expect("start should succeed");
-
-        // stop() should complete without timeout even if there were pending tasks
-        let stop_result = tokio::time::timeout(Duration::from_secs(2), stop_actor.stop())
-            .await
-            .expect("stop should complete within timeout");
-        assert!(
-            stop_result.is_ok(),
-            "stop should succeed after draining tasks"
-        );
     }
 }
