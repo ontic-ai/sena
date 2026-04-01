@@ -38,6 +38,7 @@ mod integration_tests {
                 events_per_minute: 0.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(0),
+                timestamp: now,
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
@@ -148,6 +149,7 @@ mod integration_tests {
             events_per_minute: 120.0,
             burst_detected: true,
             idle_duration: Duration::from_secs(1),
+            timestamp: Instant::now(),
         }))
         .await
         .unwrap();

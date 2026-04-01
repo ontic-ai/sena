@@ -83,9 +83,14 @@ impl SignalBuffer {
             }
         }
 
-        // Prune keystroke events - these don't have a timestamp field,
-        // so we keep all of them for now
-        // TODO: reconsider if KeystrokeCadence needs timestamp
+        // Prune keystroke events
+        while let Some(event) = self.keystroke_events.front() {
+            if event.timestamp <= cutoff_time {
+                self.keystroke_events.pop_front();
+            } else {
+                break;
+            }
+        }
     }
 
     /// Get the most recent window context, if any.
@@ -142,6 +147,7 @@ mod tests {
             events_per_minute: 120.0,
             burst_detected: false,
             idle_duration: Duration::from_secs(5),
+            timestamp: Instant::now(),
         };
 
         buffer.push_keystroke(cadence.clone());

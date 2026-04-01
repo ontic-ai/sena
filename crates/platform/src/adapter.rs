@@ -89,6 +89,7 @@ pub(crate) fn spawn_keystroke_pattern_monitor(
                 events_per_minute,
                 burst_detected: events_per_minute > 200.0,
                 idle_duration,
+                timestamp: Instant::now(),
             };
 
             if reporter_tx.blocking_send(cadence).is_err() {

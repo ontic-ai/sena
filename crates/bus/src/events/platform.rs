@@ -71,6 +71,8 @@ pub struct KeystrokeCadence {
     pub burst_detected: bool,
     /// Duration of idle time since last keystroke.
     pub idle_duration: Duration,
+    /// When this cadence was captured.
+    pub timestamp: Instant,
 }
 
 /// Platform-layer events.
@@ -150,6 +152,7 @@ mod tests {
             events_per_minute: 120.5,
             burst_detected: true,
             idle_duration: Duration::from_secs(5),
+            timestamp: Instant::now(),
         };
         let cloned = cadence.clone();
         assert_eq!(cloned.events_per_minute, 120.5);
@@ -216,6 +219,7 @@ mod tests {
             events_per_minute: 80.0,
             burst_detected: false,
             idle_duration: Duration::from_secs(10),
+            timestamp: Instant::now(),
         };
         let event = PlatformEvent::KeystrokePattern(cadence);
         let cloned = event.clone();
@@ -255,6 +259,7 @@ mod tests {
             events_per_minute: 100.0,
             burst_detected: true,
             idle_duration: Duration::from_secs(2),
+            timestamp: Instant::now(),
         };
 
         // Verify fields are the expected primitive types

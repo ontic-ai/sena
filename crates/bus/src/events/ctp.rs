@@ -90,6 +90,7 @@ mod tests {
             events_per_minute: 180.5,
             burst_detected: true,
             idle_duration: Duration::from_secs(2),
+            timestamp: now,
         };
 
         let task_hint = TaskHint {
@@ -140,6 +141,7 @@ mod tests {
                 events_per_minute: 50.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(10),
+                timestamp: now,
             },
             session_duration: Duration::from_secs(1800),
             inferred_task: None,
@@ -218,6 +220,7 @@ mod tests {
                 events_per_minute: 0.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(0),
+                timestamp: now,
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,

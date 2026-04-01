@@ -245,6 +245,7 @@ mod tests {
     use super::*;
     use crate::factory::create_platform_adapter;
     use bus::events::platform::PlatformEvent;
+    use std::time::Instant;
     use tokio::sync::mpsc;
 
     struct TestKeystrokeAdapter;
@@ -266,6 +267,7 @@ mod tests {
                     events_per_minute: 132.0,
                     burst_detected: false,
                     idle_duration: Duration::from_millis(250),
+                    timestamp: Instant::now(),
                 };
                 let _ = tx.blocking_send(cadence);
             });

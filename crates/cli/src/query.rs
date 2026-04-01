@@ -376,6 +376,7 @@ mod tests {
                 events_per_minute: 45.5,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(10),
+                timestamp: std::time::Instant::now(),
             },
             session_duration: Duration::from_secs(3600),
             inferred_task: Some(bus::events::ctp::TaskHint {
@@ -410,6 +411,7 @@ mod tests {
                 events_per_minute: 0.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(0),
+                timestamp: std::time::Instant::now(),
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,

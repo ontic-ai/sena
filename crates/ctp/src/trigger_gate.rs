@@ -152,6 +152,7 @@ mod tests {
                 events_per_minute: 0.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(0),
+                timestamp: now,
             },
             session_duration: Duration::from_secs(10),
             inferred_task: None,

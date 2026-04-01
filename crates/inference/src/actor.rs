@@ -27,9 +27,9 @@ const DEFAULT_DIRECTED_CAPACITY: usize = 64;
 const ITERATIVE_MAX_HARD_CAP: usize = 6;
 const MEMORY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MEMORY_QUERY_TOKEN_BUDGET: usize = 8;
-/// Shorter timeout for single-round inferences to avoid blocking the actor.
-/// 100ms is enough for memory to respond if it can, or timeout quickly if it needs embeddings.
-const SINGLE_ROUND_MEMORY_TIMEOUT: Duration = Duration::from_millis(100);
+/// Timeout for single-round memory queries. 2 seconds allows memory to embed the query
+/// and return results. We process directed events during the wait to avoid deadlock.
+const SINGLE_ROUND_MEMORY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Inference actor manages model discovery, lazy loading, and inference requests.
 ///
@@ -338,6 +338,15 @@ impl InferenceActor {
     }
 
     /// Build enriched prompt from user message, memory chunks, context snapshot, and history.
+    ///
+    /// The prompt includes:
+    /// 1. System instruction coaching the LLM to use context, memory, and history
+    /// 2. Relevant memory chunks from the ech0 store (if any)
+    /// 3. Recent conversation history to maintain continuity (if any)
+    /// 4. Current computing context from CTP (if available)
+    /// 5. The user's current message
+    ///
+    /// All sections are omitted if empty, ensuring compact prompts for new conversations.
     fn build_enriched_prompt(
         user_message: &str,
         memory_chunks: &[MemoryChunk],
@@ -346,18 +355,27 @@ impl InferenceActor {
     ) -> String {
         let mut parts = Vec::new();
 
-        // Add active context if available
-        if let Some(snap) = snapshot {
-            let mut ctx_parts = vec![format!("Active application: {}", snap.active_app.app_name)];
-            if let Some(task) = &snap.inferred_task {
-                ctx_parts.push(format!(
-                    "Inferred task: {} ({:.0}%)",
-                    task.category,
-                    task.confidence * 100.0
-                ));
-            }
-            parts.push(format!("## Current Context\n{}", ctx_parts.join("\n")));
+        // System instruction: tell the LLM it has memory and context available
+        let has_memory = !memory_chunks.is_empty();
+        let has_history = !history.is_empty();
+        let has_context = snapshot.is_some();
+
+        let mut instruction = String::from(
+            "You are Sena, an AI assistant with access to persistent memory and context.",
+        );
+        if has_memory {
+            instruction
+                .push_str(" Review the provided memory to understand relevant prior knowledge.");
         }
+        if has_history {
+            instruction.push_str(" Use the recent conversation history to maintain continuity and remember what you've already discussed.");
+        }
+        if has_context {
+            instruction.push_str(" Consider the current context (active application, inferred task, keystroke activity) when providing assistance.");
+        }
+        instruction.push_str(" When the user asks about past interactions or what you know, draw on these sources of information.");
+
+        parts.push(format!("## System\n{}", instruction));
 
         // Add relevant memory if any
         if !memory_chunks.is_empty() {
@@ -368,7 +386,7 @@ impl InferenceActor {
             parts.push(format!("## Relevant Memory\n{}", lines.join("\n")));
         }
 
-        // Add recent conversation history
+        // Add recent conversation history to maintain continuity
         if !history.is_empty() {
             let hist_lines: Vec<String> = history
                 .iter()
@@ -378,6 +396,28 @@ impl InferenceActor {
                 "## Recent Conversation\n{}",
                 hist_lines.join("\n\n")
             ));
+        }
+
+        // Add active context if available
+        if let Some(snap) = snapshot {
+            let mut ctx_parts = vec![format!("Active application: {}", snap.active_app.app_name)];
+            if let Some(title) = &snap.active_app.window_title {
+                ctx_parts.push(format!("Window: {}", title));
+            }
+            if let Some(task) = &snap.inferred_task {
+                ctx_parts.push(format!(
+                    "Inferred task: {} ({:.0}%)",
+                    task.category,
+                    task.confidence * 100.0
+                ));
+            }
+            if snap.keystroke_cadence.events_per_minute > 0.0 {
+                ctx_parts.push(format!(
+                    "Typing activity: {:.1} events/min",
+                    snap.keystroke_cadence.events_per_minute
+                ));
+            }
+            parts.push(format!("## Current Context\n{}", ctx_parts.join("\n")));
         }
 
         // Add the current user message last
@@ -398,16 +438,12 @@ impl InferenceActor {
     ) -> Result<(String, usize), String> {
         self.ensure_loaded(bus).await?;
 
-        // Query memory for relevant context with short timeout
+        // Query memory for relevant context
         let memory_request_id = request_id.saturating_mul(1000);
-        let memory_chunks = Self::query_memory_with_timeout(
-            bus,
-            &prompt,
-            memory_request_id,
-            SINGLE_ROUND_MEMORY_TIMEOUT,
-        )
-        .await
-        .unwrap_or_else(|_| Vec::new());
+        let memory_chunks = self
+            .query_memory_with_timeout(bus, &prompt, memory_request_id, SINGLE_ROUND_MEMORY_TIMEOUT)
+            .await
+            .unwrap_or_else(|_| Vec::new());
 
         // Build enriched prompt with context, memory, and conversation history
         let enriched_prompt = Self::build_enriched_prompt(
@@ -471,14 +507,17 @@ impl InferenceActor {
     }
 
     async fn query_memory_for_round(
+        &mut self,
         bus: &Arc<EventBus>,
         query: &str,
         request_id: u64,
     ) -> Result<Vec<MemoryChunk>, String> {
-        Self::query_memory_with_timeout(bus, query, request_id, MEMORY_QUERY_TIMEOUT).await
+        self.query_memory_with_timeout(bus, query, request_id, MEMORY_QUERY_TIMEOUT)
+            .await
     }
 
     async fn query_memory_with_timeout(
+        &mut self,
         bus: &Arc<EventBus>,
         query: &str,
         request_id: u64,
@@ -504,15 +543,56 @@ impl InferenceActor {
                 return Ok(Vec::new());
             }
 
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(Event::Memory(MemoryEvent::QueryCompleted(resp))))
-                    if resp.request_id == request_id =>
-                {
-                    return Ok(resp.chunks);
+            tokio::select! {
+                // Check for memory query response
+                event = rx.recv() => {
+                    match event {
+                        Ok(Event::Memory(MemoryEvent::QueryCompleted(resp)))
+                            if resp.request_id == request_id =>
+                        {
+                            return Ok(resp.chunks);
+                        }
+                        Ok(_) => continue,
+                        Err(_) => return Ok(Vec::new()),
+                    }
                 }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) => return Ok(Vec::new()),
-                Err(_) => return Ok(Vec::new()),
+                // Process directed events (Embed/Extract requests from memory) to avoid deadlock
+                directed = async {
+                    match &mut self.directed_rx {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    if let Some(event) = directed {
+                        match event {
+                            Event::Inference(InferenceEvent::EmbedRequested { text, request_id }) => {
+                                let (tx, _rx) = tokio::sync::oneshot::channel();
+                                let _ = self.queue.enqueue(
+                                    Priority::Normal,
+                                    request_id,
+                                    WorkKind::Embed { text, response_tx: tx },
+                                );
+                                // Process the queued work immediately to avoid blocking memory
+                                if let Some(work) = self.queue.dequeue() {
+                                    self.process_work(work, bus).await;
+                                }
+                            }
+                            Event::Inference(InferenceEvent::ExtractionRequested { text, request_id }) => {
+                                let (tx, _rx) = tokio::sync::oneshot::channel();
+                                let _ = self.queue.enqueue(
+                                    Priority::Normal,
+                                    request_id,
+                                    WorkKind::Extract { text, response_tx: tx },
+                                );
+                                // Process the queued work immediately to avoid blocking memory
+                                if let Some(work) = self.queue.dequeue() {
+                                    self.process_work(work, bus).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
@@ -549,7 +629,9 @@ impl InferenceActor {
             }
 
             let memory_request_id = request_id.saturating_mul(100).saturating_add(round as u64);
-            let memory_chunks = Self::query_memory_for_round(bus, &text, memory_request_id).await?;
+            let memory_chunks = self
+                .query_memory_for_round(bus, &text, memory_request_id)
+                .await?;
             if memory_chunks.is_empty() {
                 break;
             }
@@ -811,7 +893,7 @@ mod tests {
     use super::*;
     use crate::mock_backend::MockBackend;
     use std::fs;
-    use std::time::Duration;
+    use std::time::{Duration, Instant, SystemTime};
     use tempfile::tempdir;
 
     fn create_mock_ollama_structure(base_dir: &std::path::Path) {
@@ -1295,5 +1377,171 @@ mod tests {
             found_response,
             "should emit InferenceExplanationResponded event with placeholder"
         );
+    }
+
+    #[test]
+    fn build_enriched_prompt_includes_system_instruction() {
+        let prompt = InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[]);
+
+        // Should include system instruction
+        assert!(prompt.contains("## System"));
+        assert!(prompt.contains("You are Sena"));
+        assert!(prompt.contains("persistent memory"));
+        assert!(prompt.contains("## User\nWhat do I remember?"));
+    }
+
+    #[test]
+    fn build_enriched_prompt_includes_memory_chunks() {
+        use bus::events::memory::MemoryChunk;
+
+        let chunk1 = MemoryChunk {
+            text: "You told me your favorite color is blue".into(),
+            score: 0.95,
+            timestamp: SystemTime::now(),
+        };
+        let chunk2 = MemoryChunk {
+            text: "You work as a software engineer".into(),
+            score: 0.87,
+            timestamp: SystemTime::now(),
+        };
+
+        let prompt = InferenceActor::build_enriched_prompt(
+            "Tell me about yourself",
+            &[chunk1, chunk2],
+            None,
+            &[],
+        );
+
+        assert!(prompt.contains("## System"));
+        assert!(prompt.contains("Review the provided memory"));
+        assert!(prompt.contains("## Relevant Memory"));
+        assert!(prompt.contains("You told me your favorite color is blue"));
+        assert!(prompt.contains("You work as a software engineer"));
+    }
+
+    #[test]
+    fn build_enriched_prompt_includes_conversation_history() {
+        let history = vec![
+            (
+                "What is Rust?".into(),
+                "Rust is a systems programming language.".into(),
+            ),
+            ("Is it fast?".into(), "Yes, Rust is very fast.".into()),
+        ];
+
+        let prompt = InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history);
+
+        assert!(prompt.contains("## System"));
+        assert!(prompt.contains("conversation history"));
+        assert!(prompt.contains("## Recent Conversation"));
+        assert!(prompt.contains("What is Rust?"));
+        assert!(prompt.contains("Rust is a systems programming language"));
+        assert!(prompt.contains("Is it fast?"));
+    }
+
+    #[test]
+    fn build_enriched_prompt_includes_context_snapshot() {
+        use bus::events::ctp::ContextSnapshot;
+        use bus::events::platform::{KeystrokeCadence, WindowContext};
+        use std::time::Duration;
+
+        let snapshot = ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "VS Code".to_string(),
+                window_title: Some("main.rs".into()),
+                bundle_id: None,
+                timestamp: Instant::now(),
+            },
+            recent_files: vec![],
+            clipboard_digest: None,
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 95.5,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(2),
+                timestamp: Instant::now(),
+            },
+            session_duration: Duration::from_secs(3600),
+            inferred_task: None,
+            timestamp: Instant::now(),
+        };
+
+        let prompt = InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[]);
+
+        assert!(prompt.contains("## System"));
+        assert!(prompt.contains("current context"));
+        assert!(prompt.contains("## Current Context"));
+        assert!(prompt.contains("VS Code"));
+        assert!(prompt.contains("main.rs"));
+        assert!(prompt.contains("Typing activity: 95"));
+    }
+
+    #[test]
+    fn build_enriched_prompt_combines_all_sources() {
+        use bus::events::ctp::ContextSnapshot;
+        use bus::events::memory::MemoryChunk;
+        use bus::events::platform::{KeystrokeCadence, WindowContext};
+
+        let snapshot = ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Browser".to_string(),
+                window_title: None,
+                bundle_id: None,
+                timestamp: Instant::now(),
+            },
+            recent_files: vec![],
+            clipboard_digest: None,
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 0.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(0),
+                timestamp: Instant::now(),
+            },
+            session_duration: Duration::from_secs(1200),
+            inferred_task: None,
+            timestamp: Instant::now(),
+        };
+
+        let memory = vec![MemoryChunk {
+            text: "Previous discussion about project X".into(),
+            score: 0.88,
+            timestamp: SystemTime::now(),
+        }];
+
+        let history = vec![(
+            "What's project X?".into(),
+            "It's our main initiative.".into(),
+        )];
+
+        let prompt = InferenceActor::build_enriched_prompt(
+            "Continue discussing project X",
+            &memory,
+            Some(&snapshot),
+            &history,
+        );
+
+        // Should have all sections in proper order
+        let system_pos = prompt.find("## System").expect("should have system");
+        let memory_pos = prompt
+            .find("## Relevant Memory")
+            .expect("should have memory");
+        let history_pos = prompt
+            .find("## Recent Conversation")
+            .expect("should have history");
+        let context_pos = prompt
+            .find("## Current Context")
+            .expect("should have context");
+        let user_pos = prompt.find("## User").expect("should have user message");
+
+        // System should come first
+        assert!(system_pos < memory_pos);
+        assert!(memory_pos < history_pos);
+        assert!(history_pos < context_pos);
+        assert!(context_pos < user_pos);
+
+        // Verify system instruction mentions all available resources
+        let system_section = &prompt[system_pos..memory_pos];
+        assert!(system_section.contains("memory"));
+        assert!(system_section.contains("conversation history"));
+        assert!(system_section.contains("context"));
     }
 }

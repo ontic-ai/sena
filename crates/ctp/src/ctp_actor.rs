@@ -384,6 +384,7 @@ mod tests {
                 events_per_minute: 144.0,
                 burst_detected: true,
                 idle_duration: Duration::from_secs(3),
+                timestamp: Instant::now(),
             },
         )))
         .await

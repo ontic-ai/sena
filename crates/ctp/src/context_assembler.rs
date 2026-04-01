@@ -73,6 +73,7 @@ impl ContextAssembler {
                 events_per_minute: 0.0,
                 burst_detected: false,
                 idle_duration: Duration::from_secs(0),
+                timestamp: now,
             });
 
         // Calculate session duration
@@ -249,6 +250,7 @@ mod tests {
             events_per_minute: 180.5,
             burst_detected: true,
             idle_duration: Duration::from_secs(1),
+            timestamp: Instant::now(),
         };
         buffer.push_keystroke(keystroke);
 
@@ -279,6 +281,7 @@ mod tests {
                 events_per_minute: 88.0,
                 burst_detected: true,
                 idle_duration: Duration::from_secs(2),
+                timestamp: Instant::now(),
             },
             session_duration: Duration::from_secs(30),
             inferred_task: Some(TaskHint {
