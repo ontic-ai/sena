@@ -10,7 +10,7 @@ use bus::events::soul::{
 use bus::events::transparency::SoulSummaryForTransparency;
 use bus::events::{CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent};
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SystemEvent};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 

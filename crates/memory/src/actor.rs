@@ -357,12 +357,74 @@ impl Actor for MemoryActor {
         let embedder = SenaEmbedder::new(Arc::clone(&bus));
         let extractor = SenaExtractor::new(Arc::clone(&bus));
 
-        let store = Store::new(config, embedder, extractor)
-            .await
-            .map_err(|e| ActorError::StartupFailed(format!("ech0 store init: {e}")))?;
+        let (final_store, final_encrypted_store) =
+            match Store::new(config.clone(), embedder, extractor).await {
+                Ok(store) => (store, encrypted_store),
+                Err(e) => {
+                    // Check if this is a redb format mismatch (from dependency upgrade)
+                    let error_msg = format!("{}", e);
+                    if error_msg.contains("Manual upgrade required")
+                        || error_msg.contains("Expected file format version")
+                    {
+                        eprintln!("[memory] Database format migration detected");
+                        eprintln!("[memory] Backing up old memory store and creating new one");
 
-        self.encrypted_store = Some(encrypted_store);
-        self.store = Some(Arc::new(store));
+                        // Close the encrypted store to release file locks
+                        drop(encrypted_store);
+
+                        // Backup all encrypted files
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+
+                        for entry in std::fs::read_dir(&self.encrypted_dir)
+                            .map_err(|e| ActorError::StartupFailed(format!("backup failed: {e}")))?
+                        {
+                            let entry = entry.map_err(|e| {
+                                ActorError::StartupFailed(format!("backup failed: {e}"))
+                            })?;
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("enc") {
+                                let backup_path =
+                                    path.with_extension(format!("enc.backup-{}", timestamp));
+                                std::fs::rename(&path, &backup_path).map_err(|e| {
+                                    ActorError::StartupFailed(format!("backup failed: {e}"))
+                                })?;
+                            }
+                        }
+
+                        // Reopen encrypted store (now empty)
+                        let new_encrypted_store =
+                            EncryptedStore::open(&self.encrypted_dir, &master_key).map_err(
+                                |e| {
+                                    ActorError::StartupFailed(format!(
+                                        "encrypted store init after migration: {e}"
+                                    ))
+                                },
+                            )?;
+
+                        // Recreate embedder and extractor for retry
+                        let embedder = SenaEmbedder::new(Arc::clone(&bus));
+                        let extractor = SenaExtractor::new(Arc::clone(&bus));
+
+                        // Retry with fresh store
+                        let store = Store::new(config, embedder, extractor).await.map_err(|e| {
+                            ActorError::StartupFailed(format!(
+                                "ech0 store init after migration: {e}"
+                            ))
+                        })?;
+
+                        (store, new_encrypted_store)
+                    } else {
+                        // Some other error - propagate it
+                        return Err(ActorError::StartupFailed(format!("ech0 store init: {e}")));
+                    }
+                }
+            };
+
+        self.encrypted_store = Some(final_encrypted_store);
+        self.store = Some(Arc::new(final_store));
         self.broadcast_rx = Some(bus.subscribe_broadcast());
 
         let (tx, rx) = mpsc::channel(MEMORY_CHANNEL_CAPACITY);

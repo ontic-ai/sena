@@ -18,7 +18,7 @@ pub fn encrypt(plaintext: &[u8], key: &DEK) -> Result<Vec<u8>, CryptoError> {
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher

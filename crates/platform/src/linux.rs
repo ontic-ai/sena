@@ -5,10 +5,14 @@ use async_trait::async_trait;
 #[cfg(target_os = "linux")]
 use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
 #[cfg(target_os = "linux")]
+use bus::events::platform_vision::ImageDigest;
+#[cfg(target_os = "linux")]
 use tokio::sync::mpsc;
 
 #[cfg(target_os = "linux")]
 use crate::adapter::PlatformAdapter;
+#[cfg(target_os = "linux")]
+use crate::error::PlatformError;
 
 /// Linux platform adapter.
 #[cfg(target_os = "linux")]
@@ -62,6 +66,11 @@ impl PlatformAdapter for LinuxPlatform {
     fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
         crate::adapter::spawn_keystroke_pattern_monitor(tx, "linux");
     }
+
+    fn screen_capture(&self) -> Result<ImageDigest, PlatformError> {
+        // TODO M1.5: implement via X11 XGetImage and Wayland wl_shm
+        Err(PlatformError::ScreenCaptureNotImplemented)
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -83,5 +92,18 @@ mod tests {
     fn clipboard_digest_returns_none_stub() {
         let platform = LinuxPlatform::new();
         assert!(platform.clipboard_digest().is_none());
+    }
+
+    #[test]
+    fn screen_capture_returns_not_implemented() {
+        let platform = LinuxPlatform::new();
+        let result = platform.screen_capture();
+        assert!(result.is_err());
+        match result {
+            Err(crate::error::PlatformError::ScreenCaptureNotImplemented) => {
+                // Expected error
+            }
+            _ => panic!("Expected ScreenCaptureNotImplemented error"),
+        }
     }
 }

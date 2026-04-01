@@ -159,14 +159,25 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
-    // Step 11: Initialize system tray (non-fatal — Sena works without it).
+    // Step 11: Speech actors (STT/TTS) — spawn if speech_enabled is true.
+    if config.speech_enabled {
+        let stt_actor = speech::SttActor::new(speech::SttBackend::Mock);
+        spawn_actor(&bus, &mut registry, stt_actor);
+
+        let tts_actor = speech::TtsActor::new(speech::TtsBackend::Mock);
+        spawn_actor(&bus, &mut registry, tts_actor);
+    } else {
+        eprintln!("[boot] speech disabled in config");
+    }
+
+    // Step 12: Initialize system tray (non-fatal — Sena works without it).
     let tray_manager =
         crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
 
-    // Step 11.5: Spawn memory monitor task (background task, non-blocking).
+    // Step 12.5: Spawn memory monitor task (background task, non-blocking).
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
 
-    // Step 12: Broadcast BootComplete
+    // Step 13: Broadcast BootComplete
     bus.broadcast(Event::System(SystemEvent::BootComplete))
         .await
         .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
@@ -204,7 +215,7 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
     // Case 3: First run — generate a fresh random master key and store it.
     // The key is never written to disk; only the keychain holds it.
     let mut raw = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut raw);
+    rand::rng().fill_bytes(&mut raw);
     let key = crypto::MasterKey::from_bytes(raw);
     crypto::keychain::store_master_key(&key)?;
     Ok(key)

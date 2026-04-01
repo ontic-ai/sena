@@ -96,6 +96,11 @@ pub struct SenaConfig {
     /// Default: 10.0
     #[serde(default = "default_platform_idle_cpu_threshold_percent")]
     pub platform_idle_cpu_threshold_percent: f32,
+
+    /// Whether speech (STT/TTS) subsystem is enabled.
+    /// Default: false (disabled)
+    #[serde(default = "default_speech_enabled")]
+    pub speech_enabled: bool,
 }
 
 impl Default for SenaConfig {
@@ -117,6 +122,7 @@ impl Default for SenaConfig {
             memory_monitor_interval_secs: default_memory_monitor_interval_secs(),
             memory_limit_mb: default_memory_limit_mb(),
             platform_idle_cpu_threshold_percent: default_platform_idle_cpu_threshold_percent(),
+            speech_enabled: default_speech_enabled(),
         }
     }
 }
@@ -159,6 +165,9 @@ fn default_memory_limit_mb() -> usize {
 }
 fn default_platform_idle_cpu_threshold_percent() -> f32 {
     10.0
+}
+fn default_speech_enabled() -> bool {
+    false
 }
 
 /// Configuration-related errors.

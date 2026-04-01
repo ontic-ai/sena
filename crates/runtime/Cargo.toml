@@ -16,6 +16,7 @@ memory = { path = "../memory" }
 platform = { path = "../platform" }
 serde = { workspace = true }
 soul = { path = "../soul" }
+speech = { path = "../speech" }
 rand = { workspace = true }
 sysinfo = "0.32"
 thiserror = { workspace = true }

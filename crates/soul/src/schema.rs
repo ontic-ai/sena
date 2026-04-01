@@ -8,7 +8,7 @@
 //! - `identity_signals`  : (&str -> &str) â€” behavioral identity signals
 //! - `preferences`       : (&str -> &str) â€” user preference key-value store
 
-use redb::TableDefinition;
+use redb::{ReadableDatabase, TableDefinition};
 
 use crate::error::SoulError;
 

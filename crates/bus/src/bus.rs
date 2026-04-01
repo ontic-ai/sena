@@ -5,7 +5,8 @@ use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{
-    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SystemEvent, TransparencyEvent,
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SpeechEvent, SystemEvent,
+    TransparencyEvent,
 };
 
 /// Unified event type for all bus communication.
@@ -23,6 +24,8 @@ pub enum Event {
     Memory(MemoryEvent),
     /// Soul subsystem events (event log writes and summaries).
     Soul(SoulEvent),
+    /// Speech subsystem events (STT/TTS).
+    Speech(SpeechEvent),
     /// Transparency layer events (user queries for observation, memory, explanation).
     Transparency(TransparencyEvent),
 }

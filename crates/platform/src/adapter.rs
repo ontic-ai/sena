@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
+use bus::events::platform_vision::ImageDigest;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -9,6 +10,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+use crate::error::PlatformError;
 
 /// Platform adapter trait for OS signal collection.
 ///
@@ -42,6 +45,15 @@ pub trait PlatformAdapter: Send + 'static {
     /// The adapter will send KeystrokeCadence instances to the provided channel.
     /// PRIVACY: No character data is ever captured or transmitted.
     fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>);
+
+    /// Capture screen content and return a SHA256 digest.
+    ///
+    /// PRIVACY-CRITICAL: Raw pixels MUST be hashed immediately within this method.
+    /// They are NEVER returned or stored. Only the digest is returned.
+    ///
+    /// Returns Err(PlatformError::ScreenCaptureNotImplemented) if not yet implemented
+    /// on this platform.
+    fn screen_capture(&self) -> Result<ImageDigest, PlatformError>;
 }
 
 /// Spawn a privacy-safe global keystroke cadence monitor.
@@ -175,7 +187,10 @@ pub(crate) fn spawn_file_event_watcher(tx: mpsc::Sender<FileEvent>, paths: Vec<P
 
         for path in &paths {
             if let Err(e) = watcher.watch(path.as_ref(), RecursiveMode::Recursive) {
-                eprintln!("[platform] file watcher: failed to watch {}: {e}", path.display());
+                eprintln!(
+                    "[platform] file watcher: failed to watch {}: {e}",
+                    path.display()
+                );
             }
         }
 

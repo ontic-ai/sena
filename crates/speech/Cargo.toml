@@ -1,0 +1,24 @@
+[package]
+name = "speech"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+# Audio I/O (cross-platform)
+# TODO M4.5/M4.6: Enable when implementing actual audio capture/playback
+# cpal = "0.15"
+
+# STT backend (Whisper.cpp)
+# TODO M4.5: Enable when implementing STT
+# whisper-rs = "0.12"
+
+# TTS backend (research needed for local Rust TTS library)
+# TODO M4.6: Add appropriate TTS library

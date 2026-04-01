@@ -1475,7 +1475,8 @@ mod tests {
 
     #[test]
     fn build_enriched_prompt_includes_user_message() {
-        let prompt = InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[], None);
+        let prompt =
+            InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[], None);
 
         // Should include user message section
         assert!(prompt.contains("## User\nWhat do I remember?"));
@@ -1519,7 +1520,8 @@ mod tests {
             ("Is it fast?".into(), "Yes, Rust is very fast.".into()),
         ];
 
-        let prompt = InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history, None);
+        let prompt =
+            InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history, None);
 
         assert!(prompt.contains("## Recent Conversation"));
         assert!(prompt.contains("What is Rust?"));
@@ -1553,7 +1555,8 @@ mod tests {
             timestamp: Instant::now(),
         };
 
-        let prompt = InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[], None);
+        let prompt =
+            InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[], None);
 
         assert!(prompt.contains("## Current Context"));
         assert!(prompt.contains("VS Code"));

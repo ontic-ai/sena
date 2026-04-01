@@ -14,4 +14,8 @@ pub enum PlatformError {
     /// Channel send error.
     #[error("channel send error: {0}")]
     ChannelError(String),
+
+    /// Screen capture not implemented on this platform.
+    #[error("screen capture not implemented on this platform")]
+    ScreenCaptureNotImplemented,
 }

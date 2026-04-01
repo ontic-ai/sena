@@ -30,7 +30,7 @@ impl std::fmt::Debug for WrappedDEK {
 /// Generate a new random DEK.
 pub fn generate_dek() -> DEK {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     DEK::from_bytes(bytes)
 }
 

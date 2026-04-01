@@ -7,8 +7,8 @@ pub mod events;
 pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
 pub use events::{
-    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, Priority, SoulEvent, SystemEvent,
-    TransparencyEvent, TrayMenuItem,
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, Priority, SoulEvent, SpeechEvent,
+    SystemEvent, TransparencyEvent, TrayMenuItem,
 };
 
 #[cfg(test)]

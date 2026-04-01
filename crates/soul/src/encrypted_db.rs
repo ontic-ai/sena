@@ -2,6 +2,9 @@ use crate::error::SoulError;
 use crypto::MasterKey;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use redb::ReadableDatabase;
+
 /// A redb database with transparent at-rest encryption.
 ///
 /// On open, the persistent encrypted file is decrypted to a temporary working
@@ -40,7 +43,42 @@ impl EncryptedDb {
             // Decrypt existing database to working path
             let plaintext = crypto::file::read_encrypted_file(encrypted_path, master_key)?;
             std::fs::write(&working_path, &plaintext)?;
-            redb::Database::open(&working_path)?
+
+            // Try to open the database
+            match redb::Database::open(&working_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    // Check if this is a format version mismatch
+                    let error_msg = e.to_string();
+                    if error_msg.contains("Manual upgrade required")
+                        || error_msg.contains("Expected file format version")
+                    {
+                        // Backup the old encrypted file
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let backup_path =
+                            encrypted_path.with_extension(format!("redb.enc.backup-{}", timestamp));
+                        std::fs::rename(encrypted_path, &backup_path)?;
+
+                        eprintln!(
+                            "[soul] Database format migration: old database backed up to {}",
+                            backup_path.display()
+                        );
+                        eprintln!("[soul] Creating new database with updated format");
+
+                        // Remove the working file with old format
+                        let _ = std::fs::remove_file(&working_path);
+
+                        // Create new database with current format
+                        redb::Database::create(&working_path)?
+                    } else {
+                        // Some other error - propagate it
+                        return Err(e.into());
+                    }
+                }
+            }
         } else {
             // Create new database at working path
             redb::Database::create(&working_path)?

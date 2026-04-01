@@ -50,7 +50,7 @@ impl std::fmt::Debug for Passphrase {
 /// Generate a random salt for Argon2id derivation.
 pub fn generate_salt() -> Salt {
     let mut bytes = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     Salt(bytes)
 }
 

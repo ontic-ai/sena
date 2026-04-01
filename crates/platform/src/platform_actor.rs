@@ -170,7 +170,8 @@ impl Actor for PlatformActor {
 
         if self.file_events_enabled {
             let (file_tx, file_rx) = mpsc::channel(64);
-            self.adapter.subscribe_file_events(file_tx, &self.file_watch_paths);
+            self.adapter
+                .subscribe_file_events(file_tx, &self.file_watch_paths);
             self.file_rx = Some(file_rx);
         }
 
@@ -299,7 +300,12 @@ mod tests {
             None
         }
 
-        fn subscribe_file_events(&self, _tx: mpsc::Sender<bus::events::platform::FileEvent>, _paths: &[std::path::PathBuf]) {}
+        fn subscribe_file_events(
+            &self,
+            _tx: mpsc::Sender<bus::events::platform::FileEvent>,
+            _paths: &[std::path::PathBuf],
+        ) {
+        }
 
         fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
             std::thread::spawn(move || {
@@ -311,6 +317,13 @@ mod tests {
                 };
                 let _ = tx.blocking_send(cadence);
             });
+        }
+
+        fn screen_capture(
+            &self,
+        ) -> Result<bus::events::platform_vision::ImageDigest, crate::error::PlatformError>
+        {
+            Err(crate::error::PlatformError::ScreenCaptureNotImplemented)
         }
     }
 
