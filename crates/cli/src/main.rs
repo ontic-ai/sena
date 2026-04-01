@@ -52,21 +52,31 @@ fn parse_start_mode(args: &[String]) -> Result<StartMode> {
 }
 
 async fn app_mode(open_cli_on_start: bool) -> Result<()> {
-    display::banner();
+    if open_cli_on_start {
+        display::banner();
+    }
 
-    display::info("Booting runtime...");
+    if open_cli_on_start {
+        display::info("Booting runtime...");
+    } else {
+        eprintln!("[sena] booting...");
+    }
+
     let runtime = Arc::new(runtime::boot().await?);
-    display::success("Runtime ready.");
+
+    // Force CLI open on first boot for onboarding, regardless of start mode.
+    let open_cli_on_start = open_cli_on_start || runtime.is_first_boot;
+
+    if open_cli_on_start {
+        display::success("Runtime ready.");
+    }
 
     let mut needs_onboarding = runtime.is_first_boot;
-    if needs_onboarding {
-        display::info("First boot detected. Open the CLI to complete onboarding.");
-    }
 
     if open_cli_on_start {
         let exit_reason = open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await?;
         if exit_reason == shell::ShellExitReason::Shutdown {
-            return shutdown_runtime(runtime).await;
+            return shutdown_runtime(runtime, false).await;
         }
 
         display::info("CLI closed. Tray/runtime still running.");
@@ -91,9 +101,9 @@ async fn maybe_run_onboarding(
         return Ok(());
     }
 
-    let models_available = platform::ollama_models_dir()
+    let models_available = runtime::ollama_models_dir()
         .ok()
-        .and_then(|models_dir| inference::discover_models(&models_dir).ok())
+        .and_then(|models_dir| runtime::discover_models(&models_dir).ok())
         .map(|registry| !registry.is_empty())
         .unwrap_or(false);
 
@@ -117,16 +127,10 @@ async fn run_headless_loop(
 ) -> Result<()> {
     let mut bus_rx = runtime.bus.subscribe_broadcast();
 
-    if needs_onboarding {
-        display::info("🚀 FIRST BOOT: Tray/runtime running. Open the CLI to complete onboarding.");
-    } else {
-        display::info("Tray/runtime running. Use the tray menu to open the CLI.");
-    }
-
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                display::info("Ctrl+C received. Shutting down...");
+                eprintln!("[sena] shutdown requested");
                 break;
             }
             event = bus_rx.recv() => {
@@ -136,8 +140,6 @@ async fn run_headless_loop(
                         if exit_reason == shell::ShellExitReason::Shutdown {
                             break;
                         }
-
-                        display::info("CLI closed. Tray/runtime still running.");
                     }
                     Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
                     Ok(_) => {}
@@ -149,15 +151,19 @@ async fn run_headless_loop(
     }
 
     drop(bus_rx);
-    shutdown_runtime(runtime).await
+    shutdown_runtime(runtime, true).await
 }
 
-async fn shutdown_runtime(runtime: Arc<runtime::Runtime>) -> Result<()> {
+async fn shutdown_runtime(runtime: Arc<runtime::Runtime>, quiet: bool) -> Result<()> {
     let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
     let runtime = Arc::try_unwrap(runtime)
         .map_err(|_| anyhow::anyhow!("runtime has remaining references at shutdown"))?;
     runtime::shutdown(runtime, timeout).await?;
-    display::success("Sena stopped cleanly.");
+    if quiet {
+        eprintln!("[sena] stopped cleanly");
+    } else {
+        display::success("Sena stopped cleanly.");
+    }
     Ok(())
 }
 

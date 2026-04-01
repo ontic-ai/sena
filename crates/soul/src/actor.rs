@@ -526,6 +526,9 @@ impl Actor for SoulActor {
                 }
                 msg = directed_rx.recv() => {
                     match msg {
+                        Some(Event::System(SystemEvent::ShutdownSignal)) => {
+                            break;
+                        }
                         Some(Event::Soul(soul_event)) => {
                             match soul_event {
                                 SoulEvent::WriteRequested(req) => {
@@ -821,5 +824,35 @@ mod tests {
             stop_result.unwrap().is_ok(),
             "stop should succeed after draining tasks"
         );
+    }
+
+    #[tokio::test]
+    async fn soul_actor_stops_on_directed_shutdown_signal() {
+        let dir = tempdir().expect("should create tempdir");
+        let db_path = dir.path().join("soul.redb.enc");
+
+        let mut actor = SoulActor::new(&db_path, test_key());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ = rx.recv().await.expect("ActorReady event");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        bus.send_directed("soul", Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("directed shutdown should send");
+
+        let run_result = tokio::time::timeout(std::time::Duration::from_secs(2), run_handle)
+            .await
+            .expect("run loop should stop within timeout")
+            .expect("run loop should not panic");
+        assert!(run_result.is_ok(), "run loop should complete cleanly");
     }
 }

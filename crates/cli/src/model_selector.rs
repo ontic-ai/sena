@@ -10,16 +10,16 @@
 //!    stdin reader and passes it to `apply_selection()`.
 
 use std::io;
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use bus::events::inference::{ModelInfo, Quantization};
-use inference::discover_models;
-use platform::dirs::ollama_models_dir;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem},
 };
+use runtime::{discover_models, ollama_models_dir};
 
 use crate::display;
 use crate::display::{BOLD, CYAN, DIM, RESET};
@@ -158,11 +158,27 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 /// # Errors
 /// - Ollama directory not found
 /// - No models discovered
+#[allow(dead_code)]
 pub async fn discover_popup() -> Result<ModelSelectorPopup> {
     let models_dir = ollama_models_dir()
         .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
 
-    let registry = discover_models(&models_dir).map_err(|e| {
+    let models = discover_models_at(&models_dir)?;
+
+    Ok(ModelSelectorPopup::new(models))
+}
+
+/// Discover models at a specific directory and validate that GGUF models are present.
+pub fn discover_models_at(path: &Path) -> Result<Vec<ModelInfo>> {
+    if !path.exists() {
+        return Err(anyhow!("Directory not found: {}", path.display()));
+    }
+
+    if !path.is_dir() {
+        return Err(anyhow!("Path is not a directory: {}", path.display()));
+    }
+
+    let registry = discover_models(path).map_err(|e| {
         anyhow!(
             "Model discovery failed: {}. Run 'ollama pull <model>' first.",
             e
@@ -171,10 +187,10 @@ pub async fn discover_popup() -> Result<ModelSelectorPopup> {
 
     let models = registry.models().to_vec();
     if models.is_empty() {
-        return Err(anyhow!("No models found"));
+        return Err(anyhow!("No GGUF models found in {}", path.display()));
     }
 
-    Ok(ModelSelectorPopup::new(models))
+    Ok(models)
 }
 
 // ── Shell-facing API ─────────────────────────────────────────────────────────
@@ -365,5 +381,36 @@ fn format_quantization(quant: &Quantization) -> &'static str {
         Quantization::F16 => "F16",
         Quantization::F32 => "F32",
         Quantization::Unknown(_) => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_models_at_rejects_missing_directory() {
+        let missing = std::path::PathBuf::from("__missing_models_dir_for_test__");
+        let result = discover_models_at(&missing);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn discover_models_at_rejects_empty_directory() {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "sena-model-selector-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos()
+        );
+        let path = base.join(unique);
+        std::fs::create_dir_all(&path).expect("empty temp directory should be created");
+
+        let result = discover_models_at(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(path);
     }
 }

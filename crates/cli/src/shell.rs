@@ -37,6 +37,7 @@ use ratatui::{
 use crate::tui_state::{ActorStatus, EditorState, Message, MessageRole, SessionStats};
 use crate::{display, model_selector};
 use runtime::boot::Runtime;
+use std::path::PathBuf;
 
 const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -63,6 +64,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/models",
         description: "Select which model to use",
+    },
+    SlashCommand {
+        command: "/copy",
+        description: "Copy the last response to clipboard",
     },
     SlashCommand {
         command: "/actors",
@@ -205,6 +210,8 @@ struct Shell {
     transparency_loading: bool,
     /// The currently pending transparency query, if any.
     pending_transparency: Option<PendingTransparencyQuery>,
+    /// Pending model directory input flag.
+    pending_model_dir_input: bool,
     /// Runtime reference for config access.
     runtime: Arc<Runtime>,
 }
@@ -248,6 +255,7 @@ impl Shell {
             slash_dropdown: None,
             transparency_loading: false,
             pending_transparency: None,
+            pending_model_dir_input: false,
             runtime,
         }
     }
@@ -750,6 +758,12 @@ impl Shell {
 
     /// Dispatch user input (command or chat).
     async fn dispatch_line(&mut self, line: String) -> DispatchResult {
+        // Handle pending model directory input
+        if self.pending_model_dir_input {
+            self.pending_model_dir_input = false;
+            return self.handle_model_dir_input(line).await;
+        }
+
         let lower = line.to_lowercase();
         #[allow(clippy::manual_unwrap_or_default, clippy::manual_unwrap_or)]
         let cmd = if let Some(v) = lower.split_whitespace().next() {
@@ -781,9 +795,14 @@ impl Shell {
                 DispatchResult::Continue
             }
             "/models" => {
-                match model_selector::discover_popup().await {
-                    Ok(popup) => {
-                        self.model_popup = Some(popup);
+                let models_dir = self.current_models_dir();
+                match models_dir
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
+                    .and_then(model_selector::discover_models_at)
+                {
+                    Ok(models) => {
+                        self.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                     }
                     Err(e) => {
                         self.add_message(
@@ -806,6 +825,10 @@ impl Shell {
             }
             "/actors" => {
                 self.actors_popup_visible = true;
+                DispatchResult::Continue
+            }
+            "/copy" => {
+                self.copy_last_response();
                 DispatchResult::Continue
             }
             _ if exit_command_result(cmd).is_some() => exit_command_result(cmd)
@@ -939,11 +962,19 @@ impl Shell {
             MessageRole::System,
             "/shutdown              Shut down Sena completely".to_string(),
         );
+        self.add_message(
+            MessageRole::System,
+            "/copy                  Copy last response to clipboard".to_string(),
+        );
         self.add_message(MessageRole::System, "".to_string());
         self.add_message(MessageRole::System, "━━  Keyboard Shortcuts".to_string());
         self.add_message(
             MessageRole::System,
             "Ctrl+Y                 Copy last response to clipboard".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "Ctrl+Shift+C           Copy last response to clipboard".to_string(),
         );
         self.add_message(MessageRole::System, "".to_string());
         self.add_message(
@@ -977,6 +1008,73 @@ impl Shell {
                 self.add_message(MessageRole::System, "No response to copy yet.".to_string());
             }
         }
+    }
+
+    /// Handle model directory path input.
+    async fn handle_model_dir_input(&mut self, path_str: String) -> DispatchResult {
+        let previous_dir = self.current_models_dir();
+        let trimmed = path_str.trim();
+
+        if trimmed.is_empty() {
+            self.add_message(
+                MessageRole::System,
+                "Model directory change cancelled. Keeping current directory.".to_string(),
+            );
+            return DispatchResult::Continue;
+        }
+
+        let path = std::path::PathBuf::from(trimmed);
+
+        // Validate directory contains GGUF models.
+        match model_selector::discover_models_at(&path) {
+            Ok(models) => {
+                let model_count = models.len();
+                let mut config = self.runtime.config.clone();
+                config.models_dir = Some(path.clone());
+
+                match runtime::save_config(&config).await {
+                    Ok(_) => {
+                        self.add_message(
+                            MessageRole::System,
+                            format!(
+                                "Model directory set to: {} ({} models found)",
+                                path.display(),
+                                model_count
+                            ),
+                        );
+                        self.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                    }
+                    Err(e) => {
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("Failed to save config: {}", e),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Model directory rejected: {}", e),
+                );
+                if let Some(prev) = previous_dir {
+                    self.add_message(
+                        MessageRole::System,
+                        format!("Keeping previous model directory: {}", prev.display()),
+                    );
+                }
+            }
+        }
+
+        DispatchResult::Continue
+    }
+
+    fn current_models_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = self.runtime.config.models_dir.clone() {
+            return Some(path);
+        }
+
+        runtime::ollama_models_dir().ok()
     }
 }
 
@@ -1091,6 +1189,14 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                         }
 
                         match (key.code, key.modifiers) {
+                            // Ctrl+Shift+C — copy last response to clipboard
+                            (KeyCode::Char('c'), mods)
+                                if mods.contains(KeyModifiers::CONTROL)
+                                    && mods.contains(KeyModifiers::SHIFT) =>
+                            {
+                                shell.copy_last_response();
+                            }
+
                             // Ctrl+C handled via shutdown signal above
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 if let Some(first_press) = shell.ctrl_c_first_press {
@@ -1128,16 +1234,11 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                                 // Apply selection
                                 if let Some(popup) = shell.model_popup.take() {
                                     if popup.is_change_dir_selected() {
-                                        // Show config file location so user can edit models_dir
-                                        let config_path = runtime::config::config_path()
-                                            .map(|p| p.display().to_string())
-                                            .unwrap_or_else(|_| "<unknown>".to_string());
+                                        // Prompt for directory path
+                                        shell.pending_model_dir_input = true;
                                         shell.add_message(
                                             MessageRole::System,
-                                            format!(
-                                                "To change the model directory, edit 'models_dir' in: {}",
-                                                config_path
-                                            ),
+                                            "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
                                         );
                                     } else if let Some(selected) = popup.selected() {
                                         let model_name = selected.name.clone();

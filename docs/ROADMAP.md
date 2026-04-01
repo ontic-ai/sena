@@ -172,8 +172,8 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 **Exit gate — Phase 2 complete when:**
 - [x] All milestones M2.0–M2.7 checked off
 - [x] Full inference loop runs end-to-end on macOS, Windows, Linux *(infrastructure complete — Windows verified, macOS/Linux pending full test)*
-- [x] Soul redb, ech0 graph, ech0 vector index all encrypted on disk — verified by hex-dump confirming no plaintext *(encryption layer complete, ech0 placeholder pending real integration)*
-- [x] Encrypted stores persist and decrypt correctly across process restarts *(Soul verified with 19 tests, ech0 pending)*
+- [x] Soul redb, ech0 graph, ech0 vector index all encrypted on disk — verified by hex-dump confirming no plaintext *(encryption layer complete)*
+- [x] Encrypted stores persist and decrypt correctly across process restarts *(Soul verified with 19 tests)*
 - [x] All Phase 1 exit gate conditions still hold *(246 tests passing)*
 - [x] OQ-1 resolved and implemented *(passphrase-based encryption via Argon2)*
 

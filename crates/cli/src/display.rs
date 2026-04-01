@@ -94,9 +94,11 @@ pub fn help() {
     );
     println!("  {BOLD}{CYAN}/explanation{RESET}  {DIM}or{RESET} /why   Why did you say that?");
     println!("  {BOLD}{CYAN}/models{RESET}               Select which Ollama model to use");
+    println!("  {BOLD}{CYAN}/copy{RESET}                 Copy last response to clipboard");
     println!("  {BOLD}{CYAN}/help{RESET}                 Show this message");
     println!("  {BOLD}{CYAN}/close{RESET} {DIM}or{RESET} /quit  Close CLI session");
     println!("  {BOLD}{CYAN}/shutdown{RESET}             Shut down Sena completely");
+    println!("  {DIM}Shortcut:{RESET} Ctrl+Y {DIM}or{RESET} Ctrl+Shift+C to copy last response");
     println!();
 }
 

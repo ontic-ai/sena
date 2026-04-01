@@ -320,18 +320,28 @@ If the architecture graph does not have an arrow for the import you want, the ar
 All implemented features MUST be fully integrated and plugged in. Coded ≠ integrated.
 
 **Requirements:**
-- Events emitted must have handlers that respond to them
-- Actors must use the features they implement
+- Events emitted must have handlers that respond to them — every broadcast must have a subscriber
+- Every newly emitted event must be traceable to at least one concrete handler path; do not ship fire-and-forget events
+- Actors must use the features they implement — no orphaned implementations
 - No dead code in production paths — if it's coded, it must be reachable
 - After implementing any feature, verify the end-to-end flow works
+- Before marking work complete: **trace the code path from trigger to user-visible effect or persistent state change**
+- Before marking work complete, write down the trigger -> bus flow -> handler -> observable effect chain for each user-facing change
 
 **Examples of incomplete integration:**
 - Adding a `MemoryThresholdExceeded` event but no shell handler displays it to the user
 - Implementing a consolidation algorithm but never calling it from the actor run loop
 - Creating a prompt segment type that no prompt composer uses
 - Broadcasting an event that no actor subscribes to
+- Creating a menu item that emits an event but no handler responds to it
+- Adding a config field that is never read by any actor
 
-Before marking work complete: trace the code path from trigger to user-visible effect or persistent state change.
+**Completion verification checklist:**
+1. Identify the trigger point (user action, timer, bus event)
+2. Trace the event flow through the bus
+3. Verify handler exists and is subscribed
+4. Confirm the handler's output is observable (UI update, log, persistent state change)
+5. Test the full path end-to-end before reporting complete
 
 ---
 

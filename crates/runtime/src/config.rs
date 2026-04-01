@@ -75,6 +75,12 @@ pub struct SenaConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_model: Option<String>,
 
+    /// Custom model directory path.
+    /// When set, Sena will discover models from this directory instead of the default Ollama directory.
+    /// Default: None (use platform-default Ollama directory)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_dir: Option<PathBuf>,
+
     /// Interval in seconds between memory usage checks.
     /// Default: 60
     #[serde(default = "default_memory_monitor_interval_secs")]
@@ -107,6 +113,7 @@ impl Default for SenaConfig {
             ctp_trigger_sensitivity: default_ctp_trigger_sensitivity(),
             max_reflection_rounds: default_max_reflection_rounds(),
             preferred_model: None,
+            models_dir: None,
             memory_monitor_interval_secs: default_memory_monitor_interval_secs(),
             memory_limit_mb: default_memory_limit_mb(),
             platform_idle_cpu_threshold_percent: default_platform_idle_cpu_threshold_percent(),

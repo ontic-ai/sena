@@ -550,8 +550,6 @@ dependencies = [
  "arboard",
  "bus",
  "crossterm",
- "inference",
- "platform",
  "ratatui",
  "runtime",
  "tokio",

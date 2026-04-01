@@ -197,6 +197,12 @@ fn run_tray_loop(
     let menu_channel = TrayIconEvent::receiver();
 
     loop {
+        #[cfg(target_os = "windows")]
+        {
+            // Win32 tray interactions require a native message pump.
+            pump_windows_messages();
+        }
+
         // Process tray menu events.
         if let Ok(event) = menu_channel.try_recv() {
             match event {
@@ -256,11 +262,62 @@ fn run_tray_loop(
             }
         }
 
-        // Reduce CPU usage.
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn pump_windows_messages() {
+    // Pump Windows message queue to process tray menu clicks.
+    // This is required for tray-icon to deliver menu events via MenuEvent::receiver().
+    unsafe {
+        // Use raw FFI to pump Windows messages without blocking.
+        // Signature: PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg)
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        struct Msg {
+            hwnd: *mut std::ffi::c_void,
+            message: u32,
+            wParam: usize,
+            lParam: isize,
+            time: u32,
+            pt: Point,
+        }
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn PeekMessageW(
+                lpMsg: *mut Msg,
+                hWnd: *mut std::ffi::c_void,
+                wMsgFilterMin: u32,
+                wMsgFilterMax: u32,
+                wRemoveMsg: u32,
+            ) -> i32;
+            fn TranslateMessage(lpMsg: *const Msg) -> i32;
+            fn DispatchMessageW(lpMsg: *const Msg) -> isize;
+        }
+
+        const PM_REMOVE: u32 = 0x0001;
+
+        let mut msg: Msg = std::mem::zeroed();
+        // PeekMessage returns non-zero if a message is available.
+        // Process all available messages without blocking.
+        loop {
+            let has_message = PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE);
+            if has_message == 0 {
+                break; // No more messages
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 }
 
 #[cfg(test)]
