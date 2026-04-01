@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn memory_event_all_variants_clone() {
-        let events = vec![
+        let events = [
             MemoryEvent::WriteRequested(MemoryWriteRequest {
                 text: "t".into(),
                 request_id: 1,
@@ -170,7 +170,7 @@ mod tests {
                 request_id: 4,
             }),
         ];
-        assert_eq!(events.iter().cloned().count(), 4);
+        assert_eq!(events.iter().count(), 4);
     }
 
     fn assert_send_static<T: Send + 'static>() {}

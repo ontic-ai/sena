@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn embedding_dimensions_is_positive() {
-        assert!(EMBEDDING_DIMENSIONS > 0);
+        const { assert!(EMBEDDING_DIMENSIONS > 0) };
     }
 
     #[test]

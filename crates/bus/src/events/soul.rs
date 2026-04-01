@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn soul_event_all_variants_clone() {
         let now = SystemTime::now();
-        let events = vec![
+        let events = [
             SoulEvent::WriteRequested(SoulWriteRequest {
                 description: "d".into(),
                 app_context: None,
@@ -161,7 +161,7 @@ mod tests {
                 request_id: 3,
             }),
         ];
-        assert_eq!(events.iter().cloned().count(), 7);
+        assert_eq!(events.iter().count(), 7);
     }
 
     fn assert_send_static<T: Send + 'static>() {}

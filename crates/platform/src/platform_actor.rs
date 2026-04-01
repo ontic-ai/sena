@@ -440,11 +440,11 @@ mod tests {
         let mut observed = None;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
-            if let Ok(event) = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
-                if let Ok(Event::Platform(PlatformEvent::KeystrokePattern(cadence))) = event {
-                    observed = Some(cadence);
-                    break;
-                }
+            if let Ok(Ok(Event::Platform(PlatformEvent::KeystrokePattern(cadence)))) =
+                tokio::time::timeout(Duration::from_millis(250), rx.recv()).await
+            {
+                observed = Some(cadence);
+                break;
             }
         }
 

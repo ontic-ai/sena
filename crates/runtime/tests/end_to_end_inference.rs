@@ -51,7 +51,7 @@ async fn end_to_end_thought_triggers_inference_cycle() {
     let memory_dir = dir.path().join("memory");
 
     let bus = Arc::new(EventBus::new());
-    let master_key = crypto::MasterKey::from_bytes([0u8; 32]);
+    let _master_key = crypto::MasterKey::from_bytes([0u8; 32]);
 
     // Initialize Soul
     let soul_master_key = crypto::MasterKey::from_bytes([0u8; 32]);
@@ -123,7 +123,7 @@ async fn end_to_end_thought_triggers_inference_cycle() {
                               request_id, token_count, text.len());
 
                     // Verify response structure
-                    assert!(text.len() > 0, "response text should not be empty");
+                    assert!(!text.is_empty(), "response text should not be empty");
                     assert_eq!(request_id, 1, "request_id should match");
                     break;
                 }

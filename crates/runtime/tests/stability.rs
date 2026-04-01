@@ -141,7 +141,7 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
         }
 
         // Sample memory every ~5 seconds.
-        if elapsed % 5 == 0 {
+        if elapsed.is_multiple_of(5) {
             sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
             if let Some(proc) = sys.process(pid) {
                 let mb = proc.memory() / (1024 * 1024);
@@ -161,11 +161,10 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) => {
-                responses_received += 1;
-            }
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+        if let Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) =
+            tokio::time::timeout(remaining, rx.recv()).await
+        {
+            responses_received += 1;
         }
     }
 
@@ -328,7 +327,7 @@ async fn longevity_72h_no_leak_no_panic() {
         }
 
         // Sample memory every 60 seconds.
-        if elapsed_secs % 60 == 0 {
+        if elapsed_secs.is_multiple_of(60) {
             sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
             if let Some(proc) = sys.process(pid) {
                 let mb = proc.memory() / (1024 * 1024);
@@ -359,11 +358,10 @@ async fn longevity_72h_no_leak_no_panic() {
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) => {
-                responses_received += 1;
-            }
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+        if let Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) =
+            tokio::time::timeout(remaining, rx.recv()).await
+        {
+            responses_received += 1;
         }
     }
 
