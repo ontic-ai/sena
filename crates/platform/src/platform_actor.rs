@@ -70,6 +70,24 @@ impl PlatformActor {
         self
     }
 
+    /// Get the current poll interval (test-only).
+    #[cfg(test)]
+    pub(crate) fn current_poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Get the configured idle threshold (test-only).
+    #[cfg(test)]
+    pub(crate) fn current_idle_threshold(&self) -> f32 {
+        self.idle_threshold
+    }
+
+    /// Get the normal poll interval (test-only).
+    #[cfg(test)]
+    pub(crate) fn current_normal_poll_interval(&self) -> Duration {
+        self.normal_poll_interval
+    }
+
     /// Check for window changes and emit event if changed.
     async fn check_window_change(&mut self) -> Result<(), ActorError> {
         if let Some(current) = self.adapter.active_window() {
@@ -268,5 +286,106 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(1), run_handle).await;
         assert!(result.is_ok(), "actor should stop within timeout");
         assert!(result.unwrap().is_ok(), "run should return Ok");
+    }
+
+    #[test]
+    fn with_idle_threshold_sets_threshold_correctly() {
+        let adapter = create_platform_adapter();
+        let actor = PlatformActor::new(adapter).with_idle_threshold(15.0);
+
+        assert_eq!(
+            actor.current_idle_threshold(),
+            15.0,
+            "idle threshold should be 15.0"
+        );
+    }
+
+    #[test]
+    fn with_poll_interval_sets_intervals_correctly() {
+        let adapter = create_platform_adapter();
+        let custom_interval = Duration::from_millis(200);
+        let actor = PlatformActor::new(adapter).with_poll_interval(custom_interval);
+
+        assert_eq!(
+            actor.current_poll_interval(),
+            custom_interval,
+            "poll_interval should match configured value"
+        );
+        assert_eq!(
+            actor.current_normal_poll_interval(),
+            custom_interval,
+            "normal_poll_interval should match configured value"
+        );
+    }
+
+    #[test]
+    fn default_idle_threshold_is_ten_percent() {
+        let adapter = create_platform_adapter();
+        let actor = PlatformActor::new(adapter);
+
+        assert_eq!(
+            actor.current_idle_threshold(),
+            10.0,
+            "default idle threshold should be 10.0%"
+        );
+    }
+
+    #[test]
+    fn default_poll_interval_is_500ms() {
+        let adapter = create_platform_adapter();
+        let actor = PlatformActor::new(adapter);
+
+        assert_eq!(
+            actor.current_poll_interval(),
+            Duration::from_millis(500),
+            "default poll interval should be 500ms"
+        );
+        assert_eq!(
+            actor.current_normal_poll_interval(),
+            Duration::from_millis(500),
+            "default normal poll interval should be 500ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn cpu_idle_polling_logic_exists_in_run_loop() {
+        // This test verifies that the actor can start and run with CPU monitoring.
+        // We cannot deterministically control CPU usage in a test, but we can verify
+        // that the actor runs without panicking and that the idle threshold config
+        // is wired correctly through the constructor.
+
+        let adapter = create_platform_adapter();
+        let mut actor = PlatformActor::new(adapter)
+            .with_idle_threshold(20.0)
+            .with_poll_interval(Duration::from_millis(50));
+
+        // Verify threshold was set
+        assert_eq!(actor.current_idle_threshold(), 20.0);
+
+        let bus = Arc::new(EventBus::new());
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        // Spawn the run loop
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        // Let the actor run through a few poll cycles
+        // (enough time for CPU refresh and interval adaptation logic to execute)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Send shutdown signal
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast should succeed");
+
+        // Run loop should exit cleanly
+        let result = tokio::time::timeout(Duration::from_secs(1), run_handle).await;
+        assert!(result.is_ok(), "actor should stop within timeout");
+        assert!(
+            result.unwrap().is_ok(),
+            "run loop should complete without error"
+        );
     }
 }

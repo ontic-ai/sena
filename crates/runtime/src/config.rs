@@ -236,6 +236,41 @@ mod tests {
         assert_eq!(config.working_memory_max_exchanges, 10);
         assert_eq!(config.working_memory_token_budget, 4096);
         assert_eq!(config.soul_summary_max_events, 50);
+        assert_eq!(config.platform_idle_cpu_threshold_percent, 10.0);
+    }
+
+    #[test]
+    fn default_cpu_idle_threshold_is_ten_percent() {
+        let config = default_config();
+        assert_eq!(
+            config.platform_idle_cpu_threshold_percent, 10.0,
+            "default CPU idle threshold should be 10.0%"
+        );
+        assert_eq!(
+            default_platform_idle_cpu_threshold_percent(),
+            10.0,
+            "default function should return 10.0"
+        );
+    }
+
+    #[test]
+    fn cpu_idle_threshold_serializes_and_deserializes() {
+        let config = SenaConfig {
+            platform_idle_cpu_threshold_percent: 15.0,
+            ..Default::default()
+        };
+
+        let toml_string = toml::to_string_pretty(&config).expect("serialization failed");
+        assert!(
+            toml_string.contains("platform_idle_cpu_threshold_percent"),
+            "serialized config should contain cpu idle threshold field"
+        );
+
+        let parsed: SenaConfig = toml::from_str(&toml_string).expect("deserialization failed");
+        assert_eq!(
+            parsed.platform_idle_cpu_threshold_percent, 15.0,
+            "deserialized config should preserve cpu idle threshold"
+        );
     }
 
     #[test]
