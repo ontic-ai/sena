@@ -355,28 +355,6 @@ impl InferenceActor {
     ) -> String {
         let mut parts = Vec::new();
 
-        // System instruction: tell the LLM it has memory and context available
-        let has_memory = !memory_chunks.is_empty();
-        let has_history = !history.is_empty();
-        let has_context = snapshot.is_some();
-
-        let mut instruction = String::from(
-            "You are Sena, an AI assistant with access to persistent memory and context.",
-        );
-        if has_memory {
-            instruction
-                .push_str(" Review the provided memory to understand relevant prior knowledge.");
-        }
-        if has_history {
-            instruction.push_str(" Use the recent conversation history to maintain continuity and remember what you've already discussed.");
-        }
-        if has_context {
-            instruction.push_str(" Consider the current context (active application, inferred task, keystroke activity) when providing assistance.");
-        }
-        instruction.push_str(" When the user asks about past interactions or what you know, draw on these sources of information.");
-
-        parts.push(format!("## System\n{}", instruction));
-
         // Add relevant memory if any
         if !memory_chunks.is_empty() {
             let lines: Vec<String> = memory_chunks
@@ -1380,13 +1358,10 @@ mod tests {
     }
 
     #[test]
-    fn build_enriched_prompt_includes_system_instruction() {
+    fn build_enriched_prompt_includes_user_message() {
         let prompt = InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[]);
 
-        // Should include system instruction
-        assert!(prompt.contains("## System"));
-        assert!(prompt.contains("You are Sena"));
-        assert!(prompt.contains("persistent memory"));
+        // Should include user message section
         assert!(prompt.contains("## User\nWhat do I remember?"));
     }
 
@@ -1412,8 +1387,6 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("## System"));
-        assert!(prompt.contains("Review the provided memory"));
         assert!(prompt.contains("## Relevant Memory"));
         assert!(prompt.contains("You told me your favorite color is blue"));
         assert!(prompt.contains("You work as a software engineer"));
@@ -1431,8 +1404,6 @@ mod tests {
 
         let prompt = InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history);
 
-        assert!(prompt.contains("## System"));
-        assert!(prompt.contains("conversation history"));
         assert!(prompt.contains("## Recent Conversation"));
         assert!(prompt.contains("What is Rust?"));
         assert!(prompt.contains("Rust is a systems programming language"));
@@ -1467,8 +1438,6 @@ mod tests {
 
         let prompt = InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[]);
 
-        assert!(prompt.contains("## System"));
-        assert!(prompt.contains("current context"));
         assert!(prompt.contains("## Current Context"));
         assert!(prompt.contains("VS Code"));
         assert!(prompt.contains("main.rs"));
@@ -1520,7 +1489,6 @@ mod tests {
         );
 
         // Should have all sections in proper order
-        let system_pos = prompt.find("## System").expect("should have system");
         let memory_pos = prompt
             .find("## Relevant Memory")
             .expect("should have memory");
@@ -1532,16 +1500,9 @@ mod tests {
             .expect("should have context");
         let user_pos = prompt.find("## User").expect("should have user message");
 
-        // System should come first
-        assert!(system_pos < memory_pos);
+        // Memory should come first
         assert!(memory_pos < history_pos);
         assert!(history_pos < context_pos);
         assert!(context_pos < user_pos);
-
-        // Verify system instruction mentions all available resources
-        let system_section = &prompt[system_pos..memory_pos];
-        assert!(system_section.contains("memory"));
-        assert!(system_section.contains("conversation history"));
-        assert!(system_section.contains("context"));
     }
 }

@@ -142,7 +142,7 @@ mod tests {
     fn current_context_segment_assembles() {
         let composer = PromptComposer::new();
         let result = composer
-            .assemble(&[PromptSegment::CurrentContext(make_snapshot())])
+            .assemble(&[PromptSegment::CurrentContext(Box::new(make_snapshot()))])
             .unwrap();
         assert!(result.contains("Code"));
         assert!(result.contains("main.rs"));

@@ -27,7 +27,7 @@ pub enum PromptSegment {
     /// Relevant long-term memory chunks retrieved from ech0.
     LongTermMemory(Vec<MemoryChunk>),
     /// Current computing context assembled by the CTP subsystem.
-    CurrentContext(ContextSnapshot),
+    CurrentContext(Box<ContextSnapshot>),
     /// In-RAM working memory snippets from the current inference cycle.
     WorkingMemorySnippets(Vec<String>),
     /// Reflection control directive for the inference actor.
