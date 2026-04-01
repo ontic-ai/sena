@@ -244,6 +244,32 @@ impl MemoryActor {
 
         Ok(())
     }
+
+    async fn handle_user_memory_transparency_query(
+        store: Arc<Store<SenaEmbedder, SenaExtractor>>,
+        bus: Arc<EventBus>,
+        mut broadcast_rx: broadcast::Receiver<Event>,
+    ) {
+        let request_id = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_nanos() as u64,
+            Err(_) => 1,
+        };
+
+        if let Err(_error) = transparency_query::handle_transparency_query(
+            store,
+            Arc::clone(&bus),
+            &mut broadcast_rx,
+            request_id,
+        )
+        .await
+        {
+            let _ = bus
+                .broadcast(Event::Transparency(TransparencyEvent::MemoryResponded(
+                    transparency_query::empty_memory_response(),
+                )))
+                .await;
+        }
+    }
 }
 
 /// Extract display text from an ech0 node.
@@ -363,35 +389,13 @@ impl Actor for MemoryActor {
                             match query {
                                 TransparencyQuery::UserMemory => {
                                     // Spawn untracked (like inference actor) to avoid blocking shutdown.
-                                    // Transparency queries have internal timeouts and will complete or fail gracefully.
+                                    // Transparency queries are fail-safe and emit default output on failure.
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
-                                    let mut bcast_rx = broadcast_rx.resubscribe();
+                                    let bcast_rx = broadcast_rx.resubscribe();
                                     tokio::spawn(async move {
-                                        // Generate a simple request_id based on timestamp
-                                        let request_id = match std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                        {
-                                            Ok(d) => d.as_nanos() as u64,
-                                            Err(_) => 1, // Fallback if system clock is before epoch
-                                        };
-
-                                        if let Err(_e) = transparency_query::handle_transparency_query(
-                                            s,
-                                            Arc::clone(&b),
-                                            &mut bcast_rx,
-                                            request_id,
-                                        )
-                                        .await
-                                        {
-                                            let _ = b
-                                                .broadcast(Event::Transparency(
-                                                    TransparencyEvent::MemoryResponded(
-                                                        transparency_query::empty_memory_response(),
-                                                    ),
-                                                ))
-                                                .await;
-                                        }
+                                        Self::handle_user_memory_transparency_query(s, b, bcast_rx)
+                                            .await;
                                     });
                                 }
                                 _ => {
@@ -418,6 +422,9 @@ impl Actor for MemoryActor {
                 }
                 msg = directed_rx.recv() => {
                     match msg {
+                        Some(Event::System(SystemEvent::ShutdownSignal)) => {
+                            break;
+                        }
                         Some(Event::Memory(mem_event)) => {
                             last_activity = Instant::now();
                             match mem_event {
@@ -526,11 +533,15 @@ mod tests {
 
         let mut actor = MemoryActor::new(&memory_dir, test_master_key());
         let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
 
         actor
             .start(Arc::clone(&bus))
             .await
             .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ = rx.recv().await.expect("ActorReady event");
         actor.stop().await.expect("stop should succeed");
     }
 
@@ -543,11 +554,19 @@ mod tests {
 
         let mut actor = MemoryActor::new(&memory_dir, test_master_key());
         let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
 
         actor
             .start(Arc::clone(&bus))
             .await
             .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ = rx.recv().await.expect("ActorReady event");
+
+        let actor_handle = tokio::spawn(async move { actor.run().await });
+
+        let mut saw_memory_response = false;
 
         // Emit a transparency query for user memory
         let query = TransparencyQuery::UserMemory;
@@ -557,12 +576,33 @@ mod tests {
         .await
         .expect("broadcast should succeed");
 
-        // Give the memory actor a moment to process
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Even if Soul or ech0 is unavailable, actor must emit a fallback response.
+        let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < wait_deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(Event::Transparency(TransparencyEvent::MemoryResponded(_)))) => {
+                    saw_memory_response = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => continue,
+            }
+        }
 
-        // The transparency query handler should have emitted a response event or handled gracefully
-        // (Since there's no Soul response, it should use a default summary)
-        actor.stop().await.expect("stop should succeed");
+        assert!(
+            saw_memory_response,
+            "memory actor should emit MemoryResponded for UserMemory queries"
+        );
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown signal should broadcast");
+
+        let run_result = tokio::time::timeout(Duration::from_secs(2), actor_handle)
+            .await
+            .expect("actor run loop should terminate within timeout")
+            .expect("actor run loop should not panic");
+        assert!(run_result.is_ok(), "actor run loop should complete cleanly");
     }
 
     #[tokio::test]
@@ -608,6 +648,36 @@ mod tests {
             .expect("shutdown signal should broadcast");
 
         // Actor run loop should terminate cleanly without timeout
+        let run_result = tokio::time::timeout(Duration::from_secs(2), actor_handle)
+            .await
+            .expect("actor run loop should terminate within timeout")
+            .expect("actor run loop should not panic");
+        assert!(run_result.is_ok(), "actor run loop should complete cleanly");
+    }
+
+    #[tokio::test]
+    async fn memory_actor_stops_on_directed_shutdown_signal() {
+        let dir = tempdir().expect("tempdir");
+        let memory_dir = dir.path().join("memory");
+
+        let mut actor = MemoryActor::new(&memory_dir, test_master_key());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ = rx.recv().await.expect("ActorReady event");
+
+        let actor_handle = tokio::spawn(async move { actor.run().await });
+
+        bus.send_directed("memory", Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("directed shutdown should send");
+
         let run_result = tokio::time::timeout(Duration::from_secs(2), actor_handle)
             .await
             .expect("actor run loop should terminate within timeout")

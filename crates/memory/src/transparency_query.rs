@@ -20,6 +20,7 @@ use crate::error::MemoryError;
 use crate::extractor::SenaExtractor;
 
 const TRANSPARENCY_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const MEMORY_RETRIEVAL_TIMEOUT: Duration = Duration::from_secs(2);
 const TOP_MEMORY_CHUNKS: usize = 8;
 
 pub(crate) fn empty_memory_response() -> MemoryResponse {
@@ -43,31 +44,21 @@ pub async fn handle_transparency_query(
 ) -> Result<(), MemoryError> {
     // Step 1: Request Soul summary
     let soul_request = SoulReadRequest { request_id };
-    if let Err(error) = bus
+    let soul_summary = if bus
         .broadcast(Event::Soul(SoulEvent::ReadRequested(soul_request)))
         .await
+        .is_err()
     {
-        eprintln!(
-            "[memory transparency] soul summary request failed ({}), using default summary",
-            error
-        );
-    }
-
-    // Step 2: Wait for Soul response with timeout
-    let soul_summary = wait_for_soul_summary(broadcast_rx, request_id).await;
+        default_soul_summary()
+    } else {
+        // Step 2: Wait for Soul response with timeout
+        wait_for_soul_summary(broadcast_rx, request_id).await
+    };
 
     // Step 3: Retrieve top recent memory chunks.
     // If the ech0 store search fails (e.g. embedding model not loaded yet),
     // fall back to an empty list so we always emit a response.
-    let memory_chunks = retrieve_recent_memory_chunks(store.as_ref())
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "[memory transparency] chunk retrieval failed ({}), returning empty list",
-                e
-            );
-            vec![]
-        });
+    let memory_chunks = retrieve_recent_memory_chunks_with_timeout(store.as_ref()).await;
 
     // Step 4: Construct and emit response
     let response = MemoryResponse {
@@ -173,6 +164,20 @@ async fn retrieve_recent_memory_chunks(
         .collect();
 
     Ok(chunks)
+}
+
+async fn retrieve_recent_memory_chunks_with_timeout(
+    store: &Store<SenaEmbedder, SenaExtractor>,
+) -> Vec<MemoryChunk> {
+    match timeout(
+        MEMORY_RETRIEVAL_TIMEOUT,
+        retrieve_recent_memory_chunks(store),
+    )
+    .await
+    {
+        Ok(Ok(chunks)) => chunks,
+        Ok(Err(_)) | Err(_) => Vec::new(),
+    }
 }
 
 /// Extract display text from an ech0 node.

@@ -218,9 +218,14 @@ impl Actor for PlatformActor {
                 } => {
                     if let Some(cadence) = cadence {
                         if let Some(bus) = &self.bus {
-                            let _ = bus.broadcast(Event::Platform(
-                                PlatformEvent::KeystrokePattern(cadence)
-                            )).await;
+                            bus.broadcast(Event::Platform(PlatformEvent::KeystrokePattern(cadence)))
+                                .await
+                                .map_err(|e| {
+                                    ActorError::RuntimeError(format!(
+                                        "broadcast keystroke pattern failed: {}",
+                                        e
+                                    ))
+                                })?;
                         }
                     }
                 }
@@ -239,6 +244,33 @@ impl Actor for PlatformActor {
 mod tests {
     use super::*;
     use crate::factory::create_platform_adapter;
+    use bus::events::platform::PlatformEvent;
+    use tokio::sync::mpsc;
+
+    struct TestKeystrokeAdapter;
+
+    impl PlatformAdapter for TestKeystrokeAdapter {
+        fn active_window(&self) -> Option<WindowContext> {
+            None
+        }
+
+        fn clipboard_digest(&self) -> Option<ClipboardDigest> {
+            None
+        }
+
+        fn subscribe_file_events(&self, _tx: mpsc::Sender<bus::events::platform::FileEvent>) {}
+
+        fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
+            std::thread::spawn(move || {
+                let cadence = KeystrokeCadence {
+                    events_per_minute: 132.0,
+                    burst_detected: false,
+                    idle_duration: Duration::from_millis(250),
+                };
+                let _ = tx.blocking_send(cadence);
+            });
+        }
+    }
 
     #[test]
     fn platform_actor_implements_actor_trait() {
@@ -387,5 +419,47 @@ mod tests {
             result.unwrap().is_ok(),
             "run loop should complete without error"
         );
+    }
+
+    #[tokio::test]
+    async fn platform_actor_forwards_keystroke_patterns_to_bus() {
+        let adapter: Box<dyn PlatformAdapter> = Box::new(TestKeystrokeAdapter);
+        let mut actor = PlatformActor::new(adapter).with_poll_interval(Duration::from_millis(200));
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("platform actor start should succeed");
+
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        let mut observed = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(event) = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+                if let Ok(Event::Platform(PlatformEvent::KeystrokePattern(cadence))) = event {
+                    observed = Some(cadence);
+                    break;
+                }
+            }
+        }
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown broadcast should succeed");
+
+        let join_result = tokio::time::timeout(Duration::from_secs(1), run_handle).await;
+        assert!(join_result.is_ok(), "run loop should exit after shutdown");
+        assert!(
+            join_result.expect("timeout already checked").is_ok(),
+            "run loop should return Ok"
+        );
+
+        let cadence = observed.expect("expected KeystrokePattern event from platform actor");
+        assert_eq!(cadence.events_per_minute, 132.0);
+        assert!(!cadence.burst_detected);
+        assert_eq!(cadence.idle_duration, Duration::from_millis(250));
     }
 }

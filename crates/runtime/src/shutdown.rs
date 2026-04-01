@@ -28,6 +28,21 @@ pub enum ShutdownError {
 ///
 /// Default timeout: 5 seconds per §4.2.
 pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), ShutdownError> {
+    // Step 0: Send directed shutdown hints to actors that may lag broadcast under load.
+    // This is best-effort and does not replace broadcast shutdown semantics.
+    for actor in ["soul", "memory"] {
+        if let Err(error) = runtime
+            .bus
+            .send_directed(actor, Event::System(SystemEvent::ShutdownSignal))
+            .await
+        {
+            eprintln!(
+                "Directed shutdown hint for actor '{}' failed: {}",
+                actor, error
+            );
+        }
+    }
+
     // Step 1: Broadcast ShutdownSignal
     runtime
         .bus
@@ -82,6 +97,7 @@ mod tests {
     use bus::EventBus;
     use crypto::MasterKey;
     use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn shutdown_broadcasts_shutdown_signal() {
@@ -175,5 +191,54 @@ mod tests {
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_sends_directed_shutdown_hints_to_soul_and_memory() {
+        let bus = Arc::new(EventBus::new());
+        let keep_alive = bus.subscribe_broadcast();
+        let registry = ActorRegistry::new();
+
+        let (soul_tx, mut soul_rx) = mpsc::channel(4);
+        let (memory_tx, mut memory_rx) = mpsc::channel(4);
+        bus.register_directed("soul", soul_tx)
+            .expect("register soul channel should succeed");
+        bus.register_directed("memory", memory_tx)
+            .expect("register memory channel should succeed");
+
+        let tray_manager =
+            crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
+
+        let runtime = Runtime {
+            bus,
+            registry,
+            config: SenaConfig::default(),
+            tray_manager,
+            is_first_boot: false,
+            master_key: MasterKey::from_bytes([0u8; 32]),
+            _keep_alive: keep_alive,
+            memory_monitor_handle: None,
+        };
+
+        let result = shutdown(runtime, Duration::from_secs(1)).await;
+        assert!(result.is_ok(), "shutdown should succeed with no actors");
+
+        let soul_msg = tokio::time::timeout(Duration::from_millis(250), soul_rx.recv())
+            .await
+            .expect("soul channel should receive directed message")
+            .expect("soul directed channel should not close");
+        assert!(matches!(
+            soul_msg,
+            Event::System(SystemEvent::ShutdownSignal)
+        ));
+
+        let memory_msg = tokio::time::timeout(Duration::from_millis(250), memory_rx.recv())
+            .await
+            .expect("memory channel should receive directed message")
+            .expect("memory directed channel should not close");
+        assert!(matches!(
+            memory_msg,
+            Event::System(SystemEvent::ShutdownSignal)
+        ));
     }
 }
