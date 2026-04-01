@@ -234,7 +234,10 @@ impl LlmBackend for LlamaBackend {
             })
             .map_err(|e| BackendError::EmbeddingFailed(format!("{e}")))?;
 
-        Ok(embeddings.to_vec())
+        // IMMEDIATELY copy to owned Vec before ctx drop to avoid use-after-free
+        let owned_embeddings = embeddings.to_vec();
+
+        Ok(owned_embeddings)
     }
 
     fn extract(&self, text: &str) -> Result<Vec<String>, BackendError> {
