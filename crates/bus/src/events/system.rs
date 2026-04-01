@@ -119,6 +119,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn memory_threshold_exceeded_constructs_and_clones() {
+        let event = SystemEvent::MemoryThresholdExceeded {
+            current_mb: 2500,
+            limit_mb: 2048,
+        };
+        let cloned = event.clone();
+        if let SystemEvent::MemoryThresholdExceeded {
+            current_mb,
+            limit_mb,
+        } = cloned
+        {
+            assert_eq!(current_mb, 2500);
+            assert_eq!(limit_mb, 2048);
+        } else {
+            panic!("Expected MemoryThresholdExceeded variant");
+        }
+    }
+
     // Compile-time verification: SystemEvent and ActorFailureInfo are Send
     #[allow(dead_code)]
     fn assert_send<T: Send>() {}
