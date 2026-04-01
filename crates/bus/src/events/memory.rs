@@ -45,7 +45,10 @@ pub struct MemoryQueryResponse {
 impl std::fmt::Debug for MemoryQueryResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryQueryResponse")
-            .field("chunks", &format!("[{} chunks, content REDACTED]", self.chunks.len()))
+            .field(
+                "chunks",
+                &format!("[{} chunks, content REDACTED]", self.chunks.len()),
+            )
             .field("request_id", &self.request_id)
             .finish()
     }

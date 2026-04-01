@@ -202,7 +202,8 @@ impl SoulActor {
             let mut table = write_txn.open_table(USER_IDENTITY)?;
             table.insert("user_name", name.as_str())?;
             // Store timestamp using SystemTime with explicit fallback for system clock issues
-            let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            {
                 Ok(duration) => duration.as_secs(),
                 Err(_) => {
                     // System clock is before UNIX_EPOCH (rare but possible).
@@ -403,9 +404,13 @@ impl Actor for SoulActor {
                     // Safe recovery: back up the file before replacing it
                     if self.db_path.exists() {
                         let backup_path = self.db_path.with_extension("bak");
-                        std::fs::rename(&self.db_path, &backup_path)
-                            .map_err(|e| ActorError::StartupFailed(format!("failed to backup corrupt database: {}", e)))?;
-                        
+                        std::fs::rename(&self.db_path, &backup_path).map_err(|e| {
+                            ActorError::StartupFailed(format!(
+                                "failed to backup corrupt database: {}",
+                                e
+                            ))
+                        })?;
+
                         // Emit recovery event to surface the data loss risk
                         let bus_clone = Arc::clone(&bus);
                         let backup_path_str = backup_path.display().to_string();
@@ -783,9 +788,7 @@ mod tests {
                 timestamp: SystemTime::now(),
                 request_id: i + 1,
             };
-            actor
-                .handle_write(req, &bus)
-                .expect("write should succeed");
+            actor.handle_write(req, &bus).expect("write should succeed");
         }
 
         // Give tasks a moment to spawn
@@ -794,10 +797,7 @@ mod tests {
         // stop() should complete without timeout even with pending broadcast tasks
         let stop_result =
             tokio::time::timeout(std::time::Duration::from_secs(2), actor.stop()).await;
-        assert!(
-            stop_result.is_ok(),
-            "stop should complete within timeout"
-        );
+        assert!(stop_result.is_ok(), "stop should complete within timeout");
         assert!(
             stop_result.unwrap().is_ok(),
             "stop should succeed after draining tasks"
