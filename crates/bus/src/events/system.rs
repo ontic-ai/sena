@@ -53,6 +53,11 @@ pub enum SystemEvent {
     CliAttachRequested,
     /// CLI session has closed without requesting app shutdown.
     CliSessionClosed,
+    /// Soul database could not be decrypted and was backed up before recovery.
+    DatabaseRecovered {
+        /// Path to the backup file created.
+        backup_path: String,
+    },
 }
 
 #[cfg(test)]

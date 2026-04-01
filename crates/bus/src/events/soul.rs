@@ -33,11 +33,21 @@ pub struct SoulSummaryRequested {
 }
 
 /// Summary of recent Soul events, passed to PromptComposer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SoulSummary {
     pub content: String,
     pub event_count: usize,
     pub request_id: u64,
+}
+
+impl std::fmt::Debug for SoulSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SoulSummary")
+            .field("content", &"[REDACTED]")
+            .field("event_count", &self.event_count)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
 }
 
 /// An identity signal derived from behavioral patterns.
@@ -94,6 +104,21 @@ mod tests {
             request_id: 1,
         };
         assert_eq!(r.clone().request_id, 1);
+    }
+
+    #[test]
+    fn soul_summary_debug_redacts_content() {
+        let summary = SoulSummary {
+            content: "user identity data and private events".into(),
+            event_count: 10,
+            request_id: 99,
+        };
+        let debug_output = format!("{:?}", summary);
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("user identity data"));
+        assert!(!debug_output.contains("private events"));
+        assert!(debug_output.contains("10"));
+        assert!(debug_output.contains("99"));
     }
 
     #[test]

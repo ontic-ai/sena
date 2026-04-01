@@ -11,6 +11,7 @@ use bus::events::{CTPEvent, InferenceEvent, PlatformEvent};
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SystemEvent};
 use redb::ReadableTable;
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
 
 use crate::{
     encrypted_db::EncryptedDb,
@@ -30,6 +31,7 @@ pub struct SoulActor {
     bus: Option<Arc<EventBus>>,
     broadcast_rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
+    task_set: JoinSet<()>,
 }
 
 impl SoulActor {
@@ -42,6 +44,7 @@ impl SoulActor {
             bus: None,
             broadcast_rx: None,
             directed_rx: None,
+            task_set: JoinSet::new(),
         }
     }
 
@@ -73,7 +76,7 @@ impl SoulActor {
 
         let request_id = req.request_id;
         let bus_clone = Arc::clone(bus);
-        tokio::spawn(async move {
+        self.task_set.spawn(async move {
             let _ = bus_clone
                 .broadcast(Event::Soul(SoulEvent::EventLogged(SoulEventLogged {
                     row_id,
@@ -85,7 +88,7 @@ impl SoulActor {
     }
 
     fn handle_summary(
-        &self,
+        &mut self,
         req: SoulSummaryRequested,
         bus: &Arc<EventBus>,
     ) -> Result<(), SoulError> {
@@ -124,7 +127,7 @@ impl SoulActor {
         let content = entries.join("\n");
         let request_id = req.request_id;
         let bus_clone = Arc::clone(bus);
-        tokio::spawn(async move {
+        self.task_set.spawn(async move {
             let _ = bus_clone
                 .broadcast(Event::Soul(SoulEvent::SummaryReady(SoulSummary {
                     content,
@@ -198,11 +201,15 @@ impl SoulActor {
         {
             let mut table = write_txn.open_table(USER_IDENTITY)?;
             table.insert("user_name", name.as_str())?;
-            // Store timestamp using SystemTime
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            // Store timestamp using SystemTime with explicit fallback for system clock issues
+            let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                Ok(duration) => duration.as_secs(),
+                Err(_) => {
+                    // System clock is before UNIX_EPOCH (rare but possible).
+                    // Use deterministic fallback: 0 (UNIX_EPOCH itself).
+                    0
+                }
+            };
             table.insert("created_at", &*timestamp.to_string())?;
         }
         write_txn.commit()?;
@@ -210,7 +217,7 @@ impl SoulActor {
         // Emit NameInitialized ack on bus
         let bus_clone = Arc::clone(bus);
         let name_clone = name.clone();
-        tokio::spawn(async move {
+        self.task_set.spawn(async move {
             let _ = bus_clone
                 .broadcast(Event::Soul(SoulEvent::NameInitialized(
                     bus::events::soul::SoulNameInitialized { name: name_clone },
@@ -268,7 +275,7 @@ impl SoulActor {
 
     /// Handle a transparency ReadRequested — build a redacted summary and broadcast ReadCompleted.
     fn handle_read(
-        &self,
+        &mut self,
         req: bus::events::soul::SoulReadRequest,
         bus: &Arc<EventBus>,
     ) -> Result<(), SoulError> {
@@ -326,7 +333,7 @@ impl SoulActor {
         };
         let request_id = req.request_id;
         let bus_clone = Arc::clone(bus);
-        tokio::spawn(async move {
+        self.task_set.spawn(async move {
             let _ = bus_clone
                 .broadcast(Event::Soul(SoulEvent::ReadCompleted(SoulReadCompleted {
                     summary,
@@ -387,15 +394,28 @@ impl Actor for SoulActor {
             .ok_or_else(|| ActorError::StartupFailed("SoulActor already started".into()))?;
 
         // Open the encrypted DB. If decryption fails (master key rotated between runs),
-        // delete the stale file and start fresh so the actor stays alive.
+        // back up the corrupt file and start fresh so the actor stays alive.
         let db = match EncryptedDb::open(&self.db_path, &master_key) {
             Ok(db) => db,
             Err(e) => {
                 let reason = e.to_string();
                 if reason.contains("decryption failed") || reason.contains("encryption error") {
-                    // Silent recovery: remove stale encrypted file and reinitialize
+                    // Safe recovery: back up the file before replacing it
                     if self.db_path.exists() {
-                        let _ = std::fs::remove_file(&self.db_path);
+                        let backup_path = self.db_path.with_extension("bak");
+                        std::fs::rename(&self.db_path, &backup_path)
+                            .map_err(|e| ActorError::StartupFailed(format!("failed to backup corrupt database: {}", e)))?;
+                        
+                        // Emit recovery event to surface the data loss risk
+                        let bus_clone = Arc::clone(&bus);
+                        let backup_path_str = backup_path.display().to_string();
+                        tokio::spawn(async move {
+                            let _ = bus_clone
+                                .broadcast(Event::System(SystemEvent::DatabaseRecovered {
+                                    backup_path: backup_path_str,
+                                }))
+                                .await;
+                        });
                     }
                     EncryptedDb::open(&self.db_path, &master_key)
                         .map_err(|e2| ActorError::StartupFailed(e2.to_string()))?
@@ -528,6 +548,13 @@ impl Actor for SoulActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
+        // First, drain all outstanding tasks from the task set.
+        // This ensures transparency queries and other spawned work complete
+        // before we close the encrypted database.
+        while self.task_set.join_next().await.is_some() {
+            // Continue draining until all tasks complete
+        }
+
         if let Some(db) = self.db.take() {
             db.close().map_err(|e| {
                 ActorError::RuntimeError(format!("failed to close encrypted db: {e}"))
@@ -727,5 +754,53 @@ mod tests {
             .contains("invalid user name"));
 
         actor.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn soul_actor_clean_shutdown_with_concurrent_writes() {
+        // Regression test for shutdown timeout issue: ensure spawned broadcast
+        // tasks are drained before encrypted database closes.
+        let dir = tempdir().expect("should create tempdir");
+        let db_path = dir.path().join("soul.redb.enc");
+
+        let mut actor = SoulActor::new(&db_path, test_key());
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(Arc::clone(&bus))
+            .await
+            .expect("start should succeed");
+
+        // Consume ActorReady
+        let _ = rx.recv().await.expect("ActorReady event");
+
+        // Issue multiple write requests that will spawn broadcast tasks
+        for i in 0..5 {
+            let req = SoulWriteRequest {
+                description: format!("event {}", i),
+                app_context: Some("test".to_string()),
+                timestamp: SystemTime::now(),
+                request_id: i + 1,
+            };
+            actor
+                .handle_write(req, &bus)
+                .expect("write should succeed");
+        }
+
+        // Give tasks a moment to spawn
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // stop() should complete without timeout even with pending broadcast tasks
+        let stop_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), actor.stop()).await;
+        assert!(
+            stop_result.is_ok(),
+            "stop should complete within timeout"
+        );
+        assert!(
+            stop_result.unwrap().is_ok(),
+            "stop should succeed after draining tasks"
+        );
     }
 }

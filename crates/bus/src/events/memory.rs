@@ -3,11 +3,21 @@
 use std::time::SystemTime;
 
 /// A chunk of retrieved memory with a relevance score.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemoryChunk {
     pub text: String,
     pub score: f32,
     pub timestamp: SystemTime,
+}
+
+impl std::fmt::Debug for MemoryChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryChunk")
+            .field("text", &"[REDACTED]")
+            .field("score", &self.score)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 /// Request to ingest text into long-term memory (ech0 store).
@@ -26,10 +36,19 @@ pub struct MemoryQueryRequest {
 }
 
 /// Response to a memory query.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemoryQueryResponse {
     pub chunks: Vec<MemoryChunk>,
     pub request_id: u64,
+}
+
+impl std::fmt::Debug for MemoryQueryResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryQueryResponse")
+            .field("chunks", &format!("[{} chunks, content REDACTED]", self.chunks.len()))
+            .field("request_id", &self.request_id)
+            .finish()
+    }
 }
 
 /// Emitted when ech0 detects a conflict during ingest.
@@ -88,6 +107,43 @@ mod tests {
             timestamp: SystemTime::now(),
         };
         assert_eq!(c.clone().text, "t");
+    }
+
+    #[test]
+    fn memory_chunk_debug_redacts_text() {
+        let c = MemoryChunk {
+            text: "sensitive content".into(),
+            score: 0.85,
+            timestamp: SystemTime::now(),
+        };
+        let debug_output = format!("{:?}", c);
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("sensitive content"));
+        assert!(debug_output.contains("0.85"));
+    }
+
+    #[test]
+    fn memory_query_response_debug_redacts_chunks() {
+        let response = MemoryQueryResponse {
+            chunks: vec![
+                MemoryChunk {
+                    text: "secret text 1".into(),
+                    score: 0.9,
+                    timestamp: SystemTime::now(),
+                },
+                MemoryChunk {
+                    text: "secret text 2".into(),
+                    score: 0.8,
+                    timestamp: SystemTime::now(),
+                },
+            ],
+            request_id: 42,
+        };
+        let debug_output = format!("{:?}", response);
+        assert!(debug_output.contains("2 chunks"));
+        assert!(debug_output.contains("REDACTED"));
+        assert!(!debug_output.contains("secret text"));
+        assert!(debug_output.contains("42"));
     }
 
     #[test]
