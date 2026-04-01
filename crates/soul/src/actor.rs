@@ -8,7 +8,7 @@ use bus::events::soul::{
     SoulEventLogged, SoulReadCompleted, SoulSummary, SoulSummaryRequested, SoulWriteRequest,
 };
 use bus::events::transparency::SoulSummaryForTransparency;
-use bus::events::{CTPEvent, InferenceEvent, PlatformEvent};
+use bus::events::{CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent};
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SystemEvent};
 use redb::ReadableTable;
 use tokio::sync::{broadcast, mpsc};
@@ -256,10 +256,15 @@ impl SoulActor {
     }
 
     fn absorb_ctp_signal(&self, event: CTPEvent) -> Result<(), SoulError> {
-        if let CTPEvent::ContextSnapshotReady(snapshot) = event {
-            if let Some(task) = snapshot.inferred_task {
-                let key = format!("task_pref::{}", task.category.to_lowercase());
-                self.increment_identity_counter(&key, 1)?;
+        match event {
+            CTPEvent::ContextSnapshotReady(snapshot) => {
+                if let Some(task) = snapshot.inferred_task {
+                    let key = format!("task_pref::{}", task.category.to_lowercase());
+                    self.increment_identity_counter(&key, 1)?;
+                }
+            }
+            CTPEvent::ThoughtEventTriggered(_) => {
+                self.increment_identity_counter("ctp::thought_trigger_count", 1)?;
             }
         }
         Ok(())
@@ -271,6 +276,22 @@ impl SoulActor {
                 let key = format!("interest::{}", topic);
                 self.increment_identity_counter(&key, 1)?;
             }
+        }
+        Ok(())
+    }
+
+    fn absorb_system_signal(&self, event: SystemEvent) -> Result<(), SoulError> {
+        match event {
+            SystemEvent::FirstBoot => {
+                self.increment_identity_counter("system::first_boot_count", 1)?;
+            }
+            SystemEvent::BootComplete => {
+                self.increment_identity_counter("system::boot_complete_count", 1)?;
+            }
+            SystemEvent::CliSessionClosed => {
+                self.increment_identity_counter("system::cli_session_closed_count", 1)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -504,6 +525,9 @@ impl Actor for SoulActor {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             break;
                         }
+                        Ok(Event::System(system_event)) => {
+                            let _ = self.absorb_system_signal(system_event);
+                        }
                         Ok(Event::Platform(platform_event)) => {
                             let _ = self.absorb_platform_signal(platform_event);
                         }
@@ -512,6 +536,12 @@ impl Actor for SoulActor {
                         }
                         Ok(Event::Inference(inference_event)) => {
                             let _ = self.absorb_inference_signal(inference_event);
+                        }
+                        Ok(Event::Memory(MemoryEvent::ConsolidationCompleted(_))) => {
+                            let _ = self.increment_identity_counter(
+                                "memory::consolidation_completed_count",
+                                1,
+                            );
                         }
                         Ok(Event::Soul(SoulEvent::ReadRequested(req))) => {
                             let _ = self.handle_read(req, &bus);

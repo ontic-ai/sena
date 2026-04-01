@@ -89,8 +89,8 @@ impl PlatformAdapter for WindowsPlatform {
         })
     }
 
-    fn subscribe_file_events(&self, _tx: mpsc::Sender<FileEvent>) {
-        // TODO M1.5: implement via notify crate
+    fn subscribe_file_events(&self, tx: mpsc::Sender<FileEvent>, paths: &[std::path::PathBuf]) {
+        crate::adapter::spawn_file_event_watcher(tx, paths.to_vec());
     }
 
     fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {

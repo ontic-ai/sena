@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use bus::events::ctp::{CTPEvent, ContextSnapshot};
 use bus::events::inference::Priority;
 use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
+use bus::events::soul::{SoulSummary, SoulSummaryRequested};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
-use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent};
+use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SystemEvent};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -337,10 +338,10 @@ impl InferenceActor {
         result
     }
 
-    /// Build enriched prompt from user message, memory chunks, context snapshot, and history.
+    /// Build enriched prompt from user message, memory chunks, context snapshot, history, and soul summary.
     ///
     /// The prompt includes:
-    /// 1. System instruction coaching the LLM to use context, memory, and history
+    /// 1. Soul context from recent event log and identity signals (if available)
     /// 2. Relevant memory chunks from the ech0 store (if any)
     /// 3. Recent conversation history to maintain continuity (if any)
     /// 4. Current computing context from CTP (if available)
@@ -352,8 +353,16 @@ impl InferenceActor {
         memory_chunks: &[MemoryChunk],
         snapshot: Option<&ContextSnapshot>,
         history: &[(String, String)],
+        soul_summary: Option<&SoulSummary>,
     ) -> String {
         let mut parts = Vec::new();
+
+        // Add Soul context first — this grounds the response in persistent identity
+        if let Some(soul) = soul_summary {
+            if !soul.content.is_empty() {
+                parts.push(format!("## Soul Context\n{}", soul.content));
+            }
+        }
 
         // Add relevant memory if any
         if !memory_chunks.is_empty() {
@@ -423,12 +432,21 @@ impl InferenceActor {
             .await
             .unwrap_or_else(|_| Vec::new());
 
-        // Build enriched prompt with context, memory, and conversation history
+        // Request a Soul summary to ground the response in persistent identity.
+        // Uses a short timeout — if Soul is unavailable we proceed without it.
+        let soul_request_id = request_id.saturating_mul(3000);
+        let soul_summary = self
+            .query_soul_with_timeout(bus, soul_request_id, SINGLE_ROUND_MEMORY_TIMEOUT)
+            .await
+            .ok();
+
+        // Build enriched prompt with soul context, memory, and conversation history
         let enriched_prompt = Self::build_enriched_prompt(
             &prompt,
             &memory_chunks,
             self.last_snapshot.as_ref(),
             &self.conversation_history,
+            soul_summary.as_ref(),
         );
 
         // Detect chat template and wrap enriched prompt
@@ -575,6 +593,87 @@ impl InferenceActor {
         }
     }
 
+    /// Request a Soul summary with a short timeout.
+    ///
+    /// Sends `SoulEvent::SummaryRequested` to the Soul actor and waits for
+    /// `SoulEvent::SummaryReady` on the broadcast channel. Returns `Err` if
+    /// Soul is unavailable or the timeout expires.
+    async fn query_soul_with_timeout(
+        &mut self,
+        bus: &Arc<EventBus>,
+        request_id: u64,
+        timeout: Duration,
+    ) -> Result<SoulSummary, String> {
+        let mut rx = bus.subscribe_broadcast();
+
+        bus.send_directed(
+            "soul",
+            Event::Soul(SoulEvent::SummaryRequested(SoulSummaryRequested {
+                max_events: 20,
+                request_id,
+            })),
+        )
+        .await
+        .map_err(|e| format!("soul summary dispatch failed: {}", e))?;
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("soul summary timeout".to_string());
+            }
+
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Ok(Event::Soul(SoulEvent::SummaryReady(summary)))
+                            if summary.request_id == request_id =>
+                        {
+                            return Ok(summary);
+                        }
+                        Ok(_) => continue,
+                        Err(_) => return Err("bus closed".to_string()),
+                    }
+                }
+                // Process directed events (Embed/Extract from memory) to avoid holding up other work
+                directed = async {
+                    match &mut self.directed_rx {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                } => {
+                    if let Some(event) = directed {
+                        match event {
+                            Event::Inference(InferenceEvent::EmbedRequested { text, request_id }) => {
+                                let (tx, _rx) = tokio::sync::oneshot::channel();
+                                let _ = self.queue.enqueue(
+                                    Priority::Normal,
+                                    request_id,
+                                    WorkKind::Embed { text, response_tx: tx },
+                                );
+                                if let Some(work) = self.queue.dequeue() {
+                                    self.process_work(work, bus).await;
+                                }
+                            }
+                            Event::Inference(InferenceEvent::ExtractionRequested { text, request_id }) => {
+                                let (tx, _rx) = tokio::sync::oneshot::channel();
+                                let _ = self.queue.enqueue(
+                                    Priority::Normal,
+                                    request_id,
+                                    WorkKind::Extract { text, response_tx: tx },
+                                );
+                                if let Some(work) = self.queue.dequeue() {
+                                    self.process_work(work, bus).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn process_iterative_request(
         &mut self,
         bus: &Arc<EventBus>,
@@ -641,6 +740,18 @@ impl InferenceActor {
             rounds_completed: actual_rounds_completed,
         });
 
+        let memory_write_request_id = request_id.saturating_mul(2000).saturating_add(1);
+        let conversation_text = format!("User: {}\nAssistant: {}", prompt, final_text);
+        let _ = bus
+            .send_directed(
+                "memory",
+                Event::Memory(MemoryEvent::WriteRequested(MemoryWriteRequest {
+                    text: conversation_text,
+                    request_id: memory_write_request_id,
+                })),
+            )
+            .await;
+
         Ok((final_text, token_count))
     }
 }
@@ -685,6 +796,14 @@ impl Actor for InferenceActor {
                 if let Some(preferred) = &self.preferred_model {
                     registry.set_preferred_model(preferred);
                 }
+
+                for model in registry.models() {
+                    let event = InferenceEvent::ModelDiscovered(model.clone());
+                    bus.broadcast(Event::Inference(event)).await.map_err(|e| {
+                        ActorError::StartupFailed(format!("broadcast failed: {}", e))
+                    })?;
+                }
+
                 let event = InferenceEvent::ModelRegistryBuilt {
                     model_count: registry.model_count(),
                     default_model: registry.default_model().map(String::from),
@@ -929,25 +1048,22 @@ mod tests {
         assert!(actor.registry().is_some());
         assert_eq!(actor.registry().map(|r| r.model_count()), Some(1));
 
-        // May emit BackendMismatchWarning first if GPU detected but not compiled
-        let mut event = rx.recv().await.expect("should receive event");
-        if matches!(
-            event,
-            Event::Inference(InferenceEvent::BackendMismatchWarning { .. })
-        ) {
-            event = rx.recv().await.expect("should receive second event");
-        }
-
-        match event {
-            Event::Inference(InferenceEvent::ModelRegistryBuilt {
+        let mut saw_registry_built = false;
+        for _ in 0..5 {
+            let event = rx.recv().await.expect("should receive event");
+            if let Event::Inference(InferenceEvent::ModelRegistryBuilt {
                 model_count,
                 default_model,
-            }) => {
+            }) = event
+            {
                 assert_eq!(model_count, 1);
                 assert!(default_model.is_some());
+                saw_registry_built = true;
+                break;
             }
-            other => panic!("Expected ModelRegistryBuilt, got {:?}", other),
         }
+
+        assert!(saw_registry_built, "expected ModelRegistryBuilt event");
     }
 
     #[tokio::test]
@@ -1359,7 +1475,7 @@ mod tests {
 
     #[test]
     fn build_enriched_prompt_includes_user_message() {
-        let prompt = InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[]);
+        let prompt = InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[], None);
 
         // Should include user message section
         assert!(prompt.contains("## User\nWhat do I remember?"));
@@ -1385,6 +1501,7 @@ mod tests {
             &[chunk1, chunk2],
             None,
             &[],
+            None,
         );
 
         assert!(prompt.contains("## Relevant Memory"));
@@ -1402,7 +1519,7 @@ mod tests {
             ("Is it fast?".into(), "Yes, Rust is very fast.".into()),
         ];
 
-        let prompt = InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history);
+        let prompt = InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history, None);
 
         assert!(prompt.contains("## Recent Conversation"));
         assert!(prompt.contains("What is Rust?"));
@@ -1436,7 +1553,7 @@ mod tests {
             timestamp: Instant::now(),
         };
 
-        let prompt = InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[]);
+        let prompt = InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[], None);
 
         assert!(prompt.contains("## Current Context"));
         assert!(prompt.contains("VS Code"));
@@ -1486,6 +1603,7 @@ mod tests {
             &memory,
             Some(&snapshot),
             &history,
+            None,
         );
 
         // Should have all sections in proper order

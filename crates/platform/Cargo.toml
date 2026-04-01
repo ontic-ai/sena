@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 arboard = { workspace = true }
 rdev = { workspace = true }
+notify = { workspace = true }
 sysinfo = "0.32"
 
 [target.'cfg(target_os = "windows")'.dependencies]

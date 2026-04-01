@@ -1,12 +1,13 @@
 //! Platform actor: polls OS signals and emits events on the bus.
 
 use async_trait::async_trait;
-use bus::events::platform::{ClipboardDigest, KeystrokeCadence, WindowContext};
+use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
 use bus::{Actor, ActorError, Event, EventBus, PlatformEvent, SystemEvent};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::PlatformAdapter;
 
@@ -25,6 +26,9 @@ pub struct PlatformActor {
     /// First CPU reading is always inaccurate — skip threshold logic on first tick
     first_tick: bool,
     keystroke_rx: Option<tokio::sync::mpsc::Receiver<KeystrokeCadence>>,
+    file_rx: Option<mpsc::Receiver<FileEvent>>,
+    file_events_enabled: bool,
+    file_watch_paths: Vec<PathBuf>,
 }
 
 impl PlatformActor {
@@ -44,6 +48,9 @@ impl PlatformActor {
             normal_poll_interval: default_poll_interval,
             first_tick: true,
             keystroke_rx: None,
+            file_rx: None,
+            file_events_enabled: false,
+            file_watch_paths: Vec::new(),
         }
     }
 
@@ -67,6 +74,13 @@ impl PlatformActor {
     /// This respects user privacy preferences from the config.
     pub fn with_clipboard_enabled(mut self, enabled: bool) -> Self {
         self.clipboard_enabled = enabled;
+        self
+    }
+
+    /// Enable file event observation when watch paths are configured.
+    pub fn with_file_watch_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.file_events_enabled = !paths.is_empty();
+        self.file_watch_paths = paths;
         self
     }
 
@@ -154,6 +168,12 @@ impl Actor for PlatformActor {
         self.adapter.subscribe_keystroke_patterns(keystroke_tx);
         self.keystroke_rx = Some(keystroke_rx);
 
+        if self.file_events_enabled {
+            let (file_tx, file_rx) = mpsc::channel(64);
+            self.adapter.subscribe_file_events(file_tx, &self.file_watch_paths);
+            self.file_rx = Some(file_rx);
+        }
+
         bus.broadcast(Event::System(SystemEvent::ActorReady {
             actor_name: "Platform",
         }))
@@ -229,6 +249,25 @@ impl Actor for PlatformActor {
                         }
                     }
                 }
+                file_event = async {
+                    match &mut self.file_rx {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                }, if self.file_rx.is_some() => {
+                    if let Some(file_event) = file_event {
+                        if let Some(bus) = &self.bus {
+                            bus.broadcast(Event::Platform(PlatformEvent::FileEvent(file_event)))
+                                .await
+                                .map_err(|e| {
+                                    ActorError::RuntimeError(format!(
+                                        "broadcast file event failed: {}",
+                                        e
+                                    ))
+                                })?;
+                        }
+                    }
+                }
             }
         }
     }
@@ -236,6 +275,7 @@ impl Actor for PlatformActor {
     async fn stop(&mut self) -> Result<(), ActorError> {
         self.bus_rx = None;
         self.bus = None;
+        self.file_rx = None;
         Ok(())
     }
 }
@@ -259,7 +299,7 @@ mod tests {
             None
         }
 
-        fn subscribe_file_events(&self, _tx: mpsc::Sender<bus::events::platform::FileEvent>) {}
+        fn subscribe_file_events(&self, _tx: mpsc::Sender<bus::events::platform::FileEvent>, _paths: &[std::path::PathBuf]) {}
 
         fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
             std::thread::spawn(move || {

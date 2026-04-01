@@ -154,6 +154,45 @@ impl MemoryActor {
                 if report.nodes_below_threshold > 0 {
                     let _ = store.prune(0.05).await;
                 }
+
+                // Phase 3 — Semantic promotion pipeline.
+                // After decay stabilises importance scores, search the episodic tier for
+                // high-signal chunks (score >= 0.65) and promote them to semantic tier so
+                // they persist across future sessions. We cap promotion at 5 nodes per
+                // consolidation cycle to keep the operation cheap.
+                if report.nodes_decayed > 0 {
+                    let promotion_opts = SearchOptions {
+                        limit: 5,
+                        vector_weight: 0.4,
+                        graph_weight: 0.6,
+                        min_importance: 0.65,
+                        tiers: vec![MemoryTier::Episodic],
+                    };
+                    if let Ok(results) = store.search("", promotion_opts).await {
+                        for (idx, scored) in results.nodes.into_iter().enumerate() {
+                            let text = node_to_text(&scored.node);
+                            if text.is_empty() {
+                                continue;
+                            }
+                            let request_id = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .map(|d| d.as_nanos() as u64)
+                                .unwrap_or(idx as u64);
+                            let req = SemanticIngestRequest {
+                                text,
+                                routing_key: "episodic:promoted".to_string(),
+                                request_id,
+                            };
+                            let _ = bus
+                                .send_directed(
+                                    MEMORY_ACTOR_NAME,
+                                    Event::Memory(MemoryEvent::SemanticIngestRequested(req)),
+                                )
+                                .await;
+                        }
+                    }
+                }
+
                 let event = MemoryConsolidationCompleted {
                     nodes_decayed: report.nodes_decayed,
                 };

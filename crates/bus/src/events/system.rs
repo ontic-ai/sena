@@ -37,10 +37,6 @@ pub enum SystemEvent {
     ActorReady { actor_name: &'static str },
     /// Encryption subsystem initialized successfully.
     EncryptionInitialized,
-    /// Encryption initialization failed.
-    EncryptionFailed { reason: String },
-    /// OS keychain was unavailable (fell back to passphrase mode).
-    KeychainUnavailable,
     /// User clicked a tray menu item.
     TrayMenuClicked(TrayMenuItem),
     /// Tray initialized successfully.

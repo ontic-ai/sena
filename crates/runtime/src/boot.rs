@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bus::events::system::ActorFailureInfo;
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::MasterKey;
 use rand::RngCore;
@@ -113,6 +114,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let platform_actor = platform::PlatformActor::new(platform_adapter)
         .with_poll_interval(Duration::from_millis(500))
         .with_clipboard_enabled(config.clipboard_observation_enabled)
+        .with_file_watch_paths(config.file_watch_paths.clone())
         .with_idle_threshold(config.platform_idle_cpu_threshold_percent);
     spawn_actor(&bus, &mut registry, platform_actor);
 
@@ -144,8 +146,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
     spawn_actor(&bus, &mut registry, memory_actor);
 
     // Step 9: Initialize and spawn inference actor
-    let models_dir =
-        platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?;
+    let models_dir = if let Some(path) = config.models_dir.clone() {
+        path
+    } else {
+        platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
+    };
     let inference_backend = inference::LlamaBackend::new();
     let inference_actor = inference::InferenceActor::new(models_dir, Box::new(inference_backend))
         .with_preferred_model(config.preferred_model.clone());
@@ -233,14 +238,27 @@ where
     A: Actor,
 {
     let name = actor.name();
-    let bus_clone = Arc::clone(bus);
+    let bus_for_actor = Arc::clone(bus);
+    let bus_for_events = Arc::clone(bus);
     let handle = tokio::spawn(async move {
-        if let Err(e) = actor.start(bus_clone).await {
+        if let Err(e) = actor.start(bus_for_actor).await {
             eprintln!("Actor '{}' failed to start: {}", name, e);
+            let _ = bus_for_events
+                .broadcast(Event::System(SystemEvent::ActorFailed(ActorFailureInfo {
+                    actor_name: name,
+                    error_msg: e.to_string(),
+                })))
+                .await;
             return;
         }
         if let Err(e) = actor.run().await {
             eprintln!("Actor '{}' failed during run: {}", name, e);
+            let _ = bus_for_events
+                .broadcast(Event::System(SystemEvent::ActorFailed(ActorFailureInfo {
+                    actor_name: name,
+                    error_msg: e.to_string(),
+                })))
+                .await;
         }
         let _ = actor.stop().await;
     });

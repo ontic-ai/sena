@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -29,11 +30,12 @@ pub trait PlatformAdapter: Send + 'static {
     /// the implementation is not yet complete.
     fn clipboard_digest(&self) -> Option<ClipboardDigest>;
 
-    /// Subscribe to file system events.
+    /// Subscribe to file system events on the given watch paths.
     ///
-    /// The adapter will send FileEvent instances to the provided channel
-    /// when file system changes are detected.
-    fn subscribe_file_events(&self, tx: mpsc::Sender<FileEvent>);
+    /// The adapter spawns a background watcher thread that sends FileEvent instances
+    /// to the provided channel when file system changes are detected on any of the
+    /// provided paths. No-op when `paths` is empty.
+    fn subscribe_file_events(&self, tx: mpsc::Sender<FileEvent>, paths: &[PathBuf]);
 
     /// Subscribe to keystroke cadence patterns (timing only, never characters).
     ///
@@ -129,5 +131,77 @@ pub(crate) fn spawn_keystroke_pattern_monitor(
                 "[platform/{platform_label}] rdev listen failed; keystroke cadence disabled. Ensure global input permissions are granted: {err:?}"
             );
         }
+    });
+}
+
+/// Map a `notify::EventKind` to our typed `FileEventKind`.
+fn map_notify_kind(kind: &notify::EventKind) -> Option<bus::events::platform::FileEventKind> {
+    use bus::events::platform::FileEventKind;
+    use notify::EventKind;
+    match kind {
+        EventKind::Create(_) => Some(FileEventKind::Created),
+        EventKind::Modify(_) => Some(FileEventKind::Modified),
+        EventKind::Remove(_) => Some(FileEventKind::Deleted),
+        EventKind::Access(_) => None, // access events are noise — skip
+        _ => Some(FileEventKind::Modified),
+    }
+}
+
+/// Spawn a cross-platform file watcher that forwards events to `tx`.
+///
+/// Uses the `notify` crate's `RecommendedWatcher` which selects the best backend
+/// for the current OS (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on
+/// Windows).  Runs on a dedicated OS thread to avoid blocking the async runtime.
+///
+/// No-op when `paths` is empty.
+pub(crate) fn spawn_file_event_watcher(tx: mpsc::Sender<FileEvent>, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc as std_mpsc;
+        use std::time::Instant;
+
+        let (ntx, nrx) = std_mpsc::channel::<notify::Result<notify::Event>>();
+        let mut watcher = match RecommendedWatcher::new(ntx, Config::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[platform] file watcher creation failed: {e}");
+                return;
+            }
+        };
+
+        for path in &paths {
+            if let Err(e) = watcher.watch(path.as_ref(), RecursiveMode::Recursive) {
+                eprintln!("[platform] file watcher: failed to watch {}: {e}", path.display());
+            }
+        }
+
+        loop {
+            match nrx.recv() {
+                Ok(Ok(event)) => {
+                    let Some(file_kind) = map_notify_kind(&event.kind) else {
+                        continue;
+                    };
+                    for path in event.paths {
+                        let fe = FileEvent {
+                            path,
+                            event_kind: file_kind.clone(),
+                            timestamp: Instant::now(),
+                        };
+                        if tx.blocking_send(fe).is_err() {
+                            return; // receiver dropped — shut down
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[platform] file watcher error: {e}");
+                }
+                Err(_) => break, // std channel disconnected
+            }
+        }
+        // watcher dropped here, unregistering all watches
     });
 }

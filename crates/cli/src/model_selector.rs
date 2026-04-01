@@ -5,9 +5,8 @@
 //! 1. **Standalone** (`sena models`): `run()` — discovers models, prints menu,
 //!    reads selection via its own sync stdin, persists to config.
 //!
-//! 2. **Shell** (`/models` inside REPL): `discover_and_print_menu()` prints the list
-//!    and returns the model vec; the caller reads the user input via its own async
-//!    stdin reader and passes it to `apply_selection()`.
+//! 2. **Shell** (`/models` inside REPL): uses `discover_models_at()` for validation
+//!    and `ModelSelectorPopup` for interactive TUI selection.
 
 use std::io;
 use std::path::Path;
@@ -153,21 +152,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// Discover models and return a popup for TUI display.
-///
-/// # Errors
-/// - Ollama directory not found
-/// - No models discovered
-#[allow(dead_code)]
-pub async fn discover_popup() -> Result<ModelSelectorPopup> {
-    let models_dir = ollama_models_dir()
-        .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
-
-    let models = discover_models_at(&models_dir)?;
-
-    Ok(ModelSelectorPopup::new(models))
-}
-
 /// Discover models at a specific directory and validate that GGUF models are present.
 pub fn discover_models_at(path: &Path) -> Result<Vec<ModelInfo>> {
     if !path.exists() {
@@ -191,62 +175,6 @@ pub fn discover_models_at(path: &Path) -> Result<Vec<ModelInfo>> {
     }
 
     Ok(models)
-}
-
-// ── Shell-facing API ─────────────────────────────────────────────────────────
-
-/// Discover models, print the numbered menu, and return the model list.
-///
-/// Called by `shell::run_models()` so the shell can read the selection via its
-/// own async stdin reader rather than opening a second stdin handle.
-///
-/// # Errors
-/// - Ollama directory not found
-/// - No models discovered
-#[allow(dead_code)]
-pub async fn discover_and_print_menu(runtime: &runtime::boot::Runtime) -> Result<Vec<ModelInfo>> {
-    let models_dir = ollama_models_dir()
-        .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
-
-    display::info(&format!("Scanning: {}", models_dir.display()));
-
-    let registry = discover_models(&models_dir).map_err(|e| {
-        anyhow!(
-            "Model discovery failed: {}. Run 'ollama pull <model>' first.",
-            e
-        )
-    })?;
-
-    let models = registry.models().to_vec();
-    let current = &runtime.config.preferred_model;
-    let default_name = registry.default_model().map(str::to_owned);
-
-    print_menu(&models, current.as_deref(), default_name.as_deref());
-
-    Ok(models)
-}
-
-/// Apply a selection string (number or name) and persist to config.
-///
-/// Returns the name of the selected model.
-///
-/// # Errors
-/// - Selection out of range or not found
-/// - Config save failure
-#[allow(dead_code)]
-pub async fn apply_selection(
-    input: &str,
-    models: &[ModelInfo],
-    runtime: &runtime::boot::Runtime,
-) -> Result<String> {
-    let selected = resolve_selection(input, models)?;
-    let name = selected.name.clone();
-
-    let mut config = runtime.config.clone();
-    config.preferred_model = Some(name.clone());
-    runtime::save_config(&config).await?;
-
-    Ok(name)
 }
 
 // ── Standalone API ────────────────────────────────────────────────────────────

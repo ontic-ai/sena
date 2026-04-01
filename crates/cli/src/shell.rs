@@ -1078,7 +1078,6 @@ impl Shell {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 enum DispatchResult {
     Continue,

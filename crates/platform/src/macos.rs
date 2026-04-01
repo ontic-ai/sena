@@ -32,12 +32,31 @@ impl PlatformAdapter for MacOSPlatform {
     }
 
     fn clipboard_digest(&self) -> Option<ClipboardDigest> {
-        // TODO M1.5: implement via arboard
-        None
+        use std::hash::{Hash, Hasher};
+        use std::time::Instant;
+
+        let text = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok())?;
+
+        if text.is_empty() {
+            return None;
+        }
+
+        let char_count = text.chars().count();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let digest_hex = format!("{:016x}", hasher.finish());
+
+        Some(ClipboardDigest {
+            digest: Some(digest_hex),
+            char_count,
+            timestamp: Instant::now(),
+        })
     }
 
-    fn subscribe_file_events(&self, _tx: mpsc::Sender<FileEvent>) {
-        // TODO M1.5: implement via notify crate (kqueue)
+    fn subscribe_file_events(&self, tx: mpsc::Sender<FileEvent>, paths: &[std::path::PathBuf]) {
+        crate::adapter::spawn_file_event_watcher(tx, paths.to_vec());
     }
 
     fn subscribe_keystroke_patterns(&self, tx: mpsc::Sender<KeystrokeCadence>) {
