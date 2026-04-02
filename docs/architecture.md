@@ -1,5 +1,5 @@
 # Sena — Architecture
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Status:** Governing Document — no implementation decision may contradict this file without a formal revision  
 **Reconcile against:** `docs/PRD.md` first, this document second
 
@@ -37,6 +37,7 @@ sena/
 │   ├── memory/             ← tiered memory, dual-routing, consolidation
 │   ├── prompt/             ← dynamic prompt composition engine
 │   ├── soul/               ← SoulBox: identity, schema, event log
+│   ├── speech/             ← STT, TTS, wakeword — primary interaction surface
 │   └── cli/                ← binary entrypoint — thin shell only
 │
 ├── xtask/                  ← cargo xtask automation (Rust, not shell scripts)
@@ -69,7 +70,8 @@ runtime
  ├── crypto
  ├── soul
  ├── platform
- └── ctp
+ ├── ctp
+ └── speech
 
 ctp
  ├── bus
@@ -97,13 +99,17 @@ soul
 
 platform
  └── bus
+
+speech
+ └── bus
 ```
 
 **Hard rules:**
 - `crypto` has zero dependencies on any other Sena crate. Like `bus`, it is a leaf node in the graph. It provides encryption primitives consumed by `runtime`, `soul`, and `memory`.
 - `soul` has no knowledge of `ctp`, `inference`, `memory`, or `prompt`. It only knows `bus` and `crypto`. Other crates emit events; soul absorbs them. Soul's internals are never reached into from outside.
+- `speech` depends only on `bus`. It receives events and emits events. It never imports `inference`, `memory`, or `soul`.
 - `bus` has zero dependencies on any other Sena crate. It is the bottom of the graph.
-- `cli` is the only binary. It has no business logic. If business logic appears in `cli`, it belongs in another crate.
+- `cli` is NOT the only binary, it is an "execution" pipeline for developers, not meant to be mainstream communication. It has no business logic. If business logic appears in `cli`, it belongs in another crate.
 - Circular dependencies are a build error. The graph above must remain a DAG.
 - `platform` never imports OS-specific crates at the crate root level. Platform-specific code is gated behind `#[cfg(target_os = ...)]` within the crate.
 
@@ -488,6 +494,7 @@ Every significant event (inference cycle, memory write, identity signal, user in
 - Config lives in a platform-appropriate location (e.g. `~/.config/sena/` on Linux, `~/Library/Application Support/sena/` on macOS).
 - Config format: TOML.
 - All tunable thresholds (CTP trigger intervals, token budgets, memory window sizes, shutdown timeouts) are in config.
+- Speech-related config (`speech_enabled`, `voice_always_listening`, `whisper_model_path`, `stt_energy_threshold`) controls the STT/TTS subsystem. Speech is enabled by default and enabled through onboarding or config.
 - Config is loaded once at boot and treated as immutable for the session. Hot-reload is a future concern.
 - No hardcoded values for tunables anywhere in the codebase. If it could reasonably change between deployments, it is in config.
 
@@ -510,6 +517,55 @@ Every significant event (inference cycle, memory write, identity signal, user in
 
 ---
 
+## 14. Speech
+
+Lives in `crates/speech`. This is Sena's primary user-facing interaction surface.
+
+### 14.1 Architecture
+
+Speech is two independent actors:
+- **STT Actor:** Captures microphone audio, detects speech, transcribes via Whisper.cpp
+- **TTS Actor:** Receives text, synthesizes speech via Piper (preferred) or OS platform TTS
+
+Both actors communicate exclusively via the bus. They never call each other directly.
+
+### 14.2 STT Pipeline
+
+```
+Microphone → cpal audio capture → Voice Activity Detection → Whisper.cpp transcription → TranscriptionCompleted event on bus
+```
+
+Modes:
+- **Wakeword mode (default):** Always listening for wakeword ("Sena") via dedicated tiny model (OpenWakeWord, ~5MB). After wakeword detected, captures speech until silence, then transcribes.
+- **Push-to-talk mode:** STT activates only on explicit user action (hotkey or tray button).
+
+### 14.3 TTS Pipeline
+
+```
+SpeakRequested event → Piper synthesis (or OS fallback) → cpal audio playback → SpeechOutputCompleted event
+```
+
+Voice personality is warm and concise, derived from Soul state. TTS is the default output for Sena's thoughts and responses.
+
+### 14.4 Model Management
+
+Speech models are downloaded from HuggingFace on first enable:
+- Whisper GGUF (~150MB for small model)
+- Piper voice model (~60MB)  
+- OpenWakeWord model (~5MB)
+
+This is the **only** network exception in Sena's local-first architecture. Downloads are:
+- User-consented (explicit enable in config or onboarding)
+- Model weights only (no user data transmitted)
+- Cached locally after first download
+
+### 14.5 Hard Rules
+
+- STT never captures or stores raw audio persistently. Audio is processed in a rolling in-memory buffer only.
+- TTS never sends text to external services. All synthesis is local.
+- Wakeword detection model must be <= 20MB and idle CPU < 1%.
+- Speech actors failing does not affect core CTP/inference/memory loop.
+- All speech functionality degrades gracefully: if no model available, speech is disabled and CLI/tray remain functional.
 
 ---
 

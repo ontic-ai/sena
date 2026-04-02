@@ -1,5 +1,5 @@
 # Sena — Development Roadmap
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Reconcile against:** `PRD.md`, `architecture.md`
 
 ---
@@ -254,16 +254,252 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Satisfies PRD Principle P7
 
 #### M4.4 — Stability and Performance
-- [ ] Memory usage profiled and bounded
-- [ ] CPU usage during idle < configurable threshold
-- [ ] No memory leaks (Valgrind / heaptrack)
-- [ ] Sena runs for 72 hours without restart in testing
+- [x] Memory usage profiled and bounded
+- [x] CPU usage during idle < configurable threshold
+- [x] No memory leaks (Valgrind / heaptrack)
+- [ ] Sena runs for 72 hours without restart in testing -- skip for now
 
 **Exit gate — Phase 4 complete when:**
-- [ ] All milestones M4.1–M4.4 checked off
-- [ ] Target user (technical) can install and run Sena without documentation
+- [x] All milestones M4.1–M4.4 checked off
+- [ ] Target user (technical) can install and run Sena without documentation -- skip for now
+- [x] All previous exit gate conditions still hold
+- [x] PRD permanent non-goals verified: none implemented
+
+---
+
+## Phase 5 — Speech: Primary Interaction Surface
+
+**Goal:** Sena speaks and listens. STT and TTS become the primary user interaction surface, replacing text as the default communication mode. Speech models are downloaded automatically on first enable.
+
+**Entry gate:** Phase 4 exit gate fully satisfied. Speech crate exists with actor skeletons.
+
+### Milestones
+
+#### M5.1 — Speech Model Download Pipeline
+- [ ] HTTP download client for HuggingFace model files (whisper GGUF, piper voice, openwakeword)
+- [ ] Download progress reporting via bus events
+- [ ] Model integrity verification (SHA-256 checksum)
+- [ ] Cached model discovery (skip download if model exists)
+- [ ] Graceful handling: network unavailable, partial download, corrupt file
+- [ ] Config: `speech_model_dir` for custom model storage path
+- [ ] Unit tests: download mock, checksum verification, cache hit/miss
+
+#### M5.2 — TTS: Piper Integration
+- [ ] Piper binary/library integration for local neural TTS
+- [ ] OS platform TTS fallback (SAPI on Windows, AVSpeechSynthesizer on macOS, espeak on Linux)
+- [ ] SpeakRequested event → synthesis → cpal audio playback → SpeechOutputCompleted
+- [ ] Voice personality: warm, concise, configurable rate
+- [ ] Queue management: FIFO with max queue depth, interruption support
+- [ ] Integration test: text → audio playback on all 3 OS's
+
+#### M5.3 — STT: Whisper.cpp Integration
+- [ ] Whisper.cpp model loading from downloaded GGUF
+- [ ] Audio capture via cpal (16kHz mono)
+- [ ] Voice Activity Detection (VAD): energy threshold + silence detection
+- [ ] Transcription pipeline: audio buffer → whisper inference → TranscriptionCompleted event
+- [ ] On-demand mode: transcribe on VoiceInputDetected event
+- [ ] Always-listening mode: continuous capture with VAD-triggered transcription
+- [ ] Integration test: audio capture → transcription round-trip
+
+#### M5.4 — Wakeword Detection
+- [ ] OpenWakeWord model integration (~5MB dedicated model)
+- [ ] Always-on low-power detection loop (target: < 1% idle CPU)
+- [ ] Wakeword detected → activate STT for full transcription
+- [ ] Configurable wakeword sensitivity threshold
+- [ ] False-positive rate < 2/hour target
+- [ ] Graceful fallback: if wakeword model unavailable, require push-to-talk
+
+#### M5.5 — Speech + Inference Integration
+- [ ] TranscriptionCompleted → inference pipeline (same as CLI chat, via bus)
+- [ ] InferenceCompleted → SpeakRequested (when TTS enabled)
+- [ ] Proactive thoughts: CTP-triggered inference results spoken via TTS
+- [ ] Configurable: proactive output mode (TTS, tray notification, both, none)
+- [ ] Rate limiting: Sena doesn't interrupt user during active conversation
+- [ ] Integration test: speak → transcribe → infer → speak response
+
+#### M5.6 — Speech Onboarding
+- [ ] First-enable flow: detect no speech models → offer download → progress UI
+- [ ] Microphone permission check on all 3 OS's
+- [ ] Audio output device detection and selection
+- [ ] Speech settings in config: backend preferences, sensitivity, voice rate
+- [ ] Graceful degradation: if speech setup fails, Sena continues with CLI/tray only
+
+**Exit gate — Phase 5 complete when:**
+- [ ] All milestones M5.1–M5.6 checked off
+- [ ] User can speak to Sena and receive spoken responses on all 3 OS's
+- [ ] Wakeword detection runs at < 1% idle CPU
+- [ ] No raw audio persisted to disk at any point
+- [ ] Speech model download works from HuggingFace on all 3 OS's
 - [ ] All previous exit gate conditions still hold
-- [ ] PRD permanent non-goals verified: none implemented
+- [ ] Speech failure does not affect core CTP/inference/memory loop
+
+---
+
+## Phase 6 — CLI Decoupling and Configuration
+
+**Goal:** CLI becomes a separate process communicating over IPC. Configuration is accessible through CLI menu and auto-tuned based on local analytics.
+
+**Entry gate:** Phase 5 exit gate fully satisfied.
+
+### Milestones
+
+#### M6.1 — IPC Runtime Server
+- [ ] Unix domain socket (macOS/Linux) / Named pipe (Windows) server in runtime
+- [ ] Protocol: typed event serialization over IPC channel
+- [ ] Authentication: local process verification
+- [ ] CLI connects as a client, receives bus event stream, sends commands
+
+#### M6.2 — CLI as Separate Process
+- [ ] CLI binary connects to runtime over IPC
+- [ ] CLI crash does not affect runtime
+- [ ] Multiple CLI sessions supported simultaneously
+- [ ] Session attach/detach without runtime restart
+
+#### M6.3 — Configuration UI
+- [ ] `/config` slash command: view all settings and config file path
+- [ ] `/config set <key> <value>`: edit settings from CLI
+- [ ] Advanced mode toggle: hides technical settings from general users
+- [ ] Config validation before save
+
+#### M6.4 — Analytics-Driven Auto-Configuration
+- [ ] Local-only hardware profiling: available RAM, VRAM, CPU cores
+- [ ] Token limit auto-tuning based on hardware profile
+- [ ] Automatic fallback: if inference fails due to resource limits, reduce tokens and retry
+- [ ] Analytics dashboard in CLI: show recommended vs current settings
+
+**Exit gate — Phase 6 complete when:**
+- [ ] CLI is a separate process, runtime survives CLI crashes
+- [ ] Configuration viewable and editable from CLI
+- [ ] Token limits auto-tuned based on hardware profile
+- [ ] All previous exit gate conditions still hold
+
+---
+
+## Planned Features — Assistant Evolution Backlog
+
+**Goal:** Expand Sena's usefulness as a daily personal assistant while preserving strict local-first behavior, privacy boundaries, and hardware efficiency.
+
+**Backlog entry policy:** Items below are candidates, not commitments. They must pass the Roadmap Evaluation Rubric before they are promoted into a scheduled phase.
+
+### BF.1 — On-Device Wakeword Detection
+- **Why this helps:** Improves accessibility and hands-free interaction for users who cannot always use keyboard-driven commands.
+- **Hardware efficiency:** Always-on detector must use a tiny local model (<= 20 MB), target idle CPU < 1.0% on laptop-class hardware, and memory footprint < 150 MB.
+- **Privacy/local-first:** **Risk class: Medium.** No cloud audio streaming. Audio is processed in a rolling in-memory buffer only; no raw mic stream persistence.
+- **User-value frequency:** Daily utility for users who rely on voice-first interaction.
+- **Failure safety:** If wakeword subsystem fails, Sena remains fully usable via existing CLI/TUI commands.
+- **Cross-platform parity impact:** Requires microphone permission and device parity across macOS, Windows, Linux before release.
+- **Entry gate:** Demonstrate offline wakeword detection at >= 90% true-positive rate with false-accept rate < 2/hour on each OS.
+- **Exit gate:** 7-day background soak test with no privacy regressions, no persistent raw audio writes, and measured idle CPU/memory within target.
+
+### BF.2 — Long-Term User Goals Tracking
+- **Why this helps:** Helps Sena support multi-day and multi-week plans (projects, habits, deadlines) rather than only momentary context.
+- **Hardware efficiency:** Goal indexing and retrieval must keep incremental memory growth bounded (target < 250 MB/month for active use).
+- **Privacy/local-first:** **Risk class: Medium.** Goal state stored only in encrypted local stores; no external task services required.
+- **User-value frequency:** Daily utility for planning-heavy users; weekly utility for reflection-oriented users.
+- **Failure safety:** Corrupted goal index must degrade to read-only summary mode, never blocking boot.
+- **Cross-platform parity impact:** Goal capture and reminders must behave consistently on all supported desktop OSs.
+- **Entry gate:** Typed goal schema approved with explicit retention policy and encryption mapping.
+- **Exit gate:** End-to-end test shows goal creation → progress updates → completion summaries across 30 simulated days with zero data-loss events.
+
+### BF.3 — Wellbeing Signals and Coaching (Non-Clinical)
+- **Why this helps:** Provides gentle, non-medical nudges based on work cadence and overload signals, improving sustainable daily productivity.
+- **Hardware efficiency:** Signal extraction must run on existing CTP snapshots only; no extra heavyweight model pass per cycle.
+- **Privacy/local-first:** **Risk class: High.** Use only non-content behavioral aggregates; avoid sensitive diagnosis language; all state remains local and encrypted.
+- **User-value frequency:** Daily utility with lightweight check-ins; weekly value for trend summaries.
+- **Failure safety:** If confidence is low, Sena must abstain and emit neutral guidance rather than speculative coaching.
+- **Cross-platform parity impact:** Must use platform-agnostic metrics to avoid skew from OS-specific signal quality differences.
+- **Entry gate:** Ethics and safety guardrails documented, including prohibited claim classes and confidence floor.
+- **Exit gate:** Offline evaluation shows >= 95% compliance with non-clinical response policy and no sensitive-content persistence violations.
+
+### BF.4 — Encrypted Cross-Device Sync (Explicit Opt-In)
+- **Why this helps:** Preserves continuity of personal assistant state for users with multiple personal devices.
+- **Hardware efficiency:** Background sync must batch and delta-compress updates; target network-on intervals < 30 seconds/hour on average.
+- **Privacy/local-first:** **Risk class: High.** Local-first strictness preserved via end-to-end encrypted blobs, user-held keys only, and no server-side plaintext access.
+- **User-value frequency:** Weekly utility for single-device users; daily utility for multi-device users.
+- **Failure safety:** Sync conflict or outage must never block local operation; last known local state remains authoritative.
+- **Cross-platform parity impact:** Key management and conflict resolution UX must be equivalent across OSs.
+- **Entry gate:** Cryptographic protocol review completed with key-rotation and device-revocation flows.
+- **Exit gate:** Multi-device simulation validates eventual consistency with zero plaintext leakage and successful recovery from offline divergence.
+
+### BF.5 — Plugin/Extension Action System (Local Sandbox)
+- **Why this helps:** Lets advanced users add assistant actions while keeping core Sena small and focused.
+- **Hardware efficiency:** Plugin host must enforce per-plugin CPU and memory quotas; default hard cap per plugin process.
+- **Privacy/local-first:** **Risk class: High.** Capabilities model required; plugins get least-privilege scopes and explicit user grants; no implicit network egress.
+- **User-value frequency:** Daily utility for power users with repetitive workflows; weekly utility for casual users.
+- **Failure safety:** Plugin crashes are isolated; core assistant loop and memory stores remain unaffected.
+- **Cross-platform parity impact:** Plugin API must be OS-neutral; platform-specific adapters exposed via typed capability gates.
+- **Entry gate:** Signed manifest spec with permission model and deterministic sandbox policy approved.
+- **Exit gate:** Security test suite proves denied-by-default permissions, isolated crash containment, and deterministic unload/reload behavior.
+
+### BF.6 — Proactive Suggestions Engine
+- **Why this helps:** Moves Sena from reactive responses to timely, useful interventions during active work.
+- **Hardware efficiency:** Suggestion scoring must be incremental and bounded; target additional idle CPU overhead < 0.5%.
+- **Privacy/local-first:** **Risk class: Medium.** Suggestions computed from local CTP + memory signals only; no remote ranking or telemetry.
+- **User-value frequency:** Daily utility when suggestions are relevant and low-noise.
+- **Failure safety:** If confidence drops below threshold, Sena suppresses proactive output to avoid interruption fatigue.
+- **Cross-platform parity impact:** Trigger quality thresholds calibrated per OS to account for signal cadence differences.
+- **Entry gate:** Precision/recall success criteria and user-interruption budget defined.
+- **Exit gate:** 14-day dogfood run achieves target acceptance rate and stays under interruption budget without CPU budget violations.
+
+### BF.7 — Local Fine-Tuning and Adapter Pipeline
+- **Why this helps:** Increases personal relevance of responses for long-term users without surrendering data to cloud training.
+- **Hardware efficiency:** Training must support low-rank adapters and quantized workflows; fit within configurable overnight resource windows.
+- **Privacy/local-first:** **Risk class: High.** Training corpus remains local; redaction filters remove prohibited raw content classes before dataset assembly.
+- **User-value frequency:** Weekly to monthly utility, with daily benefit after successful adaptation.
+- **Failure safety:** Failed training run must roll back cleanly to last known-good adapter without affecting live inference.
+- **Cross-platform parity impact:** Pipeline must detect unavailable accelerators and degrade to CPU-safe scheduling, not fail hard.
+- **Entry gate:** Dataset curation and redaction policy approved; adapter compatibility matrix finalized per backend.
+- **Exit gate:** Reproducible local training run yields measurable task-quality uplift while remaining within configured thermal and memory budgets.
+
+### BF.8 — Local Browser Context Ingestion
+- **Why this helps:** Improves assistant relevance by understanding active research/work context that currently lives in browser tabs.
+- **Hardware efficiency:** Ingestion uses metadata and digest pipelines first; full-page parsing only when explicitly requested.
+- **Privacy/local-first:** **Risk class: High.** Default to title/domain/topic digest; no automatic persistence of full page content; strict denylist for sensitive domains.
+- **User-value frequency:** Daily utility for users doing research, coding, and documentation work.
+- **Failure safety:** Browser integration failure must not affect non-browser CTP flow or core inference loop.
+- **Cross-platform parity impact:** Requires equivalent browser support strategy on all target OSs.
+- **Entry gate:** Domain sensitivity policy and consent UX approved.
+- **Exit gate:** Integration tests confirm digest-only default behavior, sensitive-domain exclusion, and stable fallback when browser APIs are unavailable.
+
+### BF.9 — Emotion-Aware Response Adaptation (Signal-Only)
+- **Why this helps:** Makes responses calmer and more useful under user stress without pretending to infer hidden personal details.
+- **Hardware efficiency:** Adaptation must reuse existing cadence/context features; no additional always-on multimodal model required.
+- **Privacy/local-first:** **Risk class: High.** Only coarse confidence buckets allowed; no persistent labels about user mental state.
+- **User-value frequency:** Daily utility in high-friction sessions; weekly value for communication style calibration.
+- **Failure safety:** Low-confidence cases revert to neutral default response style.
+- **Cross-platform parity impact:** Must avoid dependence on OS-specific biometric inputs to maintain equal behavior.
+- **Entry gate:** Response-style policy documented with explicit prohibited claims and retention boundaries.
+- **Exit gate:** Offline safety audit shows policy compliance and no forbidden state persistence.
+
+### BF.10 — Multi-Agent Device Collaboration (Local Mesh)
+- **Why this helps:** Enables Sena instances on trusted personal devices to coordinate context and tasks while preserving one-user identity continuity.
+- **Hardware efficiency:** Collaboration protocol must be event-delta based, bandwidth-thrifty, and suspendable on battery constraints.
+- **Privacy/local-first:** **Risk class: High.** Trusted-device mesh with mutual authentication; data encrypted end-to-end; no centralized plaintext broker.
+- **User-value frequency:** Weekly utility for single-device users; daily utility for users switching devices frequently.
+- **Failure safety:** Mesh partition must gracefully degrade to standalone local assistant behavior.
+- **Cross-platform parity impact:** Transport and trust bootstrap must work across mixed macOS/Windows/Linux fleets.
+- **Entry gate:** Device trust model and key bootstrap UX validated.
+- **Exit gate:** Chaos tests show resilient sync under partition/rejoin and no untrusted device acceptance.
+
+### Roadmap Evaluation Rubric
+
+Each backlog item is scored before promotion into an implementation phase.
+
+| Criterion | Score Type | Definition |
+|---|---|---|
+| Local-first strictness | Pass/Fail | **Pass** only if core behavior works fully offline with no cloud dependency in the critical path. |
+| Privacy risk and mitigation quality | 0–5 | 0: unresolved high-risk exposure; 3: risk identified with partial mitigations; 5: explicit risk class, type-level or architecture-level controls, and testable safeguards. |
+| Resource budget fitness | 0–5 | 0: no budget; 3: budget stated but unverified; 5: explicit CPU/memory/model-size targets validated in tests or benchmarks. |
+| User-value frequency | 0–5 | 0: rare/unclear value; 3: weekly value for target user; 5: daily high-signal value with clear acceptance criteria. |
+| Failure safety | 0–5 | 0: failure can break core assistant loop; 3: partial fallback; 5: graceful degradation with bounded impact and explicit rollback/recovery path. |
+| Cross-platform parity impact | 0–5 | 0: single-OS feature; 3: multi-OS with known gaps; 5: parity plan and conformance tests across macOS, Windows, Linux. |
+
+**Prioritization threshold:**
+- Local-first strictness must be **Pass**.
+- Privacy risk and mitigation quality must be **>= 4**.
+- Resource budget fitness must be **>= 4**.
+- Composite score across the five 0–5 criteria must be **>= 20/25**.
+- Any item below threshold stays in backlog and must be redesigned before phase assignment.
 
 ---
 

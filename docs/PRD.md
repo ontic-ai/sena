@@ -1,5 +1,5 @@
 # Sena — Product Requirements Document
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Status:** Living Document — all architectural decisions must be reconciled against this file first  
 **Owner:** Core Team
 
@@ -19,7 +19,7 @@ These are non-negotiable. Any feature, subsystem, or implementation decision tha
 
 | # | Principle | What It Means |
 |---|---|---|
-| P1 | **Local-first, always** | All inference, memory, and processing runs on-device. No user data ever leaves the machine unless the user explicitly opts in to a future cloud feature. |
+| P1 | **Local-first, always** | All inference, memory, and processing runs on-device. No user data ever leaves the machine unless the user explicitly opts in to a future cloud feature. **Exception:** Sena may download speech models (Whisper GGUF, Piper voice, OpenWakeWord) from HuggingFace on first enable, and check for model updates periodically. These are controlled, user-consented downloads of model weights only — no user data is transmitted. |
 | P2 | **No abstraction tax** | Sena never pays for a layer of abstraction it doesn't control. This is why Ollama is used only for model discovery, not inference. llama-cpp-rs gives us the metal. |
 | P3 | **Continuous, not reactive** | Sena is always running, always observing, always building context. It does not wait to be summoned. It is not a command-response system at its core. |
 | P4 | **One user, deeply** | Sena is not multi-tenant. It is built for one user on one machine. All personalization, identity, and memory is singular and non-extractable. |
@@ -27,6 +27,7 @@ These are non-negotiable. Any feature, subsystem, or implementation decision tha
 | P6 | **Fail silent, recover gracefully** | Sena must never crash the host OS or interrupt user work. Any subsystem failure must be isolated, logged, and recovered from without user interruption. |
 | P7 | **Earn trust through transparency** | Sena must always be able to tell the user exactly what it is observing, what it remembers, and why it said what it said. No black boxes from the user's perspective. |
 | P8 | **Local does not mean unprotected** | Being local-first is a privacy layer, not a security guarantee. All persistent sensitive state (SoulBox, ech0 graph, vector index) must be encrypted at rest. The local boundary is the first line of defense, not the only one. |
+| P9 | **Speech-first interaction** | Sena's primary communication surface is speech (STT for input, TTS for output). Text-based interfaces exist for development, debugging, and accessibility. Sena is not a chatbot; it is a listener and speaker. |
 
 ---
 
@@ -39,6 +40,7 @@ These are non-negotiable. Any feature, subsystem, or implementation decision tha
 - A **reasoning engine** powered by locally-run LLMs via llama-cpp-rs
 - A **dynamic prompt system** that composes inference inputs at runtime — no static prompts exist anywhere in the codebase
 - A **personalization engine** (SoulBox) that stores, evolves, and protects the user's identity model
+- A **speech-first ambient interface** that listens via STT and speaks via TTS — the user talks to Sena naturally, and Sena responds vocally with a warm, concise, Soul-driven personality
 - A **cross-platform native application** targeting macOS, Windows, and Linux from a single Rust codebase
 
 ---
@@ -50,6 +52,7 @@ This section is as important as section 3. These are hard boundaries.
 | NOT | Why |
 |---|---|
 | **Not a chatbot** | Sena does not exist to answer questions on demand. Conversational interaction is a surface, not the product. |
+| **Not a text-first chatbot** | The CLI exists for development and open-source transparency. Speech is the primary surface for general users. |
 | **Not a cloud service** | No telemetry, no sync, no remote inference. Ever, by default. |
 | **Not an Ollama wrapper** | Ollama is a model store. Sena extracts GGUFs and runs them directly. Ollama's inference server is never started or depended upon at runtime. |
 | **Not a plugin system (Phase 1)** | No third-party extensions in Phase 1. The architecture must be stable before it is extensible. |
@@ -87,6 +90,7 @@ Each subsystem has its own dedicated `docs/subsystems/` document. This section i
 | **Memory** | `crates/memory` | ech0 adapter — translates Sena events into ech0 ingestion/retrieval. ech0 owns graph (redb) + vector (usearch) storage. |
 | **Prompt** | `crates/prompt` | Dynamic prompt composition — zero static strings |
 | **Soul** | `crates/soul` | SoulBox: identity schema, event log, personalization state |
+| **Speech** | `crates/speech` | Local STT (Whisper) and TTS (Piper/platform) — Sena's primary user-facing interaction surface |
 | **CLI** | `crates/cli` | Thin binary entrypoint — wires runtime, zero business logic |
 | **xtask** | `xtask/` | Build automation, dev tooling, `cargo xtask dump` |
 
@@ -133,6 +137,11 @@ Each subsystem has its own dedicated `docs/subsystems/` document. This section i
 ### Phase 4 — Surface & Polish
 **Goal:** Sena is usable by the target user. System tray, basic UI, onboarding.
 
+**Status:** Complete.
+
+### Phase 5 — Speech: Primary Interaction Surface
+**Goal:** Sena speaks and listens. STT and TTS become the primary interaction surface. See `ROADMAP.md` for detailed milestones.
+
 ---
 
 ## 8. Non-Goals (Permanent)
@@ -141,7 +150,6 @@ These will never be in scope regardless of phase:
 
 - Browser extension or web-based interface
 - Cloud sync or remote access
-- Voice input/output (may be reconsidered post-Phase 4)
 - Mobile companion app
 - Social/sharing features
 - Monetization layer
