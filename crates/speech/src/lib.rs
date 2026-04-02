@@ -15,10 +15,12 @@ pub mod download;
 pub mod error;
 pub mod stt_actor;
 pub mod tts_actor;
+pub mod wakeword;
 
 pub use error::SpeechError;
 pub use stt_actor::SttActor;
 pub use tts_actor::TtsActor;
+pub use wakeword::WakewordActor;
 
 /// Audio buffer for PCM samples.
 #[derive(Debug, Clone)]
