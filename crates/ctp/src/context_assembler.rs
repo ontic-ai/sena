@@ -86,6 +86,9 @@ impl ContextAssembler {
             &keystroke_cadence,
         );
 
+        // Get visual context if recent (< 30 seconds old)
+        let visual_context = buffer.latest_visual_context();
+
         // Construct the snapshot
         ContextSnapshot {
             active_app,
@@ -94,6 +97,7 @@ impl ContextAssembler {
             keystroke_cadence,
             session_duration,
             inferred_task,
+            visual_context,
             timestamp: now,
         }
     }
@@ -288,6 +292,7 @@ mod tests {
                 category: "coding".to_string(),
                 confidence: 0.8,
             }),
+            visual_context: None,
             timestamp: Instant::now(),
         };
 
@@ -297,5 +302,63 @@ mod tests {
         assert_eq!(snapshot.active_app.app_name, "Code");
         assert_eq!(snapshot.clipboard_digest.as_deref(), Some("digest-123"));
         assert_eq!(snapshot.keystroke_cadence.events_per_minute, 88.0);
+    }
+
+    #[test]
+    fn assemble_includes_visual_context_when_recent() {
+        use bus::events::ctp::VisualContext;
+        use bus::events::platform_vision::ImageDigest;
+        use std::time::SystemTime;
+
+        let assembler = ContextAssembler::new();
+        let mut buffer = SignalBuffer::new(Duration::from_secs(300));
+        let session_start = Instant::now();
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(4))
+            .unwrap_or(SystemTime::now());
+
+        buffer.push_visual_context(
+            VisualContext {
+                digest: ImageDigest::new([3u8; 32]),
+                resolution: (2560, 1440),
+                age: Duration::from_secs(0),
+            },
+            capture_time,
+        );
+
+        let snapshot = assembler.assemble(&buffer, session_start);
+        let visual = snapshot
+            .visual_context
+            .expect("visual context should be included when capture is recent");
+
+        assert_eq!(visual.resolution, (2560, 1440));
+        assert!(visual.age >= Duration::from_secs(4));
+        assert!(visual.age < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn assemble_excludes_visual_context_when_capture_older_than_thirty_seconds() {
+        use bus::events::ctp::VisualContext;
+        use bus::events::platform_vision::ImageDigest;
+        use std::time::SystemTime;
+
+        let assembler = ContextAssembler::new();
+        let mut buffer = SignalBuffer::new(Duration::from_secs(300));
+        let session_start = Instant::now();
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(31))
+            .unwrap_or(SystemTime::now());
+
+        buffer.push_visual_context(
+            VisualContext {
+                digest: ImageDigest::new([4u8; 32]),
+                resolution: (1024, 768),
+                age: Duration::from_secs(0),
+            },
+            capture_time,
+        );
+
+        let snapshot = assembler.assemble(&buffer, session_start);
+        assert!(snapshot.visual_context.is_none());
     }
 }

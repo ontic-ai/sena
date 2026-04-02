@@ -1,8 +1,9 @@
 //! Rolling time-window accumulator for platform events.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use bus::events::ctp::VisualContext;
 use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
 
 /// Rolling time-window buffer for platform events.
@@ -14,6 +15,9 @@ pub struct SignalBuffer {
     clipboard_events: VecDeque<ClipboardDigest>,
     file_events: VecDeque<FileEvent>,
     keystroke_events: VecDeque<KeystrokeCadence>,
+    /// Latest visual context from screen capture. Stored separately as
+    /// captures may be infrequent and not part of the rolling window.
+    latest_visual_context: Option<(VisualContext, SystemTime)>,
     window_duration: Duration,
 }
 
@@ -25,6 +29,7 @@ impl SignalBuffer {
             clipboard_events: VecDeque::new(),
             file_events: VecDeque::new(),
             keystroke_events: VecDeque::new(),
+            latest_visual_context: None,
             window_duration,
         }
     }
@@ -47,6 +52,12 @@ impl SignalBuffer {
     /// Push a keystroke cadence event into the buffer.
     pub fn push_keystroke(&mut self, cadence: KeystrokeCadence) {
         self.keystroke_events.push_back(cadence);
+    }
+
+    /// Store a visual context from screen capture.
+    /// Replaces any previously stored visual context.
+    pub fn push_visual_context(&mut self, visual_context: VisualContext, timestamp: SystemTime) {
+        self.latest_visual_context = Some((visual_context, timestamp));
     }
 
     /// Remove events older than the window duration.
@@ -112,12 +123,33 @@ impl SignalBuffer {
     pub fn latest_keystroke(&self) -> Option<&KeystrokeCadence> {
         self.keystroke_events.back()
     }
+
+    /// Get the most recent visual context if age is less than 30 seconds.
+    /// Returns None if no visual context stored or if it's too old.
+    pub fn latest_visual_context(&self) -> Option<VisualContext> {
+        let now = SystemTime::now();
+        self.latest_visual_context
+            .as_ref()
+            .and_then(|(ctx, timestamp)| {
+                now.duration_since(*timestamp).ok().and_then(|age| {
+                    if age < Duration::from_secs(30) {
+                        let mut refreshed = ctx.clone();
+                        refreshed.age = age;
+                        Some(refreshed)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::events::ctp::VisualContext;
     use bus::events::platform::FileEventKind;
+    use bus::events::platform_vision::ImageDigest;
     use std::path::PathBuf;
 
     #[test]
@@ -228,5 +260,48 @@ mod tests {
 
         let files = buffer.recent_files();
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn latest_visual_context_returns_refreshed_age_when_recent() {
+        let mut buffer = SignalBuffer::new(Duration::from_secs(300));
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or(SystemTime::now());
+
+        buffer.push_visual_context(
+            VisualContext {
+                digest: ImageDigest::new([7u8; 32]),
+                resolution: (1920, 1080),
+                age: Duration::from_secs(0),
+            },
+            capture_time,
+        );
+
+        let visual = buffer
+            .latest_visual_context()
+            .expect("visual context should be present when capture is recent");
+        assert_eq!(visual.resolution, (1920, 1080));
+        assert!(visual.age >= Duration::from_secs(5));
+        assert!(visual.age < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn latest_visual_context_returns_none_when_capture_is_stale() {
+        let mut buffer = SignalBuffer::new(Duration::from_secs(300));
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(31))
+            .unwrap_or(SystemTime::now());
+
+        buffer.push_visual_context(
+            VisualContext {
+                digest: ImageDigest::new([9u8; 32]),
+                resolution: (1280, 720),
+                age: Duration::from_secs(0),
+            },
+            capture_time,
+        );
+
+        assert!(buffer.latest_visual_context().is_none());
     }
 }

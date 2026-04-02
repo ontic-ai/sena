@@ -6,10 +6,22 @@
 use std::time::{Duration, Instant};
 
 use super::platform::{FileEvent, KeystrokeCadence, WindowContext};
+use super::platform_vision::ImageDigest;
 
 /// Type alias for active application context.
 /// Re-uses WindowContext from platform module.
 pub type AppContext = WindowContext;
+
+/// Visual context captured from screen with privacy-safe digest.
+#[derive(Debug, Clone)]
+pub struct VisualContext {
+    /// SHA256 digest of the captured screen image.
+    pub digest: ImageDigest,
+    /// Resolution of the captured image (width, height).
+    pub resolution: (u32, u32),
+    /// Age of the capture relative to now.
+    pub age: Duration,
+}
 
 /// Inferred task category and confidence.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +50,8 @@ pub struct ContextSnapshot {
     pub session_duration: Duration,
     /// Inferred task, if any.
     pub inferred_task: Option<TaskHint>,
+    /// Visual context from screen capture, if recent and enabled.
+    pub visual_context: Option<VisualContext>,
     /// When this snapshot was captured.
     pub timestamp: Instant,
 }
@@ -105,6 +119,7 @@ mod tests {
             keystroke_cadence,
             session_duration: Duration::from_secs(3600),
             inferred_task: Some(task_hint),
+            visual_context: None,
             timestamp: now,
         };
 
@@ -145,6 +160,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(1800),
             inferred_task: None,
+            visual_context: None,
             timestamp: now,
         };
 
@@ -224,6 +240,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            visual_context: None,
             timestamp: now,
         }
     }

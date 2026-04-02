@@ -7,8 +7,8 @@ pub mod events;
 pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
 pub use events::{
-    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, Priority, SoulEvent, SpeechEvent,
-    SystemEvent, TransparencyEvent, TrayMenuItem,
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, PlatformVisionEvent, Priority, SoulEvent,
+    SpeechEvent, SystemEvent, TransparencyEvent, TrayMenuItem,
 };
 
 #[cfg(test)]
@@ -42,6 +42,7 @@ mod integration_tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            visual_context: None,
             timestamp: now,
         }
     }

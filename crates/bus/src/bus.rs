@@ -5,8 +5,8 @@ use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{
-    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, SoulEvent, SpeechEvent, SystemEvent,
-    TransparencyEvent,
+    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, PlatformVisionEvent, SoulEvent,
+    SpeechEvent, SystemEvent, TransparencyEvent,
 };
 
 /// Unified event type for all bus communication.
@@ -16,6 +16,8 @@ pub enum Event {
     System(SystemEvent),
     /// Platform-layer events (window, clipboard, file, keystroke).
     Platform(PlatformEvent),
+    /// Platform vision events (screen capture digests, visual context).
+    PlatformVision(PlatformVisionEvent),
     /// CTP (Continuous Thought Processing) events.
     CTP(CTPEvent),
     /// Inference-layer events (model discovery, inference requests/responses).

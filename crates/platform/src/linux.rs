@@ -71,6 +71,13 @@ impl PlatformAdapter for LinuxPlatform {
         // TODO M1.5: implement via X11 XGetImage and Wayland wl_shm
         Err(PlatformError::ScreenCaptureNotImplemented)
     }
+
+    fn screen_capture_png(&self, _max_dim: u32) -> Result<Vec<u8>, PlatformError> {
+        // TODO M5.1: implement via x11rb or Wayland on Linux
+        Err(PlatformError::NotAvailable(
+            "screen_capture_png not yet implemented on Linux".to_string(),
+        ))
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -383,6 +383,7 @@ mod tests {
                 category: "coding".to_string(),
                 confidence: 0.92,
             }),
+            visual_context: None,
             timestamp: std::time::Instant::now(),
         };
 
@@ -415,6 +416,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            visual_context: None,
             timestamp: std::time::Instant::now(),
         };
 

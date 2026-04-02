@@ -2,10 +2,14 @@
 
 use async_trait::async_trait;
 use bus::events::platform::{ClipboardDigest, FileEvent, KeystrokeCadence, WindowContext};
-use bus::{Actor, ActorError, Event, EventBus, PlatformEvent, SystemEvent};
+use bus::events::platform_vision::{CaptureReason, ImageDigest, ScreenCaptureEvent};
+use bus::{
+    Actor, ActorError, Event, EventBus, PlatformEvent,
+    PlatformVisionEvent as BusPlatformVisionEvent, SystemEvent,
+};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use sysinfo::System;
 use tokio::sync::{broadcast, mpsc};
 
@@ -29,6 +33,13 @@ pub struct PlatformActor {
     file_rx: Option<mpsc::Receiver<FileEvent>>,
     file_events_enabled: bool,
     file_watch_paths: Vec<PathBuf>,
+    /// Whether screen capture is enabled (from config).
+    screen_capture_enabled: bool,
+    /// Shared storage for the latest in-memory PNG frame.
+    /// This is NEVER broadcast on the bus — inference actor pulls from it directly.
+    latest_jpeg_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Track last screenshot digest for change detection.
+    last_screenshot_digest: Option<[u8; 32]>,
 }
 
 impl PlatformActor {
@@ -51,6 +62,9 @@ impl PlatformActor {
             file_rx: None,
             file_events_enabled: false,
             file_watch_paths: Vec::new(),
+            screen_capture_enabled: false,
+            latest_jpeg_frame: Arc::new(Mutex::new(None)),
+            last_screenshot_digest: None,
         }
     }
 
@@ -82,6 +96,17 @@ impl PlatformActor {
         self.file_events_enabled = !paths.is_empty();
         self.file_watch_paths = paths;
         self
+    }
+
+    /// Enable or disable periodic screen capture polling.
+    pub fn with_screen_capture_enabled(mut self, enabled: bool) -> Self {
+        self.screen_capture_enabled = enabled;
+        self
+    }
+
+    /// Return the shared in-memory frame store used for latest screen PNG bytes.
+    pub fn latest_frame_store(&self) -> Arc<Mutex<Option<Vec<u8>>>> {
+        Arc::clone(&self.latest_jpeg_frame)
     }
 
     /// Get the current poll interval (test-only).
@@ -151,6 +176,45 @@ impl PlatformActor {
         }
         Ok(())
     }
+
+    async fn poll_screen_capture(&mut self, bus: &Arc<EventBus>) {
+        match self.adapter.screen_capture() {
+            Ok(digest) => {
+                let digest: ImageDigest = digest;
+                let digest_bytes = *digest.as_bytes();
+                if self.last_screenshot_digest.as_ref() != Some(&digest_bytes) {
+                    self.last_screenshot_digest = Some(digest_bytes);
+
+                    match self.adapter.screen_capture_png(512) {
+                        Ok(png_bytes) => {
+                            if let Ok(mut frame) = self.latest_jpeg_frame.lock() {
+                                *frame = Some(png_bytes);
+                            }
+                        }
+                        Err(_) => {
+                            // Non-fatal: PNG capture unavailable on this platform.
+                            // Clear stale frame so inference does not reuse old visual context.
+                            if let Ok(mut frame) = self.latest_jpeg_frame.lock() {
+                                *frame = None;
+                            }
+                        }
+                    }
+
+                    let event = BusPlatformVisionEvent::ScreenCaptureEvent(ScreenCaptureEvent {
+                        timestamp: SystemTime::now(),
+                        image_digest: digest,
+                        resolution: (0, 0),
+                        capture_reason: CaptureReason::ContextSwitch,
+                    });
+
+                    let _ = bus.broadcast(Event::PlatformVision(event)).await;
+                }
+            }
+            Err(_) => {
+                // Non-fatal: screen capture unavailable on this platform.
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -213,6 +277,12 @@ impl Actor for PlatformActor {
                     // Only poll clipboard if enabled in config
                     if self.clipboard_enabled {
                         self.check_clipboard_change().await?;
+                    }
+
+                    if self.screen_capture_enabled {
+                        if let Some(bus) = self.bus.as_ref().cloned() {
+                            self.poll_screen_capture(&bus).await;
+                        }
                     }
                 }
                 event = async {
@@ -286,6 +356,7 @@ mod tests {
     use super::*;
     use crate::factory::create_platform_adapter;
     use bus::events::platform::PlatformEvent;
+    use bus::events::platform_vision::ImageDigest;
     use std::time::Instant;
     use tokio::sync::mpsc;
 
@@ -324,6 +395,50 @@ mod tests {
         ) -> Result<bus::events::platform_vision::ImageDigest, crate::error::PlatformError>
         {
             Err(crate::error::PlatformError::ScreenCaptureNotImplemented)
+        }
+
+        fn screen_capture_png(
+            &self,
+            _max_dim: u32,
+        ) -> Result<Vec<u8>, crate::error::PlatformError> {
+            Err(crate::error::PlatformError::NotAvailable(
+                "screen_capture_png not implemented in test adapter".to_string(),
+            ))
+        }
+    }
+
+    struct TestScreenCaptureAdapter {
+        digest: ImageDigest,
+        png: Vec<u8>,
+    }
+
+    impl PlatformAdapter for TestScreenCaptureAdapter {
+        fn active_window(&self) -> Option<WindowContext> {
+            None
+        }
+
+        fn clipboard_digest(&self) -> Option<ClipboardDigest> {
+            None
+        }
+
+        fn subscribe_file_events(
+            &self,
+            _tx: mpsc::Sender<bus::events::platform::FileEvent>,
+            _paths: &[std::path::PathBuf],
+        ) {
+        }
+
+        fn subscribe_keystroke_patterns(&self, _tx: mpsc::Sender<KeystrokeCadence>) {}
+
+        fn screen_capture(&self) -> Result<ImageDigest, crate::error::PlatformError> {
+            Ok(self.digest.clone())
+        }
+
+        fn screen_capture_png(
+            &self,
+            _max_dim: u32,
+        ) -> Result<Vec<u8>, crate::error::PlatformError> {
+            Ok(self.png.clone())
         }
     }
 
@@ -516,5 +631,25 @@ mod tests {
         assert_eq!(cadence.events_per_minute, 132.0);
         assert!(!cadence.burst_detected);
         assert_eq!(cadence.idle_duration, Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn screen_capture_enabled_stores_frame_in_arc_when_capture_succeeds() {
+        let expected_png = vec![137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
+        let adapter: Box<dyn PlatformAdapter> = Box::new(TestScreenCaptureAdapter {
+            digest: ImageDigest::new([3u8; 32]),
+            png: expected_png.clone(),
+        });
+        let mut actor = PlatformActor::new(adapter).with_screen_capture_enabled(true);
+        let bus = Arc::new(EventBus::new());
+
+        actor.poll_screen_capture(&bus).await;
+
+        let frame_store = actor.latest_frame_store();
+        let frame = frame_store
+            .lock()
+            .expect("frame store lock should succeed")
+            .clone();
+        assert_eq!(frame, Some(expected_png));
     }
 }

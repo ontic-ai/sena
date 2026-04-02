@@ -8,6 +8,7 @@ use bus::events::ctp::ContextSnapshot;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
+use bus::events::platform_vision::{PlatformVisionEvent, ScreenCaptureEvent};
 use bus::events::transparency::TransparencyQuery;
 use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
 use bus::{Actor, ActorError, Event, EventBus};
@@ -24,6 +25,7 @@ pub struct CTPActor {
     buffer: SignalBuffer,
     assembler: ContextAssembler,
     gate: TriggerGate,
+    screen_capture_enabled: bool,
     latest_snapshot: Option<ContextSnapshot>,
     session_start: Instant,
     bus: Option<Arc<EventBus>>,
@@ -47,6 +49,7 @@ impl CTPActor {
             buffer: SignalBuffer::new(buffer_window),
             assembler: ContextAssembler::new(),
             gate: TriggerGate::new(trigger_interval),
+            screen_capture_enabled: false,
             latest_snapshot: None,
             session_start: Instant::now(),
             bus: None,
@@ -58,6 +61,12 @@ impl CTPActor {
     /// Configure trigger sensitivity in [0.0, 1.0].
     pub fn with_trigger_sensitivity(mut self, sensitivity: f64) -> Self {
         self.gate.set_sensitivity(sensitivity);
+        self
+    }
+
+    /// Enable or disable screen capture ingestion into visual context.
+    pub fn with_screen_capture_enabled(mut self, enabled: bool) -> Self {
+        self.screen_capture_enabled = enabled;
         self
     }
 }
@@ -105,6 +114,10 @@ impl Actor for CTPActor {
                                 // Handle platform events
                                 Event::Platform(platform_event) => {
                                     self.handle_platform_event(platform_event);
+                                }
+                                // Handle platform vision events
+                                Event::PlatformVision(vision_event) if self.screen_capture_enabled => {
+                                    self.handle_platform_vision_event(vision_event);
                                 }
                                 // Handle transparency queries
                                 Event::Transparency(TransparencyEvent::QueryRequested(
@@ -199,6 +212,39 @@ impl CTPActor {
         self.refresh_snapshot();
     }
 
+    /// Handle a platform vision event by storing visual context in signal buffer.
+    fn handle_platform_vision_event(&mut self, event: PlatformVisionEvent) {
+        match event {
+            PlatformVisionEvent::ScreenCaptureEvent(capture_event) => {
+                self.handle_screen_capture(capture_event);
+            }
+        }
+
+        self.refresh_snapshot();
+    }
+
+    /// Handle a screen capture event by converting it to VisualContext and storing it.
+    fn handle_screen_capture(&mut self, event: ScreenCaptureEvent) {
+        use std::time::SystemTime;
+
+        // Calculate age of the capture
+        let now = SystemTime::now();
+        let age = now
+            .duration_since(event.timestamp)
+            .unwrap_or(std::time::Duration::from_secs(0));
+
+        // Create VisualContext
+        let visual_context = bus::events::ctp::VisualContext {
+            digest: event.image_digest,
+            resolution: event.resolution,
+            age,
+        };
+
+        // Store in signal buffer with the original timestamp
+        self.buffer
+            .push_visual_context(visual_context, event.timestamp);
+    }
+
     /// Handle a `CurrentObservation` transparency query and broadcast the response.
     async fn handle_observation_query(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
         let response = handle_current_observation(self.refresh_snapshot());
@@ -215,7 +261,9 @@ impl CTPActor {
 mod tests {
     use super::*;
     use bus::events::platform::{ClipboardDigest, KeystrokeCadence, PlatformEvent, WindowContext};
+    use bus::events::platform_vision::{CaptureReason, ImageDigest, PlatformVisionEvent};
     use bus::events::transparency::TransparencyQuery;
+    use std::time::SystemTime;
 
     #[tokio::test]
     async fn test_ctp_actor_starts_and_stops() {
@@ -425,5 +473,64 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screen_capture_event_adds_recent_visual_context_to_next_snapshot() {
+        let mut actor = CTPActor::new(
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            Duration::from_millis(100),
+        )
+        .with_screen_capture_enabled(true);
+
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(3))
+            .unwrap_or(SystemTime::now());
+        let digest = ImageDigest::new([5u8; 32]);
+
+        actor.handle_platform_vision_event(PlatformVisionEvent::ScreenCaptureEvent(
+            ScreenCaptureEvent {
+                timestamp: capture_time,
+                image_digest: digest.clone(),
+                resolution: (1920, 1080),
+                capture_reason: CaptureReason::ContextSwitch,
+            },
+        ));
+
+        let snapshot = actor.refresh_snapshot();
+        let visual = snapshot
+            .visual_context
+            .expect("recent visual context should be present in snapshot");
+        assert_eq!(visual.digest.as_bytes(), digest.as_bytes());
+        assert_eq!(visual.resolution, (1920, 1080));
+        assert!(visual.age >= Duration::from_secs(3));
+        assert!(visual.age < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn screen_capture_event_older_than_thirty_seconds_is_not_included() {
+        let mut actor = CTPActor::new(
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            Duration::from_millis(100),
+        )
+        .with_screen_capture_enabled(true);
+
+        let capture_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(31))
+            .unwrap_or(SystemTime::now());
+
+        actor.handle_platform_vision_event(PlatformVisionEvent::ScreenCaptureEvent(
+            ScreenCaptureEvent {
+                timestamp: capture_time,
+                image_digest: ImageDigest::new([8u8; 32]),
+                resolution: (1280, 720),
+                capture_reason: CaptureReason::ScheduledSnapshot,
+            },
+        ));
+
+        let snapshot = actor.refresh_snapshot();
+        assert!(snapshot.visual_context.is_none());
     }
 }

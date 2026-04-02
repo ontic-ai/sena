@@ -13,12 +13,17 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 
 # Audio I/O (cross-platform)
-# TODO M4.5/M4.6: Enable when implementing actual audio capture/playback
-# cpal = "0.15"
+cpal = "0.15"
+
+# TTS backend (platform-native via unified interface)
+tts = "0.26"
 
 # STT backend (Whisper.cpp)
-# TODO M4.5: Enable when implementing STT
-# whisper-rs = "0.12"
+# NOTE: whisper-rs requires whisper.cpp C++ library
+# For testing/development without whisper.cpp, use Mock backend
+whisper-rs = { version = "0.12", optional = true }
 
-# TTS backend (research needed for local Rust TTS library)
-# TODO M4.6: Add appropriate TTS library
+[features]
+default = []
+# Enable real whisper.cpp backend (requires whisper.cpp installed)
+whisper = ["whisper-rs"]

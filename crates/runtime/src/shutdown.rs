@@ -96,7 +96,7 @@ mod tests {
     use crate::registry::ActorRegistry;
     use bus::EventBus;
     use crypto::MasterKey;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -116,6 +116,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
         };
@@ -153,6 +154,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
         };
@@ -185,6 +187,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: _rx,
             memory_monitor_handle: None,
         };
@@ -216,6 +219,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
         };

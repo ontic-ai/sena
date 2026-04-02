@@ -129,6 +129,13 @@ impl PlatformAdapter for MacOSPlatform {
 
         Ok(ImageDigest::new(digest_bytes))
     }
+
+    fn screen_capture_png(&self, _max_dim: u32) -> Result<Vec<u8>, PlatformError> {
+        // TODO M5.1: implement via ScreenCaptureKit on macOS
+        Err(PlatformError::NotAvailable(
+            "screen_capture_png not yet implemented on macOS".to_string(),
+        ))
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

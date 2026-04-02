@@ -69,6 +69,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(3600),
             inferred_task: None,
+            visual_context: None,
             timestamp: now,
         }
     }

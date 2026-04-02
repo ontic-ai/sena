@@ -54,6 +54,16 @@ pub trait PlatformAdapter: Send + 'static {
     /// Returns Err(PlatformError::ScreenCaptureNotImplemented) if not yet implemented
     /// on this platform.
     fn screen_capture(&self) -> Result<ImageDigest, PlatformError>;
+
+    /// Capture the screen and return PNG-encoded bytes, downscaled so neither
+    /// dimension exceeds `max_dim` pixels.
+    ///
+    /// PRIVACY-CRITICAL: The returned bytes are transient, in-process only.
+    /// They MUST NOT be written to disk, the Soul database, ech0, or any event bus message.
+    ///
+    /// Returns Err(PlatformError::NotAvailable(...)) on platforms where not
+    /// yet implemented.
+    fn screen_capture_png(&self, max_dim: u32) -> Result<Vec<u8>, PlatformError>;
 }
 
 /// Spawn a privacy-safe global keystroke cadence monitor.

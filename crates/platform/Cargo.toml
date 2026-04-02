@@ -16,6 +16,7 @@ rdev = { workspace = true }
 notify = { workspace = true }
 sysinfo = "0.32"
 sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true }
