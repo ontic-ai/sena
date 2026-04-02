@@ -38,9 +38,6 @@ fn init_llama_cpp() -> Result<&'static LlamaCppInit, BackendError> {
         .map_err(|e| BackendError::ModelLoadFailed(e.clone()))
 }
 
-/// Default context size cap (tokens).
-const DEFAULT_CTX_SIZE: u32 = 4096;
-
 /// Production LLM backend backed by llama-cpp-2.
 pub struct LlamaBackend {
     model: Option<LlamaModel>,
@@ -115,7 +112,7 @@ impl LlmBackend for LlamaBackend {
         let backend = init_llama_cpp()?;
 
         // Tokenize prompt
-        let tokens = model
+        let mut tokens = model
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| BackendError::InferenceFailed(format!("tokenization: {e}")))?;
 
@@ -123,10 +120,27 @@ impl LlmBackend for LlamaBackend {
             return Ok(String::new());
         }
 
-        // Context size: min of model training context and our cap, but at least prompt length
+        // Context size: hard-capped to avoid backend instability on boundary values.
         let model_ctx = model.n_ctx_train();
-        let ctx_size = std::cmp::min(model_ctx, DEFAULT_CTX_SIZE);
-        let ctx_size = std::cmp::max(ctx_size, tokens.len() as u32 + params.max_tokens as u32);
+        let ctx_size = std::cmp::min(model_ctx, params.ctx_size);
+        let mut max_tokens = params.max_tokens;
+
+        // Keep newest prompt tokens when the prompt would exceed context budget.
+        if tokens.len().saturating_add(max_tokens) > ctx_size as usize {
+            let prompt_budget = (ctx_size as usize).saturating_sub(max_tokens).max(1);
+            if tokens.len() > prompt_budget {
+                let start = tokens.len().saturating_sub(prompt_budget);
+                tokens = tokens[start..].to_vec();
+            }
+            max_tokens = max_tokens.min((ctx_size as usize).saturating_sub(tokens.len()));
+        }
+
+        if max_tokens == 0 {
+            return Err(BackendError::InferenceFailed(
+                "context budget exhausted by prompt".into(),
+            ));
+        }
+
         let n_ctx = NonZeroU32::new(ctx_size)
             .ok_or_else(|| BackendError::InferenceFailed("context size is zero".into()))?;
 
@@ -152,10 +166,10 @@ impl LlmBackend for LlamaBackend {
         ]);
 
         // Autoregressive generation loop
-        let mut output_tokens: Vec<LlamaToken> = Vec::with_capacity(params.max_tokens);
+        let mut output_tokens: Vec<LlamaToken> = Vec::with_capacity(max_tokens);
         let mut n_decoded = tokens.len();
 
-        for _ in 0..params.max_tokens {
+        for _ in 0..max_tokens {
             let new_token = sampler.sample(&ctx, -1);
             sampler.accept(new_token);
 
@@ -248,6 +262,7 @@ impl LlmBackend for LlamaBackend {
             temperature: 0.1,
             top_p: 0.9,
             max_tokens: 512,
+            ctx_size: 2048,
         };
 
         let result = self.infer(text, &params)?;

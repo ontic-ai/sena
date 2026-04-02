@@ -97,6 +97,8 @@ pub struct InferenceParams {
     pub top_p: f32,
     /// Maximum tokens to generate.
     pub max_tokens: usize,
+    /// Context window size.
+    pub ctx_size: u32,
 }
 
 impl Default for InferenceParams {
@@ -104,7 +106,8 @@ impl Default for InferenceParams {
         Self {
             temperature: 0.7,
             top_p: 0.9,
-            max_tokens: 2048,
+            max_tokens: 512,
+            ctx_size: 2048,
         }
     }
 }
@@ -163,6 +166,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inference_params_default_has_expected_values() {
+        let params = InferenceParams::default();
+        assert_eq!(params.temperature, 0.7);
+        assert_eq!(params.top_p, 0.9);
+        assert_eq!(params.max_tokens, 512);
+        assert_eq!(params.ctx_size, 2048);
+    }
+
+    #[test]
     fn auto_detect_returns_valid_backend() {
         // Should never panic and always return a valid backend type.
         let backend = BackendType::auto_detect();
@@ -217,7 +229,7 @@ mod tests {
         let params = InferenceParams::default();
         assert!((params.temperature - 0.7).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
-        assert_eq!(params.max_tokens, 2048);
+        assert_eq!(params.max_tokens, 512);
     }
 
     #[test]

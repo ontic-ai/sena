@@ -1,6 +1,6 @@
 //! Boot sequence orchestration.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bus::events::system::ActorFailureInfo;
@@ -21,6 +21,8 @@ pub struct Runtime {
     pub is_first_boot: bool,
     #[allow(dead_code)]
     pub(crate) master_key: MasterKey,
+    /// Shared latest in-memory vision frame from platform actor.
+    pub vision_frame_store: Arc<Mutex<Option<Vec<u8>>>>,
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
     /// Memory monitor task handle (if enabled).
     pub(crate) memory_monitor_handle: Option<tokio::task::JoinHandle<()>>,
@@ -115,7 +117,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_poll_interval(Duration::from_millis(500))
         .with_clipboard_enabled(config.clipboard_observation_enabled)
         .with_file_watch_paths(config.file_watch_paths.clone())
-        .with_idle_threshold(config.platform_idle_cpu_threshold_percent);
+        .with_idle_threshold(config.platform_idle_cpu_threshold_percent)
+        .with_screen_capture_enabled(config.screen_capture_enabled);
+    // Shared between platform actor (writer) and inference actor (reader).
+    // Must be obtained before spawn_actor consumes platform_actor.
+    let vision_frame_store = platform_actor.latest_frame_store();
     spawn_actor(&bus, &mut registry, platform_actor);
 
     // Step 7: Initialize and spawn CTP actor
@@ -123,7 +129,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let ctp_buffer_window = Duration::from_secs(300);
     let ctp_poll_interval = Duration::from_secs(1);
     let ctp_actor = ctp::CTPActor::new(ctp_trigger_interval, ctp_buffer_window, ctp_poll_interval)
-        .with_trigger_sensitivity(config.ctp_trigger_sensitivity);
+        .with_trigger_sensitivity(config.ctp_trigger_sensitivity)
+        .with_screen_capture_enabled(config.screen_capture_enabled);
     spawn_actor(&bus, &mut registry, ctp_actor);
 
     // Step 8: Initialize and spawn memory actor
@@ -153,7 +160,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
     };
     let inference_backend = inference::LlamaBackend::new();
     let inference_actor = inference::InferenceActor::new(models_dir, Box::new(inference_backend))
-        .with_preferred_model(config.preferred_model.clone());
+        .with_preferred_model(config.preferred_model.clone())
+        .with_vision_frame_store(Arc::clone(&vision_frame_store))
+        .with_tts_enabled(config.speech_enabled)
+        .with_inference_max_tokens(config.inference_max_tokens)
+        .with_inference_ctx_size(config.inference_ctx_size);
     spawn_actor(&bus, &mut registry, inference_actor);
 
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
@@ -161,13 +172,18 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 11: Speech actors (STT/TTS) — spawn if speech_enabled is true.
     if config.speech_enabled {
-        let stt_actor = speech::SttActor::new(speech::SttBackend::Mock);
+        let stt_actor = speech::SttActor::new(
+            speech::SttBackend::WhisperCpp,
+            // On-demand mode requires a production VoiceInputDetected emitter path,
+            // which is not wired yet. Force always-listening to keep STT functional.
+            true,
+            config.stt_energy_threshold,
+            config.whisper_model_path.clone(),
+        );
         spawn_actor(&bus, &mut registry, stt_actor);
 
-        let tts_actor = speech::TtsActor::new(speech::TtsBackend::Mock);
+        let tts_actor = speech::TtsActor::new(speech::TtsBackend::SystemPlatform);
         spawn_actor(&bus, &mut registry, tts_actor);
-    } else {
-        eprintln!("[boot] speech disabled in config");
     }
 
     // Step 12: Initialize system tray (non-fatal — Sena works without it).
@@ -189,6 +205,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         tray_manager,
         is_first_boot,
         master_key,
+        vision_frame_store,
         _keep_alive: keep_alive,
         memory_monitor_handle: Some(memory_monitor_handle),
     })
@@ -364,6 +381,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key,
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
         };
@@ -488,6 +506,7 @@ mod tests {
             tray_manager,
             is_first_boot: false,
             master_key: MasterKey::from_bytes([0u8; 32]),
+            vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
         };

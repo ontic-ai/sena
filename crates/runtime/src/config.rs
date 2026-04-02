@@ -30,6 +30,11 @@ pub struct SenaConfig {
     #[serde(default = "default_clipboard_observation_enabled")]
     pub clipboard_observation_enabled: bool,
 
+    /// Whether screen capture visual context is enabled for CTP.
+    /// Default: false
+    #[serde(default = "default_screen_capture_enabled")]
+    pub screen_capture_enabled: bool,
+
     /// Maximum number of inference exchanges kept in working memory per cycle.
     /// Default: 10
     #[serde(default = "default_working_memory_max_exchanges")]
@@ -101,6 +106,34 @@ pub struct SenaConfig {
     /// Default: false (disabled)
     #[serde(default = "default_speech_enabled")]
     pub speech_enabled: bool,
+
+    /// Whether voice input is always listening (continuous mode).
+    /// If false, STT actor only processes on-demand VoiceInputDetected events.
+    /// Default: false
+    #[serde(default = "default_voice_always_listening")]
+    pub voice_always_listening: bool,
+
+    /// Custom Whisper model path for STT.
+    /// If None, uses default: ~/.sena/models/whisper/ggml-small.bin
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whisper_model_path: Option<String>,
+
+    /// Energy threshold for voice activity detection (RMS > threshold).
+    /// Default: 0.01
+    #[serde(default = "default_stt_energy_threshold")]
+    pub stt_energy_threshold: f32,
+
+    /// Maximum tokens to generate per inference response.
+    /// Hardware-aware: lower values use less VRAM/RAM, higher values allow longer responses.
+    /// Default: 512
+    #[serde(default = "default_inference_max_tokens")]
+    pub inference_max_tokens: usize,
+
+    /// Context window size for inference. Determines how much prompt + response fits.
+    /// Must not exceed model's training context. Larger values use more VRAM/RAM.
+    /// Default: 2048
+    #[serde(default = "default_inference_ctx_size")]
+    pub inference_ctx_size: u32,
 }
 
 impl Default for SenaConfig {
@@ -110,6 +143,7 @@ impl Default for SenaConfig {
             shutdown_timeout_secs: default_shutdown_timeout_secs(),
             file_watch_paths: Vec::new(),
             clipboard_observation_enabled: default_clipboard_observation_enabled(),
+            screen_capture_enabled: default_screen_capture_enabled(),
             working_memory_max_exchanges: default_working_memory_max_exchanges(),
             working_memory_token_budget: default_working_memory_token_budget(),
             soul_summary_max_events: default_soul_summary_max_events(),
@@ -123,6 +157,11 @@ impl Default for SenaConfig {
             memory_limit_mb: default_memory_limit_mb(),
             platform_idle_cpu_threshold_percent: default_platform_idle_cpu_threshold_percent(),
             speech_enabled: default_speech_enabled(),
+            voice_always_listening: default_voice_always_listening(),
+            whisper_model_path: None,
+            stt_energy_threshold: default_stt_energy_threshold(),
+            inference_max_tokens: default_inference_max_tokens(),
+            inference_ctx_size: default_inference_ctx_size(),
         }
     }
 }
@@ -135,6 +174,9 @@ fn default_shutdown_timeout_secs() -> u64 {
 }
 fn default_clipboard_observation_enabled() -> bool {
     true
+}
+fn default_screen_capture_enabled() -> bool {
+    false
 }
 fn default_working_memory_max_exchanges() -> usize {
     10
@@ -168,6 +210,18 @@ fn default_platform_idle_cpu_threshold_percent() -> f32 {
 }
 fn default_speech_enabled() -> bool {
     false
+}
+fn default_voice_always_listening() -> bool {
+    true
+}
+fn default_stt_energy_threshold() -> f32 {
+    0.01
+}
+fn default_inference_max_tokens() -> usize {
+    512
+}
+fn default_inference_ctx_size() -> u32 {
+    2048
 }
 
 /// Configuration-related errors.
@@ -249,10 +303,13 @@ mod tests {
         assert_eq!(config.shutdown_timeout_secs, 5);
         assert!(config.file_watch_paths.is_empty());
         assert!(config.clipboard_observation_enabled);
+        assert!(!config.screen_capture_enabled);
         assert_eq!(config.working_memory_max_exchanges, 10);
         assert_eq!(config.working_memory_token_budget, 4096);
         assert_eq!(config.soul_summary_max_events, 50);
         assert_eq!(config.platform_idle_cpu_threshold_percent, 10.0);
+        assert_eq!(config.inference_max_tokens, 512);
+        assert_eq!(config.inference_ctx_size, 2048);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
 use bus::events::soul::{SoulSummary, SoulSummaryRequested};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
-use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SystemEvent};
+use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -58,6 +58,16 @@ pub struct InferenceActor {
     last_snapshot: Option<ContextSnapshot>,
     /// Recent conversation history (user, assistant pairs), capped at 5.
     conversation_history: Vec<(String, String)>,
+    /// Shared in-memory vision frame store from platform actor.
+    /// Holds latest PNG bytes for vision-capable model prompting.
+    /// In-memory only: NEVER written to bus, Soul, ech0, or disk.
+    latest_vision_frame: Option<Arc<Mutex<Option<Vec<u8>>>>>,
+    /// Whether TTS is enabled. When true, emit SpeakRequested after responses.
+    tts_enabled: bool,
+    /// Configured max tokens for inference responses.
+    inference_max_tokens: usize,
+    /// Configured context window size.
+    inference_ctx_size: u32,
 }
 
 impl InferenceActor {
@@ -83,6 +93,10 @@ impl InferenceActor {
             last_inference_state: None,
             last_snapshot: None,
             conversation_history: Vec::new(),
+            latest_vision_frame: None,
+            tts_enabled: false,
+            inference_max_tokens: 512,
+            inference_ctx_size: 2048,
         }
     }
 
@@ -92,6 +106,30 @@ impl InferenceActor {
     /// it will be used for inference instead of the largest auto-selected model.
     pub fn with_preferred_model(mut self, preferred: Option<String>) -> Self {
         self.preferred_model = preferred;
+        self
+    }
+
+    /// Set the in-memory vision frame store from the platform actor.
+    pub fn with_vision_frame_store(mut self, store: Arc<Mutex<Option<Vec<u8>>>>) -> Self {
+        self.latest_vision_frame = Some(store);
+        self
+    }
+
+    /// Enable or disable TTS output after inference responses.
+    pub fn with_tts_enabled(mut self, enabled: bool) -> Self {
+        self.tts_enabled = enabled;
+        self
+    }
+
+    /// Configure max tokens for inference responses.
+    pub fn with_inference_max_tokens(mut self, max_tokens: usize) -> Self {
+        self.inference_max_tokens = max_tokens;
+        self
+    }
+
+    /// Configure context window size.
+    pub fn with_inference_ctx_size(mut self, ctx_size: u32) -> Self {
+        self.inference_ctx_size = ctx_size;
         self
     }
 
@@ -201,12 +239,17 @@ impl InferenceActor {
 
                 let backend_clone = backend;
                 let prompt_len = prompt.len();
+                let params = InferenceParams {
+                    max_tokens: self.inference_max_tokens,
+                    ctx_size: self.inference_ctx_size,
+                    ..InferenceParams::default()
+                };
                 let result = tokio::task::spawn_blocking(move || {
                     let guard = backend_clone
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
                     guard
-                        .infer(&wrapped_prompt, &InferenceParams::default())
+                        .infer(&wrapped_prompt, &params)
                         .map_err(|e| format!("{}", e))
                 })
                 .await;
@@ -324,12 +367,17 @@ impl InferenceActor {
         let wrapped_prompt = template.wrap(&prompt);
 
         let backend_clone = self.backend.clone();
+        let params = InferenceParams {
+            max_tokens: self.inference_max_tokens,
+            ctx_size: self.inference_ctx_size,
+            ..InferenceParams::default()
+        };
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
             guard
-                .infer(&wrapped_prompt, &InferenceParams::default())
+                .infer(&wrapped_prompt, &params)
                 .map_err(|e| format!("{}", e))
         })
         .await
@@ -354,6 +402,7 @@ impl InferenceActor {
         snapshot: Option<&ContextSnapshot>,
         history: &[(String, String)],
         soul_summary: Option<&SoulSummary>,
+        vision_png_base64: Option<&str>,
     ) -> String {
         let mut parts = Vec::new();
 
@@ -407,6 +456,11 @@ impl InferenceActor {
             parts.push(format!("## Current Context\n{}", ctx_parts.join("\n")));
         }
 
+        // Add visual context for vision-capable models
+        if let Some(b64) = vision_png_base64 {
+            parts.push(format!("## Visual Context\n[image/png;base64,{}]", b64));
+        }
+
         // Add the current user message last
         parts.push(format!("## User\n{}", user_message));
 
@@ -440,6 +494,15 @@ impl InferenceActor {
             .await
             .ok();
 
+        // Acquire vision frame if model is vision-capable
+        let vision_base64: Option<String> = self
+            .current_model_name
+            .as_deref()
+            .filter(|name| is_vision_capable_model(name))
+            .and(self.latest_vision_frame.as_ref())
+            .and_then(|store| store.lock().ok())
+            .and_then(|guard| guard.as_ref().map(|bytes| encode_base64(bytes)));
+
         // Build enriched prompt with soul context, memory, and conversation history
         let enriched_prompt = Self::build_enriched_prompt(
             &prompt,
@@ -447,6 +510,7 @@ impl InferenceActor {
             self.last_snapshot.as_ref(),
             &self.conversation_history,
             soul_summary.as_ref(),
+            vision_base64.as_deref(),
         );
 
         // Detect chat template and wrap enriched prompt
@@ -459,12 +523,17 @@ impl InferenceActor {
 
         let backend_clone = self.backend.clone();
         let prompt_len = enriched_prompt.len();
+        let params = InferenceParams {
+            max_tokens: self.inference_max_tokens,
+            ctx_size: self.inference_ctx_size,
+            ..InferenceParams::default()
+        };
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
             guard
-                .infer(&wrapped_prompt, &InferenceParams::default())
+                .infer(&wrapped_prompt, &params)
                 .map_err(|e| format!("{}", e))
         })
         .await
@@ -498,6 +567,17 @@ impl InferenceActor {
             working_memory_context: memory_chunks,
             rounds_completed: 1,
         });
+
+        // Optionally speak the response via TTS
+        if self.tts_enabled {
+            let tts_request_id = request_id.saturating_mul(4000);
+            let _ = bus
+                .broadcast(Event::Speech(SpeechEvent::SpeakRequested {
+                    text: result.clone(),
+                    request_id: tts_request_id,
+                }))
+                .await;
+        }
 
         Ok((result, token_count))
     }
@@ -754,6 +834,59 @@ impl InferenceActor {
 
         Ok((final_text, token_count))
     }
+}
+
+/// Returns true if the model is likely vision-capable based on its name.
+///
+/// Checks for known multimodal model name patterns. This is best-effort
+/// heuristic detection - models whose names do not match these patterns
+/// will use text-only prompts even if they have vision capability.
+fn is_vision_capable_model(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("llava")
+        || n.contains("bakllava")
+        || n.contains("vision")
+        || n.contains("minicpm-v")
+        || n.contains("phi-3-v")
+        || n.contains("phi3-v")
+        || n.contains("moondream")
+        || n.contains("idefics")
+        || n.contains("cogvlm")
+}
+
+fn encode_base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+
+    for chunk in data.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(char::from(TABLE[((n >> 18) & 63) as usize]));
+        out.push(char::from(TABLE[((n >> 12) & 63) as usize]));
+        out.push(if chunk.len() > 1 {
+            char::from(TABLE[((n >> 6) & 63) as usize])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(TABLE[(n & 63) as usize])
+        } else {
+            '='
+        });
+    }
+
+    out
 }
 
 #[async_trait]
@@ -1475,8 +1608,14 @@ mod tests {
 
     #[test]
     fn build_enriched_prompt_includes_user_message() {
-        let prompt =
-            InferenceActor::build_enriched_prompt("What do I remember?", &[], None, &[], None);
+        let prompt = InferenceActor::build_enriched_prompt(
+            "What do I remember?",
+            &[],
+            None,
+            &[],
+            None,
+            None,
+        );
 
         // Should include user message section
         assert!(prompt.contains("## User\nWhat do I remember?"));
@@ -1503,6 +1642,7 @@ mod tests {
             None,
             &[],
             None,
+            None,
         );
 
         assert!(prompt.contains("## Relevant Memory"));
@@ -1521,7 +1661,7 @@ mod tests {
         ];
 
         let prompt =
-            InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history, None);
+            InferenceActor::build_enriched_prompt("Tell me more", &[], None, &history, None, None);
 
         assert!(prompt.contains("## Recent Conversation"));
         assert!(prompt.contains("What is Rust?"));
@@ -1552,11 +1692,12 @@ mod tests {
             },
             session_duration: Duration::from_secs(3600),
             inferred_task: None,
+            visual_context: None,
             timestamp: Instant::now(),
         };
 
         let prompt =
-            InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[], None);
+            InferenceActor::build_enriched_prompt("Help me", &[], Some(&snapshot), &[], None, None);
 
         assert!(prompt.contains("## Current Context"));
         assert!(prompt.contains("VS Code"));
@@ -1587,6 +1728,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(1200),
             inferred_task: None,
+            visual_context: None,
             timestamp: Instant::now(),
         };
 
@@ -1607,6 +1749,7 @@ mod tests {
             Some(&snapshot),
             &history,
             None,
+            None,
         );
 
         // Should have all sections in proper order
@@ -1625,5 +1768,21 @@ mod tests {
         assert!(memory_pos < history_pos);
         assert!(history_pos < context_pos);
         assert!(context_pos < user_pos);
+    }
+
+    #[test]
+    fn is_vision_capable_model_detects_known_patterns() {
+        assert!(is_vision_capable_model("llava-7b"));
+        assert!(is_vision_capable_model("BakLLaVA-1"));
+        assert!(is_vision_capable_model("minicpm-v-2.6"));
+        assert!(!is_vision_capable_model("gemma2:2b"));
+        assert!(!is_vision_capable_model("mistral-7b-instruct"));
+    }
+
+    #[test]
+    fn encode_base64_roundtrip_basic() {
+        let data = b"Hello World!";
+        let encoded = encode_base64(data);
+        assert_eq!(encoded, "SGVsbG8gV29ybGQh");
     }
 }
