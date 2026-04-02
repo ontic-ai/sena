@@ -2,8 +2,9 @@
 
 #[cfg(feature = "whisper")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 #[cfg(feature = "whisper")]
@@ -25,6 +26,7 @@ const DEFAULT_BUFFER_DURATION_SECS: f32 = 3.0;
 /// 2. If always-listening is enabled, capture mic audio and buffer speech chunks
 /// 3. Also listen for SpeechEvent::VoiceInputDetected on the bus (on-demand mode)
 /// 4. Transcribe in a blocking worker and emit completion/failure events
+/// 5. Silence detection: accumulate audio during speech, transcribe after silence threshold
 pub struct SttActor {
     backend: SttBackend,
     bus: Option<Arc<EventBus>>,
@@ -36,6 +38,12 @@ pub struct SttActor {
     voice_always_listening: bool,
     stt_energy_threshold: f32,
     whisper_model_path: Option<String>,
+    model_dir: Option<PathBuf>,
+    silence_duration_secs: f32,
+    // Silence detection state
+    accumulated_samples: Vec<f32>,
+    last_voice_activity: Option<Instant>,
+    speech_started: bool,
 }
 
 impl SttActor {
@@ -57,7 +65,25 @@ impl SttActor {
             voice_always_listening,
             stt_energy_threshold,
             whisper_model_path,
+            model_dir: None,
+            silence_duration_secs: 1.5,
+            accumulated_samples: Vec::new(),
+            last_voice_activity: None,
+            speech_started: false,
         }
+    }
+
+    /// Set the model directory path (where downloaded models are stored).
+    pub fn with_model_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.model_dir = dir;
+        self
+    }
+
+    /// Set the silence duration threshold in seconds.
+    /// When silence lasts longer than this after speech, transcription is triggered.
+    pub fn with_silence_duration(mut self, secs: f32) -> Self {
+        self.silence_duration_secs = secs;
+        self
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -82,7 +108,8 @@ impl SttActor {
     async fn initialize_whisper_backend(&self) -> Result<SttBackendHandle, SpeechError> {
         #[cfg(feature = "whisper")]
         {
-            let model_path = resolve_model_path(self.whisper_model_path.as_deref())?;
+            let model_path =
+                resolve_model_path(self.model_dir.as_ref(), self.whisper_model_path.as_deref())?;
             if !Path::new(&model_path).exists() {
                 return Err(SpeechError::SttInitFailed(format!(
                     "whisper model not found at {}",
@@ -206,6 +233,50 @@ impl SttActor {
             }
         }
     }
+
+    /// Handle an audio buffer with silence detection for always-listening mode.
+    async fn handle_audio_buffer(&mut self, buffer: AudioBuffer, bus: &Arc<EventBus>) {
+        let rms = calculate_rms(&buffer.samples);
+        let is_voice = rms > self.stt_energy_threshold;
+        let now = Instant::now();
+
+        if is_voice {
+            // Voice activity detected
+            if !self.speech_started {
+                // Start of a new speech segment
+                self.speech_started = true;
+                self.accumulated_samples.clear();
+            }
+            self.accumulated_samples.extend_from_slice(&buffer.samples);
+            self.last_voice_activity = Some(now);
+        } else {
+            // Silence detected
+            if self.speech_started {
+                if let Some(last_voice) = self.last_voice_activity {
+                    let silence_duration = now.duration_since(last_voice).as_secs_f32();
+
+                    if silence_duration >= self.silence_duration_secs {
+                        // Silence threshold exceeded — transcribe accumulated audio
+                        if !self.accumulated_samples.is_empty() {
+                            let request_id = self.next_request_id();
+                            let transcription_buffer = AudioBuffer {
+                                samples: self.accumulated_samples.clone(),
+                                sample_rate: buffer.sample_rate,
+                                channels: buffer.channels,
+                            };
+                            self.transcribe_with_timeout(transcription_buffer, request_id, bus)
+                                .await;
+                        }
+
+                        // Reset state for next speech segment
+                        self.accumulated_samples.clear();
+                        self.speech_started = false;
+                        self.last_voice_activity = None;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -276,6 +347,21 @@ impl Actor for SttActor {
                                 })).await;
                             }
                         }
+                        Ok(Event::Speech(SpeechEvent::WakewordDetected { confidence: _ })) => {
+                            // Wakeword detected - ensure audio capture is active
+                            if self.audio_stream.is_none() {
+                                if let Err(e) = self.maybe_start_audio_capture() {
+                                    let _ = bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                                        reason: format!("audio capture failed after wakeword: {}", e),
+                                        request_id: 0,
+                                    })).await;
+                                }
+                            }
+                            // Reset silence detection state to start fresh capture
+                            self.accumulated_samples.clear();
+                            self.last_voice_activity = None;
+                            self.speech_started = false;
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => {
@@ -291,8 +377,7 @@ impl Actor for SttActor {
                     }
                 } => {
                     if let Some(buffer) = audio_buffer {
-                        let request_id = self.next_request_id();
-                        self.transcribe_with_timeout(buffer, request_id, &bus).await;
+                        self.handle_audio_buffer(buffer, &bus).await;
                     }
                 }
             }
@@ -362,11 +447,29 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 }
 
 #[cfg(feature = "whisper")]
-fn resolve_model_path(configured: Option<&str>) -> Result<String, SpeechError> {
+fn resolve_model_path(
+    model_dir: Option<&PathBuf>,
+    configured: Option<&str>,
+) -> Result<String, SpeechError> {
+    // Priority 1: Check model_dir (where downloaded models live)
+    if let Some(dir) = model_dir {
+        let candidate = dir.join("ggml-small.bin");
+        if candidate.exists() {
+            return candidate
+                .to_str()
+                .ok_or_else(|| {
+                    SpeechError::SttInitFailed("model path contains invalid UTF-8".to_string())
+                })
+                .map(|s| s.to_string());
+        }
+    }
+
+    // Priority 2: Configured path from config
     if let Some(path) = configured {
         return Ok(path.to_string());
     }
 
+    // Priority 3: Hardcoded fallback
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| SpeechError::SttInitFailed("cannot determine home directory".to_string()))?;

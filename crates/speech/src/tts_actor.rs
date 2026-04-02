@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,8 @@ pub struct TtsActor {
     active_backend: Option<ActiveTtsBackend>,
     tts_voice: Option<String>,
     tts_rate: f32,
+    model_dir: Option<PathBuf>,
+    interrupt: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -39,7 +42,7 @@ struct SpeakRequest {
 
 #[derive(Debug, Clone)]
 enum ActiveTtsBackend {
-    Piper { model: Option<String> },
+    Piper { model: Option<PathBuf> },
     SystemPlatform,
     Mock,
 }
@@ -58,6 +61,8 @@ impl TtsActor {
             active_backend: None,
             tts_voice: None,
             tts_rate: 1.0,
+            model_dir: None,
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -73,6 +78,12 @@ impl TtsActor {
         self
     }
 
+    /// Set model directory for resolving voice model paths.
+    pub fn with_model_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.model_dir = dir;
+        self
+    }
+
     async fn initialize_backend(&mut self) -> Result<(), SpeechError> {
         let chosen = match self.backend_preference {
             TtsBackend::Piper => {
@@ -83,9 +94,20 @@ impl TtsActor {
                         .map_err(|e| {
                             SpeechError::AudioPlaybackFailed(format!("task join failed: {e}"))
                         })??;
-                    ActiveTtsBackend::Piper {
-                        model: self.tts_voice.clone(),
-                    }
+
+                    // Resolve model path against model_dir if needed.
+                    let model = self.tts_voice.as_ref().map(|voice| {
+                        let path = PathBuf::from(voice);
+                        if path.is_absolute() || path.exists() {
+                            path
+                        } else if let Some(ref dir) = self.model_dir {
+                            dir.join(voice)
+                        } else {
+                            path
+                        }
+                    });
+
+                    ActiveTtsBackend::Piper { model }
                 } else if is_system_tts_available() {
                     ActiveTtsBackend::SystemPlatform
                 } else {
@@ -155,13 +177,27 @@ impl TtsActor {
             .await
             .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?,
             ActiveTtsBackend::Piper { model } => tokio::task::spawn_blocking(move || {
-                let samples = synthesize_with_piper(&text, model.as_deref(), rate)?;
+                let samples = synthesize_with_piper(&text, model.as_ref(), rate)?;
                 let output = AudioOutput::new()?;
                 output.play_pcm16_mono_22050(&samples)
             })
             .await
             .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?,
         }
+    }
+
+    /// Handle high-priority interrupt requests (request_id == 0).
+    fn handle_interrupt(&mut self) {
+        // Set interrupt flag.
+        self.interrupt.store(true, Ordering::SeqCst);
+
+        // Clear the queue by draining all pending requests.
+        if let Some(rx) = &mut self.request_rx {
+            while rx.try_recv().is_ok() {}
+        }
+
+        // Reset interrupt flag for next request.
+        self.interrupt.store(false, Ordering::SeqCst);
     }
 }
 
@@ -217,6 +253,11 @@ impl Actor for TtsActor {
                             break;
                         }
                         Ok(Event::Speech(SpeechEvent::SpeakRequested { text, request_id })) => {
+                            // High-priority interrupt: request_id == 0 clears queue.
+                            if request_id == 0 {
+                                self.handle_interrupt();
+                            }
+
                             let request = SpeakRequest { text, request_id };
                             if request_tx.try_send(request).is_err() {
                                 if let Some(bus) = &self.bus {
@@ -265,14 +306,14 @@ fn is_system_tts_available() -> bool {
 
 fn synthesize_with_piper(
     text: &str,
-    model: Option<&str>,
+    model: Option<&PathBuf>,
     rate: f32,
 ) -> Result<Vec<i16>, SpeechError> {
     let temp_path = temp_wav_path();
 
     let mut cmd = Command::new("piper");
-    if let Some(model_name) = model {
-        cmd.arg("--model").arg(model_name);
+    if let Some(model_path) = model {
+        cmd.arg("--model").arg(model_path);
     }
     cmd.arg("--output_file")
         .arg(&temp_path)
