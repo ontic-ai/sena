@@ -13,6 +13,10 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+// TODO M5: pin real SHA-256 checksums from HuggingFace
+/// Placeholder checksum for models without verified hashes.
+const CHECKSUM_UNKNOWN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// Speech model type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
@@ -110,6 +114,11 @@ impl ModelCache {
             return false;
         }
 
+        // If checksum is unknown, only check file existence
+        if model.sha256 == CHECKSUM_UNKNOWN {
+            return true;
+        }
+
         // Verify SHA-256 checksum
         Self::verify_checksum(&path, &model.sha256)
             .await
@@ -136,6 +145,11 @@ impl ModelCache {
 
     /// Verifies SHA-256 checksum of a file.
     async fn verify_checksum(path: &Path, expected_sha256: &str) -> Result<bool, SpeechError> {
+        // Skip verification if checksum is unknown
+        if expected_sha256 == CHECKSUM_UNKNOWN {
+            return Ok(true);
+        }
+
         let bytes = fs::read(path)
             .await
             .map_err(|e| SpeechError::ChecksumVerificationFailed(e.to_string()))?;
@@ -265,9 +279,7 @@ impl DownloadClient {
             .map_err(|e| SpeechError::DownloadFailed(format!("checksum verification: {}", e)))?;
 
         if !valid_checksum {
-            // Clean up corrupted file
-            let _ = fs::remove_file(&temp_path).await;
-
+            // Compute actual hash BEFORE deleting the file
             let actual_bytes = fs::read(&temp_path)
                 .await
                 .map(|b| {
@@ -276,6 +288,9 @@ impl DownloadClient {
                     hex::encode(hasher.finalize())
                 })
                 .unwrap_or_else(|_| "unknown".to_string());
+
+            // Clean up corrupted file
+            let _ = fs::remove_file(&temp_path).await;
 
             return Err(SpeechError::ChecksumMismatch {
                 expected: model.sha256.clone(),
@@ -370,7 +385,7 @@ mod tests {
             .await
             .unwrap();
 
-        let wrong_checksum = "0000000000000000000000000000000000000000000000000000000000000000";
+        let wrong_checksum = "1111111111111111111111111111111111111111111111111111111111111111";
         let valid = ModelCache::verify_checksum(&test_file, wrong_checksum)
             .await
             .unwrap();

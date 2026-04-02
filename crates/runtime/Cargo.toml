@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+whisper = ["speech/whisper"]
+
 [dependencies]
 async-trait = { workspace = true }
 bus = { path = "../bus" }

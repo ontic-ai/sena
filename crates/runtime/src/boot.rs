@@ -198,8 +198,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
     if speech_available {
         // STT actor
+        // Use WhisperCpp backend only when whisper feature is enabled
+        #[cfg(feature = "whisper")]
+        let stt_backend = speech::SttBackend::WhisperCpp;
+        #[cfg(not(feature = "whisper"))]
+        let stt_backend = speech::SttBackend::Mock;
+
         let stt_actor = speech::SttActor::new(
-            speech::SttBackend::WhisperCpp,
+            stt_backend,
             config.voice_always_listening,
             config.stt_energy_threshold,
             config.whisper_model_path.clone(),

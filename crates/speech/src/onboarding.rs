@@ -76,15 +76,28 @@ pub async fn run_speech_onboarding(
     }
 
     // Verify audio devices (non-blocking check)
-    let has_input = check_audio_input_device();
+    let _has_input = check_audio_input_device();
     let _has_output = check_audio_output_device();
 
-    if downloaded.is_empty() && !has_input {
-        let reason = if !has_input {
-            "No microphone detected and no models could be downloaded".to_string()
-        } else {
-            "No speech models could be downloaded".to_string()
-        };
+    // After download loop, verify required models are cached
+    let whisper_cached =
+        ModelCache::is_cached(model_dir, &ModelManifest::whisper_small_gguf()).await;
+    let piper_cached = ModelCache::is_cached(model_dir, &ModelManifest::piper_voice()).await;
+
+    // At minimum, TTS (Piper) is required. STT (Whisper) is required if voice input is desired.
+    // For Phase 5, both are considered required.
+    if !whisper_cached || !piper_cached {
+        let mut missing = Vec::new();
+        if !whisper_cached {
+            missing.push("whisper-small-gguf");
+        }
+        if !piper_cached {
+            missing.push("piper-en-us-lessac-medium");
+        }
+        let reason = format!(
+            "Required speech models still missing after onboarding: {}",
+            missing.join(", ")
+        );
         let _ = bus
             .broadcast(Event::Speech(SpeechEvent::SpeechOnboardingFailed {
                 reason: reason.clone(),
