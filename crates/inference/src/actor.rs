@@ -68,6 +68,12 @@ pub struct InferenceActor {
     inference_max_tokens: usize,
     /// Configured context window size.
     inference_ctx_size: u32,
+    /// Whether proactive (CTP-triggered) inference results should be spoken via TTS.
+    proactive_speech_enabled: bool,
+    /// Minimum seconds between proactive TTS outputs.
+    speech_rate_limit_secs: u64,
+    /// Timestamp of last TTS output.
+    last_tts_timestamp: Option<std::time::Instant>,
 }
 
 impl InferenceActor {
@@ -97,6 +103,9 @@ impl InferenceActor {
             tts_enabled: false,
             inference_max_tokens: 512,
             inference_ctx_size: 2048,
+            proactive_speech_enabled: true,
+            speech_rate_limit_secs: 10,
+            last_tts_timestamp: None,
         }
     }
 
@@ -130,6 +139,18 @@ impl InferenceActor {
     /// Configure context window size.
     pub fn with_inference_ctx_size(mut self, ctx_size: u32) -> Self {
         self.inference_ctx_size = ctx_size;
+        self
+    }
+
+    /// Enable or disable proactive (CTP-triggered) speech output.
+    pub fn with_proactive_speech(mut self, enabled: bool) -> Self {
+        self.proactive_speech_enabled = enabled;
+        self
+    }
+
+    /// Configure minimum seconds between proactive TTS outputs.
+    pub fn with_speech_rate_limit(mut self, secs: u64) -> Self {
+        self.speech_rate_limit_secs = secs;
         self
     }
 
@@ -471,11 +492,16 @@ impl InferenceActor {
     /// This runs directly in the event loop (not queued) so the actor can handle
     /// Embed/Extract requests from memory while waiting for query responses.
     /// Uses a short timeout for memory queries to avoid blocking.
+    ///
+    /// # Arguments
+    /// * `is_proactive` - Whether this inference was triggered proactively (e.g., by CTP)
+    ///   rather than by explicit user request. Proactive requests are subject to speech rate limiting.
     async fn process_single_inference_with_context(
         &mut self,
         bus: &Arc<EventBus>,
         prompt: String,
         request_id: u64,
+        is_proactive: bool,
     ) -> Result<(String, usize), String> {
         self.ensure_loaded(bus).await?;
 
@@ -568,15 +594,31 @@ impl InferenceActor {
             rounds_completed: 1,
         });
 
-        // Optionally speak the response via TTS
+        // Optionally speak the response via TTS (with rate limiting for proactive thoughts)
         if self.tts_enabled {
-            let tts_request_id = request_id.saturating_mul(4000);
-            let _ = bus
-                .broadcast(Event::Speech(SpeechEvent::SpeakRequested {
-                    text: result.clone(),
-                    request_id: tts_request_id,
-                }))
-                .await;
+            let now = std::time::Instant::now();
+            let should_speak = if is_proactive {
+                // Proactive requests: check if enabled and respect rate limit
+                self.proactive_speech_enabled
+                    && self
+                        .last_tts_timestamp
+                        .map(|ts| now.duration_since(ts).as_secs() >= self.speech_rate_limit_secs)
+                        .unwrap_or(true)
+            } else {
+                // User-initiated requests always speak
+                true
+            };
+
+            if should_speak {
+                self.last_tts_timestamp = Some(now);
+                let tts_request_id = request_id.saturating_mul(4000);
+                let _ = bus
+                    .broadcast(Event::Speech(SpeechEvent::SpeakRequested {
+                        text: result.clone(),
+                        request_id: tts_request_id,
+                    }))
+                    .await;
+            }
         }
 
         Ok((result, token_count))
@@ -1022,10 +1064,14 @@ impl Actor for InferenceActor {
                     if let Some(event) = directed {
                         match event {
                             Event::Inference(InferenceEvent::InferenceRequested { prompt, priority: _, request_id }) => {
+                                // Detect if this is a proactive (CTP-triggered) request.
+                                // Convention: request_id < 1000 is proactive, >= 1000 is user-initiated.
+                                let is_proactive = request_id < 1000;
+
                                 // Process with memory context directly in event handler with short timeout
                                 // to avoid blocking on memory queries that require embeddings
                                 match self
-                                    .process_single_inference_with_context(&bus, prompt, request_id)
+                                    .process_single_inference_with_context(&bus, prompt, request_id, is_proactive)
                                     .await
                                 {
                                     Ok((text, token_count)) => {

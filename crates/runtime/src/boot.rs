@@ -164,7 +164,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_vision_frame_store(Arc::clone(&vision_frame_store))
         .with_tts_enabled(config.speech_enabled)
         .with_inference_max_tokens(config.inference_max_tokens)
-        .with_inference_ctx_size(config.inference_ctx_size);
+        .with_inference_ctx_size(config.inference_ctx_size)
+        .with_proactive_speech(config.proactive_speech_enabled)
+        .with_speech_rate_limit(config.speech_rate_limit_secs);
     spawn_actor(&bus, &mut registry, inference_actor);
 
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
