@@ -170,20 +170,41 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
-    // Step 11: Speech actors (STT/TTS) — spawn if speech_enabled is true.
+    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn if speech_enabled.
     if config.speech_enabled {
+        let speech_model_dir = config
+            .speech_model_dir
+            .clone()
+            .unwrap_or_else(crate::config::default_speech_model_dir);
+
+        // STT actor
         let stt_actor = speech::SttActor::new(
             speech::SttBackend::WhisperCpp,
-            // On-demand mode requires a production VoiceInputDetected emitter path,
-            // which is not wired yet. Force always-listening to keep STT functional.
-            true,
+            config.voice_always_listening,
             config.stt_energy_threshold,
             config.whisper_model_path.clone(),
-        );
+        )
+        .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, stt_actor);
 
-        let tts_actor = speech::TtsActor::new(speech::TtsBackend::SystemPlatform);
+        // TTS actor
+        let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
+            .with_voice(config.tts_voice.clone())
+            .with_rate(config.tts_rate)
+            .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, tts_actor);
+
+        // Wakeword actor (optional)
+        if config.wakeword_enabled {
+            let wakeword_config = speech::wakeword::WakewordConfig {
+                sensitivity: config.wakeword_sensitivity,
+                model_path: None,
+                model_dir: Some(speech_model_dir),
+                debounce_secs: 3.0,
+            };
+            let wakeword_actor = speech::WakewordActor::new(wakeword_config);
+            spawn_actor(&bus, &mut registry, wakeword_actor);
+        }
     }
 
     // Step 12: Initialize system tray (non-fatal — Sena works without it).
