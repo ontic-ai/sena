@@ -172,13 +172,31 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 10: PromptComposer is stateless — instantiated per inference cycle.
     // prompt::PromptComposer::new() is cheap; no actor spawn needed.
 
-    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn if speech_enabled.
-    if config.speech_enabled {
-        let speech_model_dir = config
-            .speech_model_dir
-            .clone()
-            .unwrap_or_else(crate::config::default_speech_model_dir);
+    // Step 10.5: Speech onboarding — download models if needed (non-fatal).
+    // Resolve speech_model_dir once and reuse for both onboarding and actor spawning.
+    let mut speech_available = config.speech_enabled;
+    let speech_model_dir = config
+        .speech_model_dir
+        .clone()
+        .unwrap_or_else(crate::config::default_speech_model_dir);
 
+    if config.speech_enabled
+        && speech::onboarding::speech_onboarding_needed(&speech_model_dir).await
+    {
+        match speech::onboarding::run_speech_onboarding(&bus, &speech_model_dir).await {
+            Ok(_downloaded) => {
+                // Models downloaded successfully — speech actors can be spawned
+            }
+            Err(e) => {
+                // Onboarding failed — disable speech for this session
+                eprintln!("WARN: Speech onboarding failed, disabling speech: {}", e);
+                speech_available = false;
+            }
+        }
+    }
+
+    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
+    if speech_available {
         // STT actor
         let stt_actor = speech::SttActor::new(
             speech::SttBackend::WhisperCpp,

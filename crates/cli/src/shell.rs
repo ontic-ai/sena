@@ -229,6 +229,8 @@ struct Shell {
     runtime: Arc<Runtime>,
     /// Shell-local voice UX state (does not persist config).
     voice_enabled: bool,
+    /// Last emitted download-progress bucket (0..=10) keyed by speech request ID.
+    speech_download_progress: HashMap<u64, u64>,
 }
 
 impl Shell {
@@ -274,6 +276,7 @@ impl Shell {
             pending_model_dir_input: false,
             runtime,
             voice_enabled,
+            speech_download_progress: HashMap::new(),
         }
     }
 
@@ -796,6 +799,112 @@ impl Shell {
                 self.add_message(
                     MessageRole::Warning,
                     format!("Voice transcription failed: {}", reason),
+                );
+            }
+            Event::Speech(SpeechEvent::ModelDownloadStarted {
+                model_name,
+                total_bytes,
+                request_id,
+            }) => {
+                self.speech_download_progress.insert(request_id, 0);
+                self.add_message(
+                    MessageRole::System,
+                    format!(
+                        "[speech] Downloading model: {} ({} bytes)",
+                        model_name, total_bytes
+                    ),
+                );
+            }
+            Event::Speech(SpeechEvent::ModelDownloadProgress {
+                model_name,
+                bytes_downloaded,
+                total_bytes,
+                request_id,
+            }) => {
+                let percent = if total_bytes == 0 {
+                    0
+                } else {
+                    (bytes_downloaded.saturating_mul(100) / total_bytes).min(100)
+                };
+                let bucket = (percent / 10).min(10);
+                let previous_bucket = self
+                    .speech_download_progress
+                    .get(&request_id)
+                    .copied()
+                    .unwrap_or(0);
+                if bucket > previous_bucket || bytes_downloaded >= total_bytes {
+                    self.speech_download_progress.insert(request_id, bucket);
+                    self.add_message(
+                        MessageRole::System,
+                        format!(
+                            "[speech] {}: {}/{} bytes ({}%)",
+                            model_name, bytes_downloaded, total_bytes, percent
+                        ),
+                    );
+                }
+            }
+            Event::Speech(SpeechEvent::ModelDownloadCompleted {
+                model_name,
+                request_id,
+                ..
+            }) => {
+                self.speech_download_progress.remove(&request_id);
+                self.add_message(
+                    MessageRole::System,
+                    format!("[speech] Model downloaded: {}", model_name),
+                );
+            }
+            Event::Speech(SpeechEvent::ModelDownloadFailed {
+                model_name,
+                reason,
+                request_id,
+            }) => {
+                self.speech_download_progress.remove(&request_id);
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "[speech] Model download failed: {} - {}",
+                        model_name, reason
+                    ),
+                );
+            }
+            Event::Speech(SpeechEvent::WakewordDetected { confidence }) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!("[speech] Wakeword detected (confidence: {:.2})", confidence),
+                );
+            }
+            Event::Speech(SpeechEvent::SpeechOnboardingStarted) => {
+                self.add_message(
+                    MessageRole::System,
+                    "[speech] Setting up speech subsystem...".to_string(),
+                );
+            }
+            Event::Speech(SpeechEvent::SpeechOnboardingCompleted { models_downloaded }) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!(
+                        "[speech] Speech ready! Models: {}",
+                        models_downloaded.join(", ")
+                    ),
+                );
+            }
+            Event::Speech(SpeechEvent::SpeechOnboardingFailed { reason, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("[speech] Speech setup failed: {}", reason),
+                );
+            }
+            Event::Speech(SpeechEvent::SpeechOutputCompleted { .. }) => {
+                self.add_message(
+                    MessageRole::System,
+                    "[speech] TTS playback complete".to_string(),
+                );
+            }
+            Event::Speech(SpeechEvent::SpeechFailed { reason, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("[speech] Speech failed: {}", reason),
                 );
             }
             other if self.verbose => {
