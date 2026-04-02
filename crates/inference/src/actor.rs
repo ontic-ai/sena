@@ -74,6 +74,8 @@ pub struct InferenceActor {
     speech_rate_limit_secs: u64,
     /// Timestamp of last TTS output.
     last_tts_timestamp: Option<std::time::Instant>,
+    /// Counter for proactive request IDs (always < 1000).
+    proactive_request_counter: u64,
 }
 
 impl InferenceActor {
@@ -106,6 +108,7 @@ impl InferenceActor {
             proactive_speech_enabled: true,
             speech_rate_limit_secs: 10,
             last_tts_timestamp: None,
+            proactive_request_counter: 1,
         }
     }
 
@@ -405,6 +408,41 @@ impl InferenceActor {
         .map_err(|e| format!("task panicked: {}", e))?;
 
         result
+    }
+
+    /// Build a proactive prompt from a context snapshot.
+    ///
+    /// Composes the prompt entirely from snapshot data — no static persona strings.
+    /// The prompt surfaces the observed context so the model can reason about
+    /// what the user is doing and whether proactive assistance is warranted.
+    fn build_proactive_prompt_from_snapshot(snapshot: &ContextSnapshot) -> String {
+        let mut parts = Vec::new();
+
+        parts.push(format!("Active: {}", snapshot.active_app.app_name));
+        if let Some(title) = &snapshot.active_app.window_title {
+            parts.push(format!("Window: {}", title));
+        }
+        if let Some(task) = &snapshot.inferred_task {
+            parts.push(format!(
+                "Task: {} ({:.0}% confidence)",
+                task.category,
+                task.confidence * 100.0
+            ));
+        }
+        if let Some(digest) = &snapshot.clipboard_digest {
+            parts.push(format!("Clipboard: {}", digest));
+        }
+        if snapshot.keystroke_cadence.events_per_minute > 0.0 {
+            parts.push(format!(
+                "Activity: {:.1} keys/min",
+                snapshot.keystroke_cadence.events_per_minute
+            ));
+        }
+        if snapshot.keystroke_cadence.burst_detected {
+            parts.push("Burst typing detected".to_string());
+        }
+
+        parts.join("; ")
     }
 
     /// Build enriched prompt from user message, memory chunks, context snapshot, history, and soul summary.
@@ -806,6 +844,8 @@ impl InferenceActor {
         let rounds = max_rounds.clamp(1, ITERATIVE_MAX_HARD_CAP);
         let mut composed_prompt = prompt.clone();
         let mut final_text = String::new();
+        // TODO M6: replace with memory::WorkingMemory for per-cycle token budget tracking
+        // and automated eviction. Currently capped at MEMORY_QUERY_TOKEN_BUDGET chunks.
         let mut working_memory: Vec<MemoryChunk> = Vec::new();
         let mut actual_rounds_completed = 1;
 
@@ -1034,6 +1074,92 @@ impl Actor for InferenceActor {
                         }
                         Ok(Event::CTP(CTPEvent::ContextSnapshotReady(snapshot))) => {
                             self.last_snapshot = Some(snapshot);
+                        }
+                        Ok(Event::CTP(CTPEvent::ThoughtEventTriggered(snapshot))) => {
+                            // Proactive inference: CTP determined context is worth reasoning about.
+                            // Compose a context-derived prompt and run inference.
+                            self.last_snapshot = Some(snapshot.clone());
+                            let request_id = self.proactive_request_counter;
+                            self.proactive_request_counter =
+                                self.proactive_request_counter.wrapping_add(1) % 1000;
+                            if self.proactive_request_counter == 0 {
+                                self.proactive_request_counter = 1;
+                            }
+
+                            // Build proactive prompt from context snapshot fields
+                            let proactive_prompt =
+                                Self::build_proactive_prompt_from_snapshot(&snapshot);
+
+                            match self
+                                .process_single_inference_with_context(
+                                    &bus,
+                                    proactive_prompt,
+                                    request_id,
+                                    true, // is_proactive
+                                )
+                                .await
+                            {
+                                Ok((text, token_count)) => {
+                                    let _ = bus
+                                        .broadcast(Event::Inference(
+                                            InferenceEvent::InferenceCompleted {
+                                                text,
+                                                request_id,
+                                                token_count,
+                                            },
+                                        ))
+                                        .await;
+                                }
+                                Err(reason) => {
+                                    let _ = bus
+                                        .broadcast(Event::Inference(
+                                            InferenceEvent::InferenceFailed {
+                                                request_id,
+                                                reason,
+                                            },
+                                        ))
+                                        .await;
+                                }
+                            }
+                        }
+                        Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
+                            text,
+                            confidence: _,
+                            request_id,
+                        })) => {
+                            // Voice input: route transcribed speech through inference
+                            // pipeline identical to directed InferenceRequested.
+                            match self
+                                .process_single_inference_with_context(
+                                    &bus,
+                                    text,
+                                    request_id,
+                                    false, // user-initiated via voice
+                                )
+                                .await
+                            {
+                                Ok((text, token_count)) => {
+                                    let _ = bus
+                                        .broadcast(Event::Inference(
+                                            InferenceEvent::InferenceCompleted {
+                                                text,
+                                                request_id,
+                                                token_count,
+                                            },
+                                        ))
+                                        .await;
+                                }
+                                Err(reason) => {
+                                    let _ = bus
+                                        .broadcast(Event::Inference(
+                                            InferenceEvent::InferenceFailed {
+                                                request_id,
+                                                reason,
+                                            },
+                                        ))
+                                        .await;
+                                }
+                            }
                         }
                         Ok(Event::Transparency(TransparencyEvent::QueryRequested(
                             TransparencyQuery::InferenceExplanation,

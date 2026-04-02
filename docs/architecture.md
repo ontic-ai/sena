@@ -1,5 +1,5 @@
 # Sena — Architecture
-**Version:** 0.3.0  
+**Version:** 0.4.0  
 **Status:** Governing Document — no implementation decision may contradict this file without a formal revision  
 **Reconcile against:** `docs/PRD.md` first, this document second
 
@@ -63,14 +63,17 @@ This is the law. Arrows mean "may depend on." Absence of an arrow means the depe
 
 ```
 cli
- └── runtime
+ ├── runtime      ← only dependency (runtime re-exports discover_models, ollama_models_dir)
+ └── bus          ← event subscriptions and slash command dispatch
 
-runtime
+runtime           ← composition root: constructs ALL concrete actor instances
  ├── bus
  ├── crypto
  ├── soul
  ├── platform
  ├── ctp
+ ├── memory       ← runtime constructs MemoryActor
+ ├── inference    ← runtime constructs InferenceActor
  └── speech
 
 ctp
@@ -105,11 +108,13 @@ speech
 ```
 
 **Hard rules:**
+- `runtime` is the composition root. It constructs all concrete actor instances (soul, platform, ctp, memory, inference, speech) inside `boot()`. CLI never constructs actors.
+- `cli` may only import `runtime` and `bus`. All other crate imports in `cli` are forbidden. The `runtime` crate re-exports `discover_models`, `ollama_models_dir`, etc. so CLI can use these without importing `inference` or `platform` directly.
 - `crypto` has zero dependencies on any other Sena crate. Like `bus`, it is a leaf node in the graph. It provides encryption primitives consumed by `runtime`, `soul`, and `memory`.
 - `soul` has no knowledge of `ctp`, `inference`, `memory`, or `prompt`. It only knows `bus` and `crypto`. Other crates emit events; soul absorbs them. Soul's internals are never reached into from outside.
 - `speech` depends only on `bus`. It receives events and emits events. It never imports `inference`, `memory`, or `soul`.
 - `bus` has zero dependencies on any other Sena crate. It is the bottom of the graph.
-- `cli` is NOT the only binary, it is an "execution" pipeline for developers, not meant to be mainstream communication. It has no business logic. If business logic appears in `cli`, it belongs in another crate.
+- `cli` is the developer-facing tool surface. It has no business logic and no actor construction. If business logic appears in `cli`, it belongs in another crate.
 - Circular dependencies are a build error. The graph above must remain a DAG.
 - `platform` never imports OS-specific crates at the crate root level. Platform-specific code is gated behind `#[cfg(target_os = ...)]` within the crate.
 
