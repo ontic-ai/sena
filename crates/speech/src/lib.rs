@@ -11,6 +11,7 @@
 
 pub mod audio_input;
 pub mod audio_output;
+pub mod download;
 pub mod error;
 pub mod stt_actor;
 pub mod tts_actor;

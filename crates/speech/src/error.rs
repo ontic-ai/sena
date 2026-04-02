@@ -30,4 +30,25 @@ pub enum SpeechError {
     /// Channel operation failed.
     #[error("channel closed: {0}")]
     ChannelClosed(String),
+
+    /// Model download failed.
+    #[error("model download failed: {0}")]
+    DownloadFailed(String),
+
+    /// Checksum verification failed.
+    #[error("checksum verification failed: {0}")]
+    ChecksumVerificationFailed(String),
+
+    /// Checksum mismatch after download.
+    #[error("checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        /// Expected SHA-256 checksum.
+        expected: String,
+        /// Actual SHA-256 checksum.
+        actual: String,
+    },
+
+    /// Model not found in manifest.
+    #[error("model not found: {0}")]
+    ModelNotFound(String),
 }
