@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use bus::events::inference::{InferenceEvent, Priority};
+use bus::events::speech::SpeechEvent;
 use bus::events::transparency::{
     InferenceExplanationResponse, MemoryResponse, ObservationResponse, TransparencyEvent,
     TransparencyQuery,
@@ -76,6 +77,18 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/verbose",
         description: "Toggle verbose logging",
+    },
+    SlashCommand {
+        command: "/voice",
+        description: "Toggle voice input in this CLI session",
+    },
+    SlashCommand {
+        command: "/screenshot",
+        description: "Show screenshot capture + vision model status",
+    },
+    SlashCommand {
+        command: "/config",
+        description: "Show config file path and current settings",
     },
     SlashCommand {
         command: "/help",
@@ -214,11 +227,14 @@ struct Shell {
     pending_model_dir_input: bool,
     /// Runtime reference for config access.
     runtime: Arc<Runtime>,
+    /// Shell-local voice UX state (does not persist config).
+    voice_enabled: bool,
 }
 
 impl Shell {
     /// Create a new Shell instance.
     fn new(runtime: Arc<Runtime>) -> Self {
+        let voice_enabled = runtime.config.speech_enabled;
         let messages = vec![
             Message::new(
                 MessageRole::System,
@@ -257,6 +273,7 @@ impl Shell {
             pending_transparency: None,
             pending_model_dir_input: false,
             runtime,
+            voice_enabled,
         }
     }
 
@@ -326,6 +343,19 @@ impl Shell {
                 ),
                 Span::raw("  •  Model: "),
                 Span::styled(model, Style::default().fg(Color::Cyan)),
+                Span::raw("  •  VOICE: "),
+                if !self.runtime.config.speech_enabled {
+                    Span::styled("UNAVAILABLE", Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::styled(
+                        if self.voice_enabled { "ON" } else { "OFF" },
+                        Style::default().fg(if self.voice_enabled {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
+                    )
+                },
             ]),
         ];
 
@@ -613,7 +643,7 @@ impl Shell {
     }
 
     /// Handle bus events and update internal state.
-    fn handle_bus_event(&mut self, event: &Event) {
+    async fn handle_bus_event(&mut self, event: Event) {
         match event {
             Event::System(bus::events::SystemEvent::ActorReady { actor_name }) => {
                 if let Some(status) = self.actor_health.get_mut(actor_name) {
@@ -631,7 +661,7 @@ impl Shell {
                 request_id,
                 token_count,
                 ..
-            }) if self.pending_inference_id == Some(*request_id) => {
+            }) if self.pending_inference_id == Some(request_id) => {
                 self.pending_inference_id = None;
                 self.waiting_for_inference = false;
                 if text.trim().is_empty() {
@@ -640,12 +670,12 @@ impl Shell {
                         "Model returned empty response".to_string(),
                     );
                 } else {
-                    self.add_message(MessageRole::Sena, text.clone());
+                    self.add_message(MessageRole::Sena, text);
                     self.stats.tokens_received += token_count;
                 }
             }
             Event::Inference(InferenceEvent::InferenceFailed { request_id, reason })
-                if self.pending_inference_id == Some(*request_id) =>
+                if self.pending_inference_id == Some(request_id) =>
             {
                 self.pending_inference_id = None;
                 self.waiting_for_inference = false;
@@ -661,7 +691,7 @@ impl Shell {
                         format!("Model loaded: {} ({})", name, backend),
                     );
                 }
-                self.current_model = Some(name.clone());
+                self.current_model = Some(name);
             }
             Event::Inference(InferenceEvent::BackendMismatchWarning { detected, compiled }) => {
                 self.add_message(
@@ -697,13 +727,13 @@ impl Shell {
                     MessageRole::System,
                     "\u{2501}\u{2501}  Current Observation".to_string(),
                 );
-                self.add_message(MessageRole::Sena, format_observation_tui(resp));
+                self.add_message(MessageRole::Sena, format_observation_tui(&resp));
             }
             Event::Transparency(TransparencyEvent::MemoryResponded(resp)) => {
                 self.pending_transparency = None;
                 self.transparency_loading = false;
                 self.add_message(MessageRole::System, "\u{2501}\u{2501}  Memory".to_string());
-                self.add_message(MessageRole::Sena, format_memory_tui(resp));
+                self.add_message(MessageRole::Sena, format_memory_tui(&resp));
             }
             Event::Transparency(TransparencyEvent::InferenceExplanationResponded(resp)) => {
                 self.pending_transparency = None;
@@ -712,7 +742,7 @@ impl Shell {
                     MessageRole::System,
                     "\u{2501}\u{2501}  Last Inference".to_string(),
                 );
-                self.add_message(MessageRole::Sena, format_explanation_tui(resp));
+                self.add_message(MessageRole::Sena, format_explanation_tui(&resp));
             }
             Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => match item {
                 bus::events::TrayMenuItem::ShowStatus => {
@@ -747,8 +777,29 @@ impl Shell {
             Event::System(bus::events::SystemEvent::CliAttachRequested) => {
                 self.add_message(MessageRole::System, "CLI session already open.".to_string());
             }
-            _ if self.verbose => {
-                if let Some(msg) = verbose_format(event) {
+            Event::Speech(SpeechEvent::TranscriptionCompleted {
+                text,
+                confidence: _,
+                request_id,
+            }) => {
+                if self.voice_enabled {
+                    self.send_chat_with_request(
+                        text,
+                        request_id,
+                        Priority::Normal,
+                        Some("[voice] "),
+                    )
+                    .await;
+                }
+            }
+            Event::Speech(SpeechEvent::TranscriptionFailed { reason, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Voice transcription failed: {}", reason),
+                );
+            }
+            other if self.verbose => {
+                if let Some(msg) = verbose_format(&other) {
                     self.add_message(MessageRole::System, msg);
                 }
             }
@@ -819,6 +870,70 @@ impl Shell {
                 self.add_message(MessageRole::System, format!("Verbose logging: {}", state));
                 DispatchResult::Continue
             }
+            "/voice" => {
+                if !self.runtime.config.speech_enabled {
+                    self.add_message(
+                        MessageRole::Warning,
+                        "Voice is unavailable because speech is disabled in config.".to_string(),
+                    );
+                    return DispatchResult::Continue;
+                }
+
+                self.voice_enabled = !self.voice_enabled;
+                let state = if self.voice_enabled { "ON" } else { "OFF" };
+                self.add_message(MessageRole::System, format!("VOICE: {}", state));
+                self.add_message(
+                    MessageRole::System,
+                    "Voice input toggled for this CLI session; persistent runtime speech settings remain in config.".to_string(),
+                );
+                DispatchResult::Continue
+            }
+            "/screenshot" => {
+                let capture_status = if self.runtime.config.screen_capture_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                let platform_support = if cfg!(target_os = "windows") {
+                    "supported"
+                } else {
+                    "not implemented"
+                };
+                let frame_ready = self
+                    .runtime
+                    .vision_frame_store
+                    .lock()
+                    .map(|frame| if frame.is_some() { "yes" } else { "no" })
+                    .unwrap_or("unknown");
+                let active_model = self.current_model.as_deref().unwrap_or("unknown");
+                let vision_status = match self.current_model.as_deref() {
+                    Some(model_name) => {
+                        if is_vision_capable_model(model_name) {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                    }
+                    None => "unknown",
+                };
+
+                self.add_message(
+                    MessageRole::System,
+                    format!(
+                        "Screenshot capture: {} | Platform: {} | Frame ready: {} | Active model: {} | Vision capable: {}",
+                        capture_status, platform_support, frame_ready, active_model, vision_status
+                    ),
+                );
+                self.add_message(
+                    MessageRole::System,
+                    "Privacy: screenshots are in-memory only and not persisted. Availability depends on platform support.".to_string(),
+                );
+                DispatchResult::Continue
+            }
+            "/config" => {
+                self.show_config();
+                DispatchResult::Continue
+            }
             "/help" | "/h" => {
                 self.show_help();
                 DispatchResult::Continue
@@ -831,8 +946,10 @@ impl Shell {
                 self.copy_last_response();
                 DispatchResult::Continue
             }
-            _ if exit_command_result(cmd).is_some() => exit_command_result(cmd)
-                .expect("exit command helper should return a result for matched commands"),
+            _ if exit_command_result(cmd).is_some() => match exit_command_result(cmd) {
+                Some(result) => result,
+                None => DispatchResult::Continue,
+            },
             _ if line.starts_with('/') => {
                 self.add_message(
                     MessageRole::Warning,
@@ -888,14 +1005,29 @@ impl Shell {
 
     /// Send a chat message to the inference actor.
     async fn send_chat(&mut self, prompt: String) {
-        // Add user message to log
-        self.add_message(MessageRole::User, prompt.clone());
-
         // Generate request ID
         let request_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1);
+
+        self.send_chat_with_request(prompt, request_id, Priority::High, None)
+            .await;
+    }
+
+    async fn send_chat_with_request(
+        &mut self,
+        prompt: String,
+        request_id: u64,
+        priority: Priority,
+        user_prefix: Option<&str>,
+    ) {
+        let displayed_prompt = match user_prefix {
+            Some(prefix) => format!("{}{}", prefix, prompt),
+            None => prompt.clone(),
+        };
+
+        self.add_message(MessageRole::User, displayed_prompt);
 
         self.add_message(MessageRole::System, "Thinking...".to_string());
         self.waiting_for_inference = true;
@@ -908,7 +1040,7 @@ impl Shell {
                 "inference",
                 Event::Inference(InferenceEvent::InferenceRequested {
                     prompt,
-                    priority: Priority::High,
+                    priority,
                     request_id,
                 }),
             )
@@ -941,6 +1073,18 @@ impl Shell {
         self.add_message(
             MessageRole::System,
             "/models                Select which model to use".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/voice                 Toggle voice input in this CLI session".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/screenshot            Show screenshot capture + vision model status".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/config                Show config file path and current settings".to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -980,6 +1124,82 @@ impl Shell {
         self.add_message(
             MessageRole::System,
             "Type any message to chat with the model.".to_string(),
+        );
+    }
+
+    /// Show config file path and current settings.
+    fn show_config(&mut self) {
+        let config_path = runtime::config::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "(unavailable)".to_string());
+
+        // Clone config values to avoid borrow checker issues
+        let inference_max_tokens = self.runtime.config.inference_max_tokens;
+        let inference_ctx_size = self.runtime.config.inference_ctx_size;
+        let preferred_model = self.runtime.config.preferred_model.clone();
+        let speech_enabled = self.runtime.config.speech_enabled;
+        let clipboard_observation = self.runtime.config.clipboard_observation_enabled;
+        let ctp_trigger_interval = self.runtime.config.ctp_trigger_interval_secs;
+        let ctp_trigger_sensitivity = self.runtime.config.ctp_trigger_sensitivity;
+        let working_memory_budget = self.runtime.config.working_memory_token_budget;
+        let memory_limit = self.runtime.config.memory_limit_mb;
+        let shutdown_timeout = self.runtime.config.shutdown_timeout_secs;
+
+        self.add_message(MessageRole::System, "━━  Configuration".to_string());
+        self.add_message(MessageRole::System, format!("Config file: {}", config_path));
+        self.add_message(MessageRole::System, "".to_string());
+
+        self.add_message(
+            MessageRole::System,
+            format!("inference_max_tokens       {}", inference_max_tokens),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("inference_ctx_size         {}", inference_ctx_size),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!(
+                "preferred_model            {}",
+                preferred_model.as_deref().unwrap_or("(auto)")
+            ),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("speech_enabled             {}", speech_enabled),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("clipboard_observation      {}", clipboard_observation),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("ctp_trigger_interval       {}s", ctp_trigger_interval),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("ctp_trigger_sensitivity    {}", ctp_trigger_sensitivity),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!(
+                "working_memory_budget      {} tokens",
+                working_memory_budget
+            ),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("memory_limit               {}MB", memory_limit),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("shutdown_timeout           {}s", shutdown_timeout),
+        );
+        self.add_message(MessageRole::System, "".to_string());
+        self.add_message(
+            MessageRole::System,
+            "Edit the config file directly to change settings. Restart Sena after editing."
+                .to_string(),
         );
     }
 
@@ -1093,6 +1313,19 @@ fn exit_command_result(command: &str) -> Option<DispatchResult> {
     }
 }
 
+fn is_vision_capable_model(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("llava")
+        || n.contains("bakllava")
+        || n.contains("vision")
+        || n.contains("minicpm-v")
+        || n.contains("phi-3-v")
+        || n.contains("phi3-v")
+        || n.contains("moondream")
+        || n.contains("idefics")
+        || n.contains("cogvlm")
+}
+
 /// Run the interactive shell. Returns the exit reason for the restart loop.
 pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
     // ── Enter raw mode and alternate screen ───────────────────────────────────
@@ -1122,7 +1355,10 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
         // Render the current state
-        terminal.draw(|f| shell.render(f))?;
+        if let Err(e) = terminal.draw(|f| shell.render(f)) {
+            shell.add_message(MessageRole::Warning, format!("Display error: {}", e));
+            // Try to continue — next frame may succeed
+        }
 
         // Check for Ctrl+C timeout (reset if 3 seconds passed)
         if let Some(first_press) = shell.ctrl_c_first_press {
@@ -1153,7 +1389,7 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                         exit_reason = ShellExitReason::Shutdown;
                         break;
                     }
-                    shell.handle_bus_event(&ev);
+                    shell.handle_bus_event(ev).await;
                 }
             }
 
@@ -1162,26 +1398,44 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                 shell.handle_transparency_timeout();
 
                 // Poll for crossterm events
-                if event::poll(Duration::from_millis(0))? {
-                    match event::read()? {
-                        // ── Mouse scroll ─────────────────────────────────────
-                        event::Event::Mouse(mouse) => {
-                            match mouse.kind {
-                                event::MouseEventKind::ScrollUp => {
-                                    shell.scroll_offset = shell.scroll_offset.saturating_add(3);
-                                }
-                                event::MouseEventKind::ScrollDown => {
-                                    shell.scroll_offset = shell.scroll_offset.saturating_sub(3);
-                                    // Snap to bottom when at bottom
-                                    if shell.scroll_offset == 0 {
-                                        shell.scroll_offset = 0;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+                let poll_result = event::poll(Duration::from_millis(0));
+                match poll_result {
+                    Ok(true) => {},
+                    Ok(false) => continue,
+                    Err(e) => {
+                        shell.add_message(
+                            MessageRole::Warning,
+                            format!("Poll error: {}", e),
+                        );
+                        continue;
+                    }
+                }
 
-                        event::Event::Key(key) => {
+                match event::read() {
+                    Err(e) => {
+                        shell.add_message(
+                            MessageRole::Warning,
+                            format!("Input error: {}", e),
+                        );
+                        continue;
+                    }
+                    Ok(event::Event::Mouse(mouse)) => {
+                        match mouse.kind {
+                            event::MouseEventKind::ScrollUp => {
+                                shell.scroll_offset = shell.scroll_offset.saturating_add(3);
+                            }
+                            event::MouseEventKind::ScrollDown => {
+                                shell.scroll_offset = shell.scroll_offset.saturating_sub(3);
+                                // Snap to bottom when at bottom
+                                if shell.scroll_offset == 0 {
+                                    shell.scroll_offset = 0;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    Ok(event::Event::Key(key)) => {
                         // Filter out key release events (Windows)
                         if key.kind != KeyEventKind::Press {
                             continue;
@@ -1422,7 +1676,6 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
                         _ => {} // resize, focus, paste — ignore
                     }
-                }
             }
         }
     }
@@ -1648,6 +1901,28 @@ mod tests {
             exit_command_result("/shutdown"),
             Some(DispatchResult::Shutdown)
         );
+    }
+
+    #[test]
+    fn is_vision_capable_model_detects_known_patterns() {
+        assert!(is_vision_capable_model("llava-1.6"));
+        assert!(is_vision_capable_model("MiniCPM-V-2"));
+        assert!(is_vision_capable_model("phi3-v-mini"));
+        assert!(!is_vision_capable_model("llama3.2:3b"));
+    }
+
+    #[test]
+    fn slash_commands_include_voice_and_screenshot() {
+        assert!(SLASH_COMMANDS.iter().any(|cmd| cmd.command == "/voice"));
+        assert!(SLASH_COMMANDS
+            .iter()
+            .any(|cmd| cmd.command == "/screenshot"));
+
+        let voice_dropdown = SlashDropdown::from_prefix("/vo");
+        assert_eq!(voice_dropdown.selected_command(), Some("/voice"));
+
+        let screenshot_dropdown = SlashDropdown::from_prefix("/scre");
+        assert_eq!(screenshot_dropdown.selected_command(), Some("/screenshot"));
     }
 
     #[test]

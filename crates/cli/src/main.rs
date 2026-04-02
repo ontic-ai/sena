@@ -58,8 +58,6 @@ async fn app_mode(open_cli_on_start: bool) -> Result<()> {
 
     if open_cli_on_start {
         display::info("Booting runtime...");
-    } else {
-        eprintln!("[sena] booting...");
     }
 
     let runtime = Arc::new(runtime::boot().await?);
@@ -74,11 +72,19 @@ async fn app_mode(open_cli_on_start: bool) -> Result<()> {
     let mut needs_onboarding = runtime.is_first_boot;
 
     if open_cli_on_start {
-        let exit_reason = open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await?;
-        if exit_reason == shell::ShellExitReason::Shutdown {
-            return shutdown_runtime(runtime, false).await;
+        match open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await {
+            Ok(shell::ShellExitReason::Shutdown) => {
+                return shutdown_runtime(runtime, false).await;
+            }
+            Ok(shell::ShellExitReason::Close) => {
+                display::info("CLI closed. Tray/runtime still running.");
+            }
+            Err(e) => {
+                display::error(&format!("CLI session error: {}", e));
+                display::info("CLI detached. Runtime continues.");
+            }
         }
-
+    } else {
         display::info("CLI closed. Tray/runtime still running.");
     }
 
@@ -116,6 +122,9 @@ async fn maybe_run_onboarding(
 
     runtime::save_config(&updated_config).await?;
     display::success(&format!("Onboarding saved for {}.", user_name));
+    if let Ok(path) = runtime::config::config_path() {
+        display::info(&format!("Config file: {}", path.display()));
+    }
     *needs_onboarding = false;
 
     Ok(())
@@ -136,9 +145,17 @@ async fn run_headless_loop(
             event = bus_rx.recv() => {
                 match event {
                     Ok(Event::System(SystemEvent::CliAttachRequested)) => {
-                        let exit_reason = open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await?;
-                        if exit_reason == shell::ShellExitReason::Shutdown {
-                            break;
+                        match open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await {
+                            Ok(shell::ShellExitReason::Shutdown) => {
+                                break;
+                            }
+                            Ok(shell::ShellExitReason::Close) => {
+                                eprintln!("[sena] CLI session closed");
+                            }
+                            Err(e) => {
+                                eprintln!("[sena] CLI session error: {}", e);
+                                eprintln!("[sena] Runtime continues in headless mode");
+                            }
                         }
                     }
                     Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
