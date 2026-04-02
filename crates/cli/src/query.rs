@@ -99,7 +99,6 @@ async fn query_on_bus_with_timeout(
 /// - Query parsing failure
 /// - No matching response received or timeout
 pub async fn execute_query(query: TransparencyQuery) -> Result<String> {
-    // Boot runtime (actors are wired inside boot())
     let runtime = runtime::boot().await?;
 
     // Run the query against the live bus
@@ -110,6 +109,19 @@ pub async fn execute_query(query: TransparencyQuery) -> Result<String> {
     runtime::shutdown(runtime, shutdown_timeout).await?;
 
     result
+}
+
+/// Entry point for `sena query <type>` command.
+pub async fn run_from_args(args: &[String]) -> anyhow::Result<()> {
+    if args.len() < 3 {
+        eprintln!("Error: 'query' requires a type argument");
+        eprintln!("Usage: sena query <observation|memory|explanation>");
+        anyhow::bail!("Missing query type")
+    }
+    let query = parse_query_type(&args[2])?;
+    let output = execute_query(query).await?;
+    println!("{output}");
+    Ok(())
 }
 
 /// Wait for a response matching the query type.

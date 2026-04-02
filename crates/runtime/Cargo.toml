@@ -15,11 +15,11 @@ async-trait = { workspace = true }
 bus = { path = "../bus" }
 crypto = { path = "../crypto" }
 ctp = { path = "../ctp" }
-inference = { path = "../inference" }
-memory = { path = "../memory" }
 platform = { path = "../platform" }
 serde = { workspace = true }
 soul = { path = "../soul" }
+memory = { path = "../memory" }
+inference = { path = "../inference" }
 speech = { path = "../speech" }
 rand = { workspace = true }
 sysinfo = "0.32"
@@ -33,7 +33,5 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3.13"
 sysinfo = "0.32"
 soul = { path = "../soul" }
-memory = { path = "../memory" }
-inference = { path = "../inference" }
 bus = { path = "../bus" }
 crypto = { path = "../crypto" }

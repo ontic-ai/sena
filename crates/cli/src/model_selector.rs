@@ -18,7 +18,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem},
 };
-use runtime::{discover_models, ollama_models_dir};
 
 use crate::display;
 use crate::display::{BOLD, CYAN, DIM, RESET};
@@ -162,7 +161,7 @@ pub fn discover_models_at(path: &Path) -> Result<Vec<ModelInfo>> {
         return Err(anyhow!("Path is not a directory: {}", path.display()));
     }
 
-    let registry = discover_models(path).map_err(|e| {
+    let registry = runtime::discover_models(path).map_err(|e| {
         anyhow!(
             "Model discovery failed: {}. Run 'ollama pull <model>' first.",
             e
@@ -184,12 +183,12 @@ pub fn discover_models_at(path: &Path) -> Result<Vec<ModelInfo>> {
 /// Discovers models, prints menu, reads selection from its own stdin handle,
 /// and persists the choice to config. Does NOT require the runtime to be booted.
 pub async fn run() -> Result<()> {
-    let models_dir = ollama_models_dir()
+    let models_dir = runtime::ollama_models_dir()
         .map_err(|e| anyhow!("Could not find Ollama models directory: {}", e))?;
 
     display::info(&format!("Scanning: {}", models_dir.display()));
 
-    let registry = discover_models(&models_dir).map_err(|e| {
+    let registry = runtime::discover_models(&models_dir).map_err(|e| {
         anyhow!(
             "Model discovery failed: {}. Run 'ollama pull <model>' first.",
             e

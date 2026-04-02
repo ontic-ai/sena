@@ -65,23 +65,22 @@ pub enum BootError {
     BroadcastFailed(String),
 }
 
-/// Boot sequence per architecture Â§4.1.
+/// Full boot sequence per architecture §4.1 (all 13 steps).
+/// Runtime is the composition root — all actors are constructed here.
 pub async fn boot() -> Result<Runtime, BootError> {
     // Step 1: Config load
     let config = crate::config::load_or_create_config()
         .await
         .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?;
+
     // Step 1.5: First-boot detection — check if Soul.redb exists before any initialization.
-    // We check for the Soul redb encrypted file. If absent, this is the first boot.
-    // Soul actor (initialized at step 4) will create this file on first boot.
-    // On all subsequent boots, the file exists and is_first_boot will be false.
-    // This detection happens BEFORE Soul init to avoid race conditions.
     let is_first_boot = {
         let soul_path = platform::config_dir()
             .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?
             .join("soul.redb.enc");
         !soul_path.exists()
     };
+
     // Step 2: Initialize encryption
     let master_key =
         init_encryption().map_err(|e| BootError::EncryptionInitFailed(e.to_string()))?;
@@ -107,7 +106,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let soul_master_key = MasterKey::from_bytes(*master_key.as_bytes());
     let soul_actor = soul::SoulActor::new(soul_db_path, soul_master_key);
 
-    // Step 5: Actor registry â€” spawn Soul first (lowest-level subsystem)
+    // Step 5: Actor registry — spawn Soul first (lowest-level subsystem)
     let mut registry = ActorRegistry::new();
     spawn_actor(&bus, &mut registry, soul_actor);
 
@@ -120,7 +119,6 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_idle_threshold(config.platform_idle_cpu_threshold_percent)
         .with_screen_capture_enabled(config.screen_capture_enabled);
     // Shared between platform actor (writer) and inference actor (reader).
-    // Must be obtained before spawn_actor consumes platform_actor.
     let vision_frame_store = platform_actor.latest_frame_store();
     spawn_actor(&bus, &mut registry, platform_actor);
 
@@ -133,13 +131,12 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_screen_capture_enabled(config.screen_capture_enabled);
     spawn_actor(&bus, &mut registry, ctp_actor);
 
-    // Step 8: Initialize and spawn memory actor
-    let config_dir =
-        platform::config_dir().map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    // Step 8: Memory actor
+    let config_dir = platform::config_dir()
+        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_dir = config_dir.join("memory");
     std::fs::create_dir_all(&memory_dir)
-        .map_err(|e| BootError::MemoryInitFailed(format!("failed to create memory dir: {e}")))?;
-
+        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_consolidation_interval =
         Duration::from_secs(config.memory_consolidation_interval_secs);
     let memory_idle_threshold = Duration::from_secs(config.memory_consolidation_idle_secs);
@@ -152,28 +149,27 @@ pub async fn boot() -> Result<Runtime, BootError> {
     .with_consolidation_idle_threshold(memory_idle_threshold);
     spawn_actor(&bus, &mut registry, memory_actor);
 
-    // Step 9: Initialize and spawn inference actor
+    // Step 9: Inference actor
     let models_dir = if let Some(path) = config.models_dir.clone() {
         path
     } else {
-        platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
+        platform::ollama_models_dir()
+            .map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
     };
-    let inference_backend = inference::LlamaBackend::new();
-    let inference_actor = inference::InferenceActor::new(models_dir, Box::new(inference_backend))
-        .with_preferred_model(config.preferred_model.clone())
-        .with_vision_frame_store(Arc::clone(&vision_frame_store))
-        .with_tts_enabled(config.speech_enabled)
-        .with_inference_max_tokens(config.inference_max_tokens)
-        .with_inference_ctx_size(config.inference_ctx_size)
-        .with_proactive_speech(config.proactive_speech_enabled)
-        .with_speech_rate_limit(config.speech_rate_limit_secs);
+    let inference_actor =
+        inference::InferenceActor::new(models_dir, Box::new(inference::LlamaBackend::new()))
+            .with_preferred_model(config.preferred_model.clone())
+            .with_vision_frame_store(Arc::clone(&vision_frame_store))
+            .with_tts_enabled(config.speech_enabled)
+            .with_inference_max_tokens(config.inference_max_tokens)
+            .with_inference_ctx_size(config.inference_ctx_size)
+            .with_proactive_speech(config.proactive_speech_enabled)
+            .with_speech_rate_limit(config.speech_rate_limit_secs);
     spawn_actor(&bus, &mut registry, inference_actor);
 
-    // Step 10: PromptComposer is stateless — instantiated per inference cycle.
-    // prompt::PromptComposer::new() is cheap; no actor spawn needed.
+    // Step 10: PromptComposer is stateless — no spawn needed.
 
-    // Step 10.5: Speech onboarding — download models if needed (non-fatal).
-    // Resolve speech_model_dir once and reuse for both onboarding and actor spawning.
+    // Step 10.5: Speech onboarding (non-fatal).
     let mut speech_available = config.speech_enabled;
     let speech_model_dir = config
         .speech_model_dir
@@ -184,11 +180,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
         && speech::onboarding::speech_onboarding_needed(&speech_model_dir).await
     {
         match speech::onboarding::run_speech_onboarding(&bus, &speech_model_dir).await {
-            Ok(_downloaded) => {
-                // Models downloaded successfully — speech actors can be spawned
-            }
+            Ok(_downloaded) => {}
             Err(e) => {
-                // Onboarding failed — disable speech for this session
                 eprintln!("WARN: Speech onboarding failed, disabling speech: {}", e);
                 speech_available = false;
             }
@@ -197,8 +190,6 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
     if speech_available {
-        // STT actor
-        // Use WhisperCpp backend only when whisper feature is enabled
         #[cfg(feature = "whisper")]
         let stt_backend = speech::SttBackend::WhisperCpp;
         #[cfg(not(feature = "whisper"))]
@@ -213,14 +204,12 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, stt_actor);
 
-        // TTS actor
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
             .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, tts_actor);
 
-        // Wakeword actor (optional)
         if config.wakeword_enabled {
             let wakeword_config = speech::wakeword::WakewordConfig {
                 sensitivity: config.wakeword_sensitivity,
@@ -233,11 +222,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
         }
     }
 
-    // Step 12: Initialize system tray (non-fatal — Sena works without it).
+    // Step 12: Initialize system tray (non-fatal).
     let tray_manager =
         crate::tray::TrayManager::new(Arc::clone(&bus), tokio::runtime::Handle::current());
 
-    // Step 12.5: Spawn memory monitor task (background task, non-blocking).
+    // Step 12.5: Spawn memory monitor task.
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
 
     // Step 13: Broadcast BootComplete

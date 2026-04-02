@@ -1,8 +1,4 @@
 //! Sena CLI — application entry point.
-//!
-//! Default mode: interactive REPL (`cargo run`).
-//! Legacy scripting mode: `cargo run -- query <type>` (no REPL, no stdin).
-//! Standalone model picker: `cargo run -- models`.
 
 mod display;
 mod model_selector;
@@ -11,222 +7,21 @@ mod query;
 mod shell;
 mod tui_state;
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
-use bus::{Event, SystemEvent};
-
-enum StartMode {
-    Background,
-    OpenCli,
-    Query,
-    Models,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    match parse_start_mode(&args)? {
-        StartMode::Background => app_mode(false).await,
-        StartMode::OpenCli => app_mode(true).await,
-        StartMode::Query => query_mode(&args).await,
-        StartMode::Models => model_selector::run().await,
-    }
-}
-
-fn parse_start_mode(args: &[String]) -> Result<StartMode> {
     match args.get(1).map(String::as_str) {
-        Some("query") => Ok(StartMode::Query),
-        Some("models") => Ok(StartMode::Models),
-        Some("cli") | Some("interactive") => Ok(StartMode::OpenCli),
-        None => Ok(StartMode::Background),
+        Some("query") => query::run_from_args(&args).await,
+        Some("models") => model_selector::run().await,
+        Some("cli") | Some("interactive") => shell::run_with_boot(true).await,
+        None => shell::run_with_boot(false).await,
         _ => {
-            print_usage();
-            anyhow::bail!(
-                "Invalid arguments. Run with no args for tray mode or 'cli' for the shell."
-            )
+            eprintln!("Usage: sena [cli|query <type>|models]");
+            anyhow::bail!("unknown argument")
         }
     }
 }
 
-async fn app_mode(open_cli_on_start: bool) -> Result<()> {
-    if open_cli_on_start {
-        display::banner();
-    }
-
-    if open_cli_on_start {
-        display::info("Booting runtime...");
-    }
-
-    let runtime = Arc::new(runtime::boot().await?);
-
-    // Force CLI open on first boot for onboarding, regardless of start mode.
-    let open_cli_on_start = open_cli_on_start || runtime.is_first_boot;
-
-    if open_cli_on_start {
-        display::success("Runtime ready.");
-    }
-
-    let mut needs_onboarding = runtime.is_first_boot;
-
-    if open_cli_on_start {
-        match open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await {
-            Ok(shell::ShellExitReason::Shutdown) => {
-                return shutdown_runtime(runtime, false).await;
-            }
-            Ok(shell::ShellExitReason::Close) => {
-                display::info("CLI closed. Tray/runtime still running.");
-            }
-            Err(e) => {
-                display::error(&format!("CLI session error: {}", e));
-                display::info("CLI detached. Runtime continues.");
-            }
-        }
-    } else {
-        display::info("CLI closed. Tray/runtime still running.");
-    }
-
-    run_headless_loop(runtime, needs_onboarding).await
-}
-
-async fn open_cli_session(
-    runtime: Arc<runtime::Runtime>,
-    needs_onboarding: &mut bool,
-) -> Result<shell::ShellExitReason> {
-    maybe_run_onboarding(&runtime, needs_onboarding).await?;
-    shell::run(runtime).await
-}
-
-async fn maybe_run_onboarding(
-    runtime: &Arc<runtime::Runtime>,
-    needs_onboarding: &mut bool,
-) -> Result<()> {
-    if !*needs_onboarding {
-        return Ok(());
-    }
-
-    let models_available = runtime::ollama_models_dir()
-        .ok()
-        .and_then(|models_dir| runtime::discover_models(&models_dir).ok())
-        .map(|registry| !registry.is_empty())
-        .unwrap_or(false);
-
-    let result = onboarding::run_wizard(&runtime.bus, models_available).await?;
-
-    let user_name = result.user_name.clone();
-    let mut updated_config = runtime.config.clone();
-    updated_config.file_watch_paths = result.file_watch_paths;
-    updated_config.clipboard_observation_enabled = result.clipboard_observation_enabled;
-
-    runtime::save_config(&updated_config).await?;
-    display::success(&format!("Onboarding saved for {}.", user_name));
-    if let Ok(path) = runtime::config::config_path() {
-        display::info(&format!("Config file: {}", path.display()));
-    }
-    *needs_onboarding = false;
-
-    Ok(())
-}
-
-async fn run_headless_loop(
-    runtime: Arc<runtime::Runtime>,
-    mut needs_onboarding: bool,
-) -> Result<()> {
-    let mut bus_rx = runtime.bus.subscribe_broadcast();
-
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("[sena] shutdown requested");
-                break;
-            }
-            event = bus_rx.recv() => {
-                match event {
-                    Ok(Event::System(SystemEvent::CliAttachRequested)) => {
-                        match open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await {
-                            Ok(shell::ShellExitReason::Shutdown) => {
-                                break;
-                            }
-                            Ok(shell::ShellExitReason::Close) => {
-                                eprintln!("[sena] CLI session closed");
-                            }
-                            Err(e) => {
-                                eprintln!("[sena] CLI session error: {}", e);
-                                eprintln!("[sena] Runtime continues in headless mode");
-                            }
-                        }
-                    }
-                    Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-
-    drop(bus_rx);
-    shutdown_runtime(runtime, true).await
-}
-
-async fn shutdown_runtime(runtime: Arc<runtime::Runtime>, quiet: bool) -> Result<()> {
-    let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
-    let runtime = Arc::try_unwrap(runtime)
-        .map_err(|_| anyhow::anyhow!("runtime has remaining references at shutdown"))?;
-    runtime::shutdown(runtime, timeout).await?;
-    if quiet {
-        eprintln!("[sena] stopped cleanly");
-    } else {
-        display::success("Sena stopped cleanly.");
-    }
-    Ok(())
-}
-
-/// Legacy scripting mode: single transparency query, print result, exit.
-async fn query_mode(args: &[String]) -> Result<()> {
-    if args.len() < 3 {
-        eprintln!("Error: 'query' requires a type argument");
-        eprintln!("Usage: cargo run -- query <observation|memory|explanation>");
-        anyhow::bail!("Missing query type")
-    }
-
-    let query = query::parse_query_type(&args[2])?;
-    let output = query::execute_query(query).await?;
-    println!("{output}");
-    Ok(())
-}
-
-fn print_usage() {
-    eprintln!("Sena CLI");
-    eprintln!();
-    eprintln!("Usage:");
-    eprintln!("  cargo run                     Start Sena in tray/runtime mode");
-    eprintln!("  cargo run -- cli             Start tray/runtime mode and open the CLI");
-    eprintln!("  cargo run -- models           Pick an Ollama model (no REPL needed)");
-    eprintln!("  cargo run -- query TYPE       Scripting: single query, print, exit");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_start_mode_is_background() {
-        let args = vec!["sena".to_string()];
-        assert!(matches!(
-            parse_start_mode(&args).expect("mode should parse"),
-            StartMode::Background
-        ));
-    }
-
-    #[test]
-    fn cli_argument_requests_shell_session() {
-        let args = vec!["sena".to_string(), "cli".to_string()];
-        assert!(matches!(
-            parse_start_mode(&args).expect("mode should parse"),
-            StartMode::OpenCli
-        ));
-    }
-}
