@@ -39,6 +39,22 @@ pub const PREFERENCES: TableDefinition<&str, &str> = TableDefinition::new("prefe
 /// Single-row table. Key: "user_name". Value: UTF-8 encoded name.
 pub const USER_IDENTITY: TableDefinition<&str, &str> = TableDefinition::new("user_identity");
 
+// ── Identity signal key constants ────────────────────────────────────────────
+// These are the canonical keys for identity signals written to `IDENTITY_SIGNALS`.
+// Any code that reads or writes these signals MUST use these constants.
+
+/// Speaking rate multiplier [0.5, 2.0]. Written by onboarding or user preference.
+pub const SIGNAL_VOICE_RATE: &str = "voice::rate";
+
+/// TTS warmth [0, 100]. Higher = warmer/softer tonal inflection.
+pub const SIGNAL_VOICE_WARMTH: &str = "voice::warmth";
+
+/// Response verbosity [0, 100]. Higher = longer responses.
+pub const SIGNAL_VOICE_VERBOSITY: &str = "voice::verbosity";
+
+/// High-cadence work session count (u64 as string).
+pub const SIGNAL_WORK_HIGH_CADENCE_COUNT: &str = "work_pattern::high_cadence_count";
+
 /// Apply all schema migrations up to [`SCHEMA_VERSION`].
 ///
 /// Safe to call on an existing database â€” only applies missing migrations.

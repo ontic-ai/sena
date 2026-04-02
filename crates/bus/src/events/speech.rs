@@ -115,6 +115,16 @@ pub enum SpeechEvent {
         /// Whether the failure is recoverable (user can retry).
         recoverable: bool,
     },
+
+    /// Wakeword detection suppressed (e.g., while TTS is playing).
+    /// The wakeword actor will not emit WakewordDetected while suppressed.
+    WakewordSuppressed {
+        /// Human-readable reason for suppression.
+        reason: String,
+    },
+
+    /// Wakeword detection resumed after suppression.
+    WakewordResumed,
 }
 
 #[cfg(test)]

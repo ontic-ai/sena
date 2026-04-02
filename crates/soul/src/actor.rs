@@ -179,6 +179,74 @@ impl SoulActor {
         Ok(())
     }
 
+    /// Compute TTS personality parameters from soul identity signals and emit
+    /// a `PersonalityUpdated` event on the bus.
+    fn emit_personality_updated(&mut self, bus: &Arc<EventBus>) -> Result<(), SoulError> {
+        let personality = self.compute_personality()?;
+        let bus_clone = Arc::clone(bus);
+        self.task_set.spawn(async move {
+            let _ = bus_clone
+                .broadcast(Event::Soul(SoulEvent::PersonalityUpdated(personality)))
+                .await;
+        });
+        Ok(())
+    }
+
+    /// Derive TTS personality parameters from stored identity signals.
+    ///
+    /// Returns default middle-ground values when signals are absent (new install).
+    fn compute_personality(
+        &self,
+    ) -> Result<bus::events::soul::PersonalityUpdated, SoulError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let redb = db.db()?;
+        let signals = read_identity_signals(redb)?;
+
+        // Default values for a fresh Soul.
+        let mut rate: f32 = 1.0;
+        let mut warmth: u8 = 60;
+        let mut verbosity: u8 = 50;
+
+        for (key, value) in &signals {
+            match key.as_str() {
+                "voice::rate" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        rate = v.clamp(0.5, 2.0);
+                    }
+                }
+                "voice::warmth" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        warmth = v.min(100);
+                    }
+                }
+                "voice::verbosity" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        verbosity = v.min(100);
+                    }
+                }
+                // Infer from cadence: fast workers tend to prefer brisk responses.
+                "work_pattern::high_cadence_count" => {
+                    if let Ok(n) = value.parse::<u64>() {
+                        if n > 50 {
+                            rate = (rate + 0.1).min(2.0);
+                            verbosity = verbosity.saturating_sub(5);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(bus::events::soul::PersonalityUpdated {
+            rate,
+            warmth,
+            verbosity,
+        })
+    }
+
     fn handle_initialize_with_name(
         &mut self,
         name: String,
@@ -526,7 +594,11 @@ impl Actor for SoulActor {
                             break;
                         }
                         Ok(Event::System(system_event)) => {
+                            let is_boot_complete = matches!(system_event, SystemEvent::BootComplete);
                             let _ = self.absorb_system_signal(system_event);
+                            if is_boot_complete {
+                                let _ = self.emit_personality_updated(&bus);
+                            }
                         }
                         Ok(Event::Platform(platform_event)) => {
                             let _ = self.absorb_platform_signal(platform_event);
@@ -569,9 +641,19 @@ impl Actor for SoulActor {
                                 }
                                 SoulEvent::IdentitySignalEmitted(signal) => {
                                     let _ = self.handle_identity_signal(signal.key, signal.value);
+                                    let _ = self.emit_personality_updated(&bus);
                                 }
                                 SoulEvent::InitializeWithName { name } => {
                                     let _ = self.handle_initialize_with_name(name, &bus);
+                                }
+                                SoulEvent::ExportRequested { path } => {
+                                    // TODO M6: implement full export (event log + identity signals → JSON).
+                                    let _ = bus
+                                        .broadcast(Event::Soul(SoulEvent::ExportFailed {
+                                            reason: "Soul export not yet implemented (M6)".to_string(),
+                                        }))
+                                        .await;
+                                    let _ = path; // suppress unused warning until M6
                                 }
                                 _ => {}
                             }

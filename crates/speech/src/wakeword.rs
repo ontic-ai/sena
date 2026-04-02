@@ -72,6 +72,12 @@ pub struct WakewordActor {
     // Energy-based detection state
     background_noise_level: f32,
     noise_samples_seen: u32,
+    /// True while TTS is speaking — wakeword detection is paused to avoid
+    /// false triggers from playback audio.
+    ///
+    /// TODO M6: when a real wakeword model is used, expose a pause/resume API
+    /// to suspend the model vs unloading it entirely.
+    suppressed: bool,
 }
 
 impl WakewordActor {
@@ -98,6 +104,7 @@ impl WakewordActor {
             last_detection: None,
             background_noise_level: 0.01,
             noise_samples_seen: 0,
+            suppressed: false,
         }
     }
 
@@ -116,6 +123,7 @@ impl WakewordActor {
             last_detection: None,
             background_noise_level: 0.01,
             noise_samples_seen: 0,
+            suppressed: false,
         }
     }
 
@@ -229,6 +237,11 @@ impl WakewordActor {
         buffer: AudioBuffer,
         bus: &Arc<EventBus>,
     ) -> Result<(), ActorError> {
+        // While suppressed (TTS playing), drain audio without detecting.
+        if self.suppressed {
+            return Ok(());
+        }
+
         let confidence = match self.backend {
             WakewordBackend::EnergyBased => self.detect_energy_based(&buffer),
             WakewordBackend::Model => {
@@ -302,6 +315,23 @@ impl Actor for WakewordActor {
                 bus_event = bus_rx.recv() => {
                     match bus_event {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
+                        Ok(Event::Speech(SpeechEvent::SpeakRequested { .. })) => {
+                            self.suppressed = true;
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::WakewordSuppressed {
+                                    reason: "TTS playing".to_string(),
+                                }))
+                                .await;
+                        }
+                        Ok(Event::Speech(
+                            SpeechEvent::SpeechOutputCompleted { .. }
+                            | SpeechEvent::SpeechFailed { .. },
+                        )) => {
+                            self.suppressed = false;
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::WakewordResumed))
+                                .await;
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => {

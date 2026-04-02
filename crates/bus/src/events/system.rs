@@ -54,6 +54,13 @@ pub enum SystemEvent {
         /// Path to the backup file created.
         backup_path: String,
     },
+    /// Request runtime to reload configuration from disk (hot-reload).
+    /// No actors are restarted — only config values are refreshed.
+    ///
+    /// TODO M6: wire to file-watch notification or IPC command.
+    ConfigReloadRequested,
+    /// Configuration was successfully reloaded.
+    ConfigReloaded,
 }
 
 #[cfg(test)]

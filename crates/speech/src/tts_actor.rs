@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 
-use bus::{Actor, ActorError, Event, EventBus, SpeechEvent, SystemEvent};
+use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SpeechEvent, SystemEvent};
 
 use crate::audio_output::AudioOutput;
 use crate::error::SpeechError;
@@ -251,6 +251,11 @@ impl Actor for TtsActor {
                     match bus_event {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             break;
+                        }
+                        Ok(Event::Soul(SoulEvent::PersonalityUpdated(update))) => {
+                            // Apply rate immediately; warmth and verbosity are noted here for
+                            // future Piper SSML integration (TODO M6: pass to synthesis pipeline).
+                            self.tts_rate = update.rate.clamp(0.5, 2.0);
                         }
                         Ok(Event::Speech(SpeechEvent::SpeakRequested { text, request_id })) => {
                             // High-priority interrupt: request_id == 0 clears queue.

@@ -58,6 +58,25 @@ pub struct IdentitySignalEmitted {
     pub timestamp: SystemTime,
 }
 
+/// TTS personality parameters derived from Soul identity state.
+///
+/// Emitted after boot completes and after every identity signal update that
+/// affects voice personality. The speech TTS actor subscribes to this event
+/// and adjusts synthesis parameters accordingly.
+///
+/// - `rate`: speaking rate multiplier (0.5 = slow, 1.0 = normal, 2.0 = fast).
+///   Driven by the user's observed work cadence preference.
+/// - `warmth`: [0, 100] scale. Higher values produce softer tonal inflection.
+///   Driven by `response_warmth` soul preference.
+/// - `verbosity`: [0, 100] scale. Higher values allow longer spoken responses.
+///   Driven by `verbosity_preference` soul preference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PersonalityUpdated {
+    pub rate: f32,
+    pub warmth: u8,
+    pub verbosity: u8,
+}
+
 /// Request for a transparency view of the Soul state for transparency queries.
 #[derive(Debug, Clone)]
 pub struct SoulReadRequest {
@@ -89,6 +108,25 @@ pub enum SoulEvent {
     },
     /// Soul actor confirms name was persisted.
     NameInitialized(SoulNameInitialized),
+    /// TTS personality parameters derived from Soul state.
+    /// Emitted at boot completion and after identity signal updates.
+    PersonalityUpdated(PersonalityUpdated),
+    /// Request Soul to export its event log and identity signals to a file.
+    /// Path is the target export file (JSON).
+    ExportRequested {
+        /// Target path for the exported JSON file.
+        path: std::path::PathBuf,
+    },
+    /// Soul export completed. Contains path to the exported file.
+    ExportCompleted {
+        /// Path to the exported file.
+        path: std::path::PathBuf,
+    },
+    /// Soul export failed.
+    ExportFailed {
+        /// Failure reason.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
