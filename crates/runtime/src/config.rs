@@ -123,6 +123,45 @@ pub struct SenaConfig {
     #[serde(default = "default_stt_energy_threshold")]
     pub stt_energy_threshold: f32,
 
+    /// Custom directory for speech model storage (Whisper, Piper, OpenWakeWord).
+    /// Default: None (uses platform-specific default: macOS ~/Library/Application Support/sena/models/,
+    /// Windows %APPDATA%/sena/models/, Linux ~/.local/share/sena/models/)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_model_dir: Option<PathBuf>,
+
+    /// Whether wakeword detection is active.
+    /// Requires speech_enabled to also be true.
+    /// Default: true
+    #[serde(default = "default_wakeword_enabled")]
+    pub wakeword_enabled: bool,
+
+    /// Wakeword detection sensitivity threshold (0.0-1.0).
+    /// Higher values = more sensitive = more false positives.
+    /// Default: 0.5
+    #[serde(default = "default_wakeword_sensitivity")]
+    pub wakeword_sensitivity: f32,
+
+    /// Whether CTP-triggered inference results are spoken via TTS.
+    /// Default: true (when speech_enabled)
+    #[serde(default = "default_proactive_speech_enabled")]
+    pub proactive_speech_enabled: bool,
+
+    /// Minimum seconds between proactive TTS outputs.
+    /// Prevents rapid-fire speech.
+    /// Default: 10
+    #[serde(default = "default_speech_rate_limit_secs")]
+    pub speech_rate_limit_secs: u64,
+
+    /// TTS voice/model name. For Piper, this is the voice model name.
+    /// Default: None (use first available)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_voice: Option<String>,
+
+    /// TTS speech rate multiplier (0.5-2.0).
+    /// Default: 1.0
+    #[serde(default = "default_tts_rate")]
+    pub tts_rate: f32,
+
     /// Maximum tokens to generate per inference response.
     /// Hardware-aware: lower values use less VRAM/RAM, higher values allow longer responses.
     /// Default: 512
@@ -160,6 +199,13 @@ impl Default for SenaConfig {
             voice_always_listening: default_voice_always_listening(),
             whisper_model_path: None,
             stt_energy_threshold: default_stt_energy_threshold(),
+            speech_model_dir: None,
+            wakeword_enabled: default_wakeword_enabled(),
+            wakeword_sensitivity: default_wakeword_sensitivity(),
+            proactive_speech_enabled: default_proactive_speech_enabled(),
+            speech_rate_limit_secs: default_speech_rate_limit_secs(),
+            tts_voice: None,
+            tts_rate: default_tts_rate(),
             inference_max_tokens: default_inference_max_tokens(),
             inference_ctx_size: default_inference_ctx_size(),
         }
@@ -217,6 +263,21 @@ fn default_voice_always_listening() -> bool {
 fn default_stt_energy_threshold() -> f32 {
     0.01
 }
+fn default_wakeword_enabled() -> bool {
+    true
+}
+fn default_wakeword_sensitivity() -> f32 {
+    0.5
+}
+fn default_proactive_speech_enabled() -> bool {
+    true
+}
+fn default_speech_rate_limit_secs() -> u64 {
+    10
+}
+fn default_tts_rate() -> f32 {
+    1.0
+}
 fn default_inference_max_tokens() -> usize {
     512
 }
@@ -243,6 +304,36 @@ pub enum ConfigError {
 /// Returns the OS-specific config directory for Sena.
 pub fn config_dir() -> Result<PathBuf, ConfigError> {
     platform::config_dir().map_err(|e| ConfigError::ConfigDirUnavailable(e.to_string()))
+}
+
+/// Returns the default speech model directory for the current OS.
+///
+/// - macOS: `~/Library/Application Support/sena/models/`
+/// - Windows: `%APPDATA%\sena\models\`
+/// - Linux: `~/.local/share/sena/models/`
+#[cfg(target_os = "linux")]
+pub fn default_speech_model_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("sena")
+                .join("models")
+        })
+        .unwrap_or_else(|_| PathBuf::from(".").join("models"))
+}
+
+/// Returns the default speech model directory for the current OS.
+///
+/// - macOS: `~/Library/Application Support/sena/models/`
+/// - Windows: `%APPDATA%\sena\models\`
+/// - Linux: `~/.local/share/sena/models/`
+#[cfg(not(target_os = "linux"))]
+pub fn default_speech_model_dir() -> PathBuf {
+    config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("models")
 }
 
 /// Returns the full path to the config file.
