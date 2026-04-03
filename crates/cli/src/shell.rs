@@ -959,6 +959,12 @@ impl Shell {
             Event::System(bus::events::SystemEvent::ConfigReloaded) => {
                 self.add_message(MessageRole::System, "Config reloaded.".to_string());
             }
+            Event::System(bus::events::SystemEvent::ConfigSetFailed { key, reason }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Config set '{}' failed: {}", key, reason),
+                );
+            }
             Event::System(bus::events::SystemEvent::TokenBudgetAutoTuned {
                 old_max_tokens,
                 new_max_tokens,
@@ -1294,47 +1300,41 @@ impl Shell {
                         Ok(idx) => {
                             let devices = runtime::list_input_devices();
                             if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
-                                // Save to config on disk.
-                                match runtime::config::load_or_create_config().await {
-                                    Ok(mut cfg) => {
-                                        if idx == 0 {
-                                            cfg.microphone_device = None;
-                                        } else {
-                                            cfg.microphone_device = Some(name.clone());
-                                        }
-                                        match runtime::save_config(&cfg).await {
-                                            Ok(_) => {
-                                                self.add_message(
-                                                    MessageRole::System,
-                                                    format!(
-                                                        "\u{1f3a4} Microphone set to: {}{}",
-                                                        name,
-                                                        if idx == 0 {
-                                                            " (system default)"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    ),
-                                                );
-                                                self.add_message(
-                                                    MessageRole::System,
-                                                    "Restart Sena for the new microphone to take effect.".to_string(),
-                                                );
-                                            }
-                                            Err(e) => {
-                                                self.add_message(
-                                                    MessageRole::Warning,
-                                                    format!("Failed to save config: {}", e),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.add_message(
-                                            MessageRole::Warning,
-                                            format!("Could not read config: {}", e),
-                                        );
-                                    }
+                                // Send ConfigSetRequested for microphone_device
+                                let value = if idx == 0 {
+                                    String::new() // empty value clears device (system default)
+                                } else {
+                                    name.clone()
+                                };
+
+                                if let Err(e) = self
+                                    .bus
+                                    .broadcast(Event::System(
+                                        bus::events::SystemEvent::ConfigSetRequested {
+                                            key: "microphone_device".to_string(),
+                                            value,
+                                        },
+                                    ))
+                                    .await
+                                {
+                                    self.add_message(
+                                        MessageRole::Warning,
+                                        format!("Failed to send config change: {}", e),
+                                    );
+                                } else {
+                                    self.add_message(
+                                        MessageRole::System,
+                                        format!(
+                                            "\u{1f3a4} Microphone set to: {}{}",
+                                            name,
+                                            if idx == 0 { " (system default)" } else { "" }
+                                        ),
+                                    );
+                                    self.add_message(
+                                        MessageRole::System,
+                                        "Restart Sena for the new microphone to take effect."
+                                            .to_string(),
+                                    );
                                 }
                             } else {
                                 self.add_message(
@@ -1722,132 +1722,28 @@ impl Shell {
 
     /// Update a single config field from the CLI.
     ///
-    /// Loads the current config from disk, modifies the requested key, and saves.
-    /// Some changes (e.g. speech_enabled) require a restart to take effect in running actors.
+    /// Broadcasts a ConfigSetRequested event to the supervisor.
+    /// The response (ConfigReloaded or ConfigSetFailed) arrives asynchronously via handle_bus_event.
     async fn set_config_value(&mut self, key: &str, value: &str) {
-        let mut config = match runtime::config::load_or_create_config().await {
-            Ok(c) => c,
-            Err(e) => {
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Could not read config: {}", e),
-                );
-                return;
-            }
-        };
-
-        let result: Result<(), String> = match key {
-            "speech_enabled" => value
-                .parse::<bool>()
-                .map(|v| config.speech_enabled = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "voice_always_listening" => value
-                .parse::<bool>()
-                .map(|v| config.voice_always_listening = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "wakeword_enabled" => value
-                .parse::<bool>()
-                .map(|v| config.wakeword_enabled = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "proactive_speech_enabled" => value
-                .parse::<bool>()
-                .map(|v| config.proactive_speech_enabled = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "clipboard_observation_enabled" => value
-                .parse::<bool>()
-                .map(|v| config.clipboard_observation_enabled = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "screen_capture_enabled" => value
-                .parse::<bool>()
-                .map(|v| config.screen_capture_enabled = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "inference_max_tokens" => value
-                .parse::<usize>()
-                .map(|v| config.inference_max_tokens = v)
-                .map_err(|_| "expected a positive integer".to_string()),
-            "inference_ctx_size" => value
-                .parse::<u32>()
-                .map(|v| config.inference_ctx_size = v)
-                .map_err(|_| "expected a positive integer".to_string()),
-            "auto_tune_tokens" => value
-                .parse::<bool>()
-                .map(|v| config.auto_tune_tokens = v)
-                .map_err(|_| "expected true or false".to_string()),
-            "auto_tune_min_tokens" => value
-                .parse::<usize>()
-                .map(|v| config.auto_tune_min_tokens = v)
-                .map_err(|_| "expected a positive integer".to_string()),
-            "auto_tune_max_tokens" => value
-                .parse::<usize>()
-                .map(|v| config.auto_tune_max_tokens = v)
-                .map_err(|_| "expected a positive integer".to_string()),
-            "ctp_trigger_interval_secs" => value
-                .parse::<u64>()
-                .map(|v| config.ctp_trigger_interval_secs = v)
-                .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
-            "ctp_trigger_sensitivity" => value
-                .parse::<f64>()
-                .map(|v| config.ctp_trigger_sensitivity = v)
-                .map_err(|_| "expected a decimal number (0.0–1.0)".to_string()),
-            "tts_rate" => value
-                .parse::<f32>()
-                .map(|v| config.tts_rate = v)
-                .map_err(|_| "expected a decimal number (0.5–2.0)".to_string()),
-            "memory_limit_mb" => value
-                .parse::<usize>()
-                .map(|v| config.memory_limit_mb = v)
-                .map_err(|_| "expected a positive integer (MB)".to_string()),
-            "shutdown_timeout_secs" => value
-                .parse::<u64>()
-                .map(|v| config.shutdown_timeout_secs = v)
-                .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
-            "preferred_model" => {
-                config.preferred_model = if value == "auto" || value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                };
-                Ok(())
-            }
-            _ => Err(format!(
-                "unknown key '{}'. Run /config to see editable keys.",
-                key
-            )),
-        };
-
-        match result {
-            Err(e) => {
-                self.add_message(MessageRole::Warning, format!("Config set failed: {}", e));
-            }
-            Ok(()) => {
-                match runtime::save_config(&config).await {
-                    Ok(_) => {
-                        self.add_message(
-                            MessageRole::System,
-                            format!("Config updated: {} = {}", key, value),
-                        );
-                        // Broadcast ConfigReloadRequested so the runtime can
-                        // hot-reload non-actor config values in the supervision loop.
-                        let _ = self
-                            .bus
-                            .broadcast(Event::System(
-                                bus::events::SystemEvent::ConfigReloadRequested,
-                            ))
-                            .await;
-                        // Some keys can take effect immediately without restart
-                        self.add_message(
-                            MessageRole::System,
-                            "Changes saved. Restart Sena (tray → Quit → reopen) for actor-level changes.".to_string(),
-                        );
-                    }
-                    Err(e) => {
-                        self.add_message(
-                            MessageRole::Warning,
-                            format!("Failed to save config: {}", e),
-                        );
-                    }
-                }
-            }
+        if let Err(e) = self
+            .bus
+            .broadcast(Event::System(
+                bus::events::SystemEvent::ConfigSetRequested {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                },
+            ))
+            .await
+        {
+            self.add_message(
+                MessageRole::Warning,
+                format!("Failed to send config change: {}", e),
+            );
+        } else {
+            self.add_message(
+                MessageRole::System,
+                format!("Setting {} = {}...", key, value),
+            );
         }
     }
 

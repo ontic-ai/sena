@@ -140,6 +140,51 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                             }
                         }
                     }
+                     Ok(Event::System(SystemEvent::ConfigSetRequested { key, value })) => {
+                        // Use spawn_blocking per audit Finding 5 — config I/O is blocking.
+                        let key_clone = key.clone();
+                        let value_clone = value.clone();
+                        let bus_clone = runtime.bus.clone();
+
+                        tokio::task::spawn(async move {
+                            let key_for_log = key_clone.clone();
+                            let value_for_log = value_clone.clone();
+
+                            let result = tokio::task::spawn_blocking(move || {
+                                // Block in thread pool — apply_config_set is async but does file I/O
+                                tokio::runtime::Handle::current()
+                                    .block_on(crate::config::apply_config_set(&key_clone, &value_clone))
+                            })
+                            .await;
+
+                            match result {
+                                Ok(Ok(())) => {
+                                    tracing::info!("config set: {} = {}", key_for_log, value_for_log);
+                                    let _ = bus_clone
+                                        .broadcast(Event::System(SystemEvent::ConfigReloaded))
+                                        .await;
+                                }
+                                Ok(Err(reason)) => {
+                                    tracing::warn!("config set failed: {} — {}", key_for_log, reason);
+                                    let _ = bus_clone
+                                        .broadcast(Event::System(SystemEvent::ConfigSetFailed {
+                                            key: key_for_log,
+                                            reason,
+                                        }))
+                                        .await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("config set task panicked: {}", e);
+                                    let _ = bus_clone
+                                        .broadcast(Event::System(SystemEvent::ConfigSetFailed {
+                                            key: key_for_log,
+                                            reason: format!("task panicked: {}", e),
+                                        }))
+                                        .await;
+                                }
+                            }
+                        });
+                    }
                     Ok(Event::Inference(InferenceEvent::InferenceCompleted {
                         token_count, ..
                     })) if auto_tune_enabled => {

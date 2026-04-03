@@ -63,6 +63,21 @@ pub enum SystemEvent {
     ConfigReloadRequested,
     /// Configuration was successfully reloaded.
     ConfigReloaded,
+    /// Request from CLI/UI to set a config key-value pair.
+    /// The supervisor handles validation, persistence, and broadcasts ConfigReloaded on success.
+    ConfigSetRequested {
+        /// The config key to set (e.g. "speech_enabled", "inference_max_tokens").
+        key: String,
+        /// The string value to parse and apply (e.g. "true", "512").
+        value: String,
+    },
+    /// A config set request failed (invalid key, invalid value, I/O error).
+    ConfigSetFailed {
+        /// The config key that failed to set.
+        key: String,
+        /// Error reason (e.g. "unknown key", "expected integer").
+        reason: String,
+    },
     /// inference_max_tokens was automatically adjusted based on observed usage.
     TokenBudgetAutoTuned {
         /// Previous token limit.
