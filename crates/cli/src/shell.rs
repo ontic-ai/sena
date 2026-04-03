@@ -42,6 +42,10 @@ use std::path::PathBuf;
 
 const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// ASCII logo art embedded at compile time.
+/// Displayed in the sidebar when vertical space allows.
+const LOGO_ART: &str = include_str!("../../../assets/logo.txt");
+
 // ── Slash-command autocomplete ────────────────────────────────────────────────
 
 struct SlashCommand {
@@ -252,13 +256,15 @@ impl Shell {
             ),
         ];
 
-        // Pre-populate actor health with all known actors as Starting
+        // Pre-populate actor health — all actors are confirmed Ready by the time
+        // Shell::new() is called (boot_ready() waits for ActorReady from every actor
+        // before returning the Runtime). Only transitions to Failed on ActorFailed bus events.
         let mut actor_health = HashMap::new();
-        actor_health.insert("Platform", ActorStatus::Starting);
-        actor_health.insert("Inference", ActorStatus::Starting);
-        actor_health.insert("CTP", ActorStatus::Starting);
-        actor_health.insert("Memory", ActorStatus::Starting);
-        actor_health.insert("Soul", ActorStatus::Starting);
+        actor_health.insert("Platform", ActorStatus::Ready);
+        actor_health.insert("Inference", ActorStatus::Ready);
+        actor_health.insert("CTP", ActorStatus::Ready);
+        actor_health.insert("Memory", ActorStatus::Ready);
+        actor_health.insert("Soul", ActorStatus::Ready);
 
         Self {
             bus: runtime.bus.clone(),
@@ -625,6 +631,29 @@ impl Shell {
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::DIM),
             )));
+        }
+
+        // ── Logo (compact ASCII art from assets/logo.txt) ─────────────────────
+        // The logo canvas is ~100 chars wide; we display a centre slice that
+        // captures the S-curve body (roughly columns 30-70).
+        let inner_w = area.width.saturating_sub(4) as usize;
+        if inner_w >= 10 {
+            lines.push(Line::from(""));
+            let logo_lines: Vec<&str> = LOGO_ART
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            // Show up to 14 logo lines so it doesn't dominate the sidebar
+            for raw in logo_lines.iter().take(14) {
+                // Centre-crop: start at column 30, take `inner_w` chars
+                let slice: String = raw.chars().skip(30).take(inner_w).collect();
+                if !slice.trim().is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        slice,
+                        Style::default().fg(Color::Magenta),
+                    )));
+                }
+            }
         }
 
         let block = Block::default()
