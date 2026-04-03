@@ -959,6 +959,26 @@ impl Shell {
             Event::System(bus::events::SystemEvent::ConfigReloaded) => {
                 self.add_message(MessageRole::System, "Config reloaded.".to_string());
             }
+            // In CLI-only mode (transitional, per §8.1), the supervisor isn't running,
+            // so the shell handles ConfigSetRequested directly. In daemon+IPC mode (Phase 6+),
+            // the supervisor handles this and the shell only renders the response events.
+            Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => {
+                match runtime::config::apply_config_set(&key, &value).await {
+                    Ok(()) => {
+                        tracing::info!("config set: {} = {}", key, value);
+                        let _ = self
+                            .bus
+                            .broadcast(Event::System(bus::events::SystemEvent::ConfigReloaded))
+                            .await;
+                    }
+                    Err(reason) => {
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("Config set '{}' failed: {}", key, reason),
+                        );
+                    }
+                }
+            }
             Event::System(bus::events::SystemEvent::ConfigSetFailed { key, reason }) => {
                 self.add_message(
                     MessageRole::Warning,
