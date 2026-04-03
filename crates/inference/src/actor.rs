@@ -1002,6 +1002,10 @@ impl Actor for InferenceActor {
                 .map_err(|e| {
                     ActorError::StartupFailed(format!("broadcast warning failed: {}", e))
                 })?;
+            // Force CPU: GPU was detected but this binary has no GPU features compiled in.
+            // Without this override, load_model passes n_gpu_layers=999 to llama.cpp which
+            // attempts CUDA/Metal allocations and crashes with STATUS_ACCESS_VIOLATION.
+            self.backend_type = BackendType::Cpu;
         }
 
         // Perform model discovery
@@ -1079,6 +1083,23 @@ impl Actor for InferenceActor {
                             // Proactive inference: CTP determined context is worth reasoning about.
                             // Compose a context-derived prompt and run inference.
                             self.last_snapshot = Some(snapshot.clone());
+
+                            // Guard: only run proactive inference if the model is already loaded.
+                            // Never call ensure_loaded() proactively — model loading is an
+                            // expensive, blocking native operation (llama.cpp C FFI) that must
+                            // only happen on the first explicit user request, not eagerly on
+                            // CTP triggers. A crash in llama.cpp during spawn_blocking is a
+                            // native STATUS_ACCESS_VIOLATION that terminates the whole process.
+                            let model_is_ready = self
+                                .backend
+                                .lock()
+                                .map(|g| g.is_loaded())
+                                .unwrap_or(false);
+                            if !model_is_ready {
+                                // Skip silently — model will be loaded on next user request.
+                                continue;
+                            }
+
                             let request_id = self.proactive_request_counter;
                             self.proactive_request_counter =
                                 self.proactive_request_counter.wrapping_add(1) % 1000;

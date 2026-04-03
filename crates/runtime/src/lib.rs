@@ -36,7 +36,9 @@ pub enum RuntimeError {
 /// broadcasts `BootComplete`, then enters the supervision loop.
 /// Blocks until shutdown completes.
 pub async fn run_background() -> Result<(), RuntimeError> {
+    eprintln!("[sena] starting in background mode");
     let runtime = boot_ready_impl().await?;
+    eprintln!("[sena] all actors ready — entering supervision loop");
     supervisor::supervision_loop(runtime).await?;
     Ok(())
 }

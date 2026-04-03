@@ -46,12 +46,21 @@ impl TriggerGate {
     ///
     /// Returns true if a ThoughtEvent should be emitted.
     /// Updates internal state to mark the trigger time.
+    ///
+    /// # Warm-up behaviour
+    /// The first call always returns `false` and records the current time as the
+    /// baseline. A thought event is only emitted after one full `interval` has
+    /// elapsed from startup. This prevents the CTP from firing proactive
+    /// inference within milliseconds of boot before the inference backend or
+    /// any models are loaded — an early call into llama.cpp C FFI can crash
+    /// the process with STATUS_ACCESS_VIOLATION (exit 0xC0000005).
     pub fn should_trigger(&mut self, snapshot: &ContextSnapshot) -> bool {
         let now = Instant::now();
         let periodic_trigger = match self.last_trigger {
             None => {
+                // First call: record baseline, do NOT fire.
                 self.last_trigger = Some(now);
-                true
+                false
             }
             Some(last) if now.duration_since(last) >= self.interval => {
                 self.last_trigger = Some(now);
@@ -78,11 +87,13 @@ impl TriggerGate {
         periodic_trigger || diff_trigger
     }
 
-    /// Reset the trigger timer.
+    /// Reset the trigger timer so the next call to `should_trigger()` fires immediately.
     ///
-    /// This allows the next call to should_trigger() to immediately return true.
+    /// Sets `last_trigger` to a time already past the interval so the interval check
+    /// fires on the very next call, bypassing the startup warm-up guard.
     pub fn reset(&mut self) {
-        self.last_trigger = None;
+        self.last_trigger =
+            Some(Instant::now() - self.interval - Duration::from_secs(1));
     }
 }
 
@@ -162,57 +173,64 @@ mod tests {
     }
 
     #[test]
-    fn test_first_check_triggers() {
+    fn first_check_does_not_trigger_warm_up_guard() {
+        // The first call must NOT fire — it only sets the baseline timestamp.
+        // Firing immediately causes proactive inference to run before models are
+        // loaded, which crashes the process via STATUS_ACCESS_VIOLATION in
+        // llama.cpp C FFI (exit 0xC0000005).
         let mut gate = TriggerGate::new(Duration::from_secs(5));
-        assert!(gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
-    fn test_second_check_within_interval_does_not_trigger() {
+    fn second_check_within_interval_does_not_trigger() {
         let mut gate = TriggerGate::new(Duration::from_secs(1));
 
-        // First trigger
-        assert!(gate.should_trigger(&snapshot("Code")));
+        // First call: warm-up, no trigger.
+        assert!(!gate.should_trigger(&snapshot("Code")));
 
-        // Immediate second check should not trigger
+        // Immediate second check should not trigger either.
         assert!(!gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
-    fn test_check_after_interval_triggers() {
+    fn check_after_interval_triggers() {
         let mut gate = TriggerGate::new(Duration::from_millis(100));
 
-        // First trigger
-        assert!(gate.should_trigger(&snapshot("Code")));
+        // Warm-up call: does not trigger, records baseline.
+        assert!(!gate.should_trigger(&snapshot("Code")));
 
-        // Wait for interval to pass
+        // Wait for interval to pass.
         sleep(Duration::from_millis(150));
 
-        // Should trigger again
+        // Should trigger now that the interval has elapsed.
         assert!(gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
-    fn test_reset_allows_immediate_trigger() {
+    fn reset_allows_immediate_trigger() {
         let mut gate = TriggerGate::new(Duration::from_secs(10));
 
-        // First trigger
-        assert!(gate.should_trigger(&snapshot("Code")));
-
-        // Should not trigger immediately
+        // Warm-up: no trigger.
         assert!(!gate.should_trigger(&snapshot("Code")));
 
-        // Reset the gate
+        // Within interval: no trigger.
+        assert!(!gate.should_trigger(&snapshot("Code")));
+
+        // Reset sets the baseline to a past time so the interval is already elapsed.
         gate.reset();
 
-        // Should trigger again immediately after reset
+        // Should trigger immediately after reset.
         assert!(gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
     fn context_switch_triggers_without_waiting_interval() {
+        // With a huge interval, a context switch (score 0.55 >= threshold 0.50) fires.
         let mut gate = TriggerGate::new(Duration::from_secs(9999));
-        assert!(gate.should_trigger(&snapshot("Code")));
+        // Warm-up call — no trigger, but records "Code" as previous snapshot.
+        assert!(!gate.should_trigger(&snapshot("Code")));
+        // Context diff: app changed → score 0.55 → diff_trigger fires.
         assert!(gate.should_trigger(&snapshot("Browser")));
     }
 
@@ -230,7 +248,9 @@ mod tests {
             confidence: 0.7,
         });
 
-        assert!(gate.should_trigger(&first));
+        // Warm-up with first snapshot — no trigger.
+        assert!(!gate.should_trigger(&first));
+        // Task changed: score += 0.30, threshold at sensitivity=1.0 is 0.25 → fires.
         assert!(gate.should_trigger(&second));
     }
 }
