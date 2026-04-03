@@ -96,7 +96,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         command: "/config",
-        description: "Show config file path and current settings",
+        description: "Show settings (/config set <key> <value> to edit)",
     },
     SlashCommand {
         command: "/help",
@@ -639,20 +639,12 @@ impl Shell {
         let inner_w = area.width.saturating_sub(4) as usize;
         if inner_w >= 10 {
             lines.push(Line::from(""));
-            let logo_lines: Vec<&str> = LOGO_ART
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .collect();
-            // Show up to 14 logo lines so it doesn't dominate the sidebar
-            for raw in logo_lines.iter().take(14) {
-                // Centre-crop: start at column 30, take `inner_w` chars
-                let slice: String = raw.chars().skip(30).take(inner_w).collect();
-                if !slice.trim().is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        slice,
-                        Style::default().fg(Color::Magenta),
-                    )));
-                }
+            for raw in LOGO_ART.lines().filter(|l| !l.trim().is_empty()) {
+                let content: String = raw.chars().take(inner_w).collect();
+                lines.push(Line::from(Span::styled(
+                    content,
+                    Style::default().fg(Color::Magenta),
+                )));
             }
         }
 
@@ -1215,7 +1207,14 @@ impl Shell {
                 DispatchResult::Continue
             }
             "/config" => {
-                self.show_config();
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.get(1) == Some(&"set") {
+                    let key = parts.get(2).copied().unwrap_or("");
+                    let value = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+                    self.set_config_value(key, &value).await;
+                } else {
+                    self.show_config().await;
+                }
                 DispatchResult::Continue
             }
             "/help" | "/h" => {
@@ -1378,7 +1377,7 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "/config                Show config file path and current settings".to_string(),
+            "/config                Show and edit settings (/config set <key> <value>)".to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -1421,23 +1420,24 @@ impl Shell {
         );
     }
 
-    /// Show config file path and current settings.
-    fn show_config(&mut self) {
+    /// Show config file path and current settings (reads directly from config file).
+    async fn show_config(&mut self) {
         let config_path = runtime::config::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "(unavailable)".to_string());
 
-        // Clone config values to avoid borrow checker issues
-        let inference_max_tokens = self.runtime.config.inference_max_tokens;
-        let inference_ctx_size = self.runtime.config.inference_ctx_size;
-        let preferred_model = self.runtime.config.preferred_model.clone();
-        let speech_enabled = self.runtime.config.speech_enabled;
-        let clipboard_observation = self.runtime.config.clipboard_observation_enabled;
-        let ctp_trigger_interval = self.runtime.config.ctp_trigger_interval_secs;
-        let ctp_trigger_sensitivity = self.runtime.config.ctp_trigger_sensitivity;
-        let working_memory_budget = self.runtime.config.working_memory_token_budget;
-        let memory_limit = self.runtime.config.memory_limit_mb;
-        let shutdown_timeout = self.runtime.config.shutdown_timeout_secs;
+        // Read fresh config from file — not the boot-time snapshot — so edits
+        // made since startup are reflected immediately.
+        let config = match runtime::config::load_or_create_config().await {
+            Ok(c) => c,
+            Err(e) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Could not read config file: {}", e),
+                );
+                return;
+            }
+        };
 
         self.add_message(MessageRole::System, "━━  Configuration".to_string());
         self.add_message(MessageRole::System, format!("Config file: {}", config_path));
@@ -1445,56 +1445,157 @@ impl Shell {
 
         self.add_message(
             MessageRole::System,
-            format!("inference_max_tokens       {}", inference_max_tokens),
+            format!("inference_max_tokens       {}", config.inference_max_tokens),
         );
         self.add_message(
             MessageRole::System,
-            format!("inference_ctx_size         {}", inference_ctx_size),
+            format!("inference_ctx_size         {}", config.inference_ctx_size),
         );
         self.add_message(
             MessageRole::System,
             format!(
                 "preferred_model            {}",
-                preferred_model.as_deref().unwrap_or("(auto)")
+                config.preferred_model.as_deref().unwrap_or("(auto)")
             ),
         );
         self.add_message(
             MessageRole::System,
-            format!("speech_enabled             {}", speech_enabled),
+            format!("speech_enabled             {}", config.speech_enabled),
         );
         self.add_message(
             MessageRole::System,
-            format!("clipboard_observation      {}", clipboard_observation),
+            format!("clipboard_observation      {}", config.clipboard_observation_enabled),
         );
         self.add_message(
             MessageRole::System,
-            format!("ctp_trigger_interval       {}s", ctp_trigger_interval),
+            format!("ctp_trigger_interval       {}s", config.ctp_trigger_interval_secs),
         );
         self.add_message(
             MessageRole::System,
-            format!("ctp_trigger_sensitivity    {}", ctp_trigger_sensitivity),
+            format!("ctp_trigger_sensitivity    {}", config.ctp_trigger_sensitivity),
         );
         self.add_message(
             MessageRole::System,
             format!(
                 "working_memory_budget      {} tokens",
-                working_memory_budget
+                config.working_memory_token_budget
             ),
         );
         self.add_message(
             MessageRole::System,
-            format!("memory_limit               {}MB", memory_limit),
+            format!("memory_limit               {}MB", config.memory_limit_mb),
         );
         self.add_message(
             MessageRole::System,
-            format!("shutdown_timeout           {}s", shutdown_timeout),
+            format!("shutdown_timeout           {}s", config.shutdown_timeout_secs),
         );
         self.add_message(MessageRole::System, "".to_string());
         self.add_message(
             MessageRole::System,
-            "Edit the config file directly to change settings. Restart Sena after editing."
-                .to_string(),
+            "Use /config set <key> <value> to change a setting. Restart Sena for actor-level changes.".to_string(),
         );
+        self.add_message(
+            MessageRole::System,
+            "Examples: /config set speech_enabled true  |  /config set inference_max_tokens 1024".to_string(),
+        );
+    }
+
+    /// Update a single config field from the CLI.
+    ///
+    /// Loads the current config from disk, modifies the requested key, and saves.
+    /// Some changes (e.g. speech_enabled) require a restart to take effect in running actors.
+    async fn set_config_value(&mut self, key: &str, value: &str) {
+        let mut config = match runtime::config::load_or_create_config().await {
+            Ok(c) => c,
+            Err(e) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Could not read config: {}", e),
+                );
+                return;
+            }
+        };
+
+        let result: Result<(), String> = match key {
+            "speech_enabled" => value.parse::<bool>()
+                .map(|v| config.speech_enabled = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "voice_always_listening" => value.parse::<bool>()
+                .map(|v| config.voice_always_listening = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "wakeword_enabled" => value.parse::<bool>()
+                .map(|v| config.wakeword_enabled = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "proactive_speech_enabled" => value.parse::<bool>()
+                .map(|v| config.proactive_speech_enabled = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "clipboard_observation_enabled" => value.parse::<bool>()
+                .map(|v| config.clipboard_observation_enabled = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "screen_capture_enabled" => value.parse::<bool>()
+                .map(|v| config.screen_capture_enabled = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "inference_max_tokens" => value.parse::<usize>()
+                .map(|v| config.inference_max_tokens = v)
+                .map_err(|_| "expected a positive integer".to_string()),
+            "inference_ctx_size" => value.parse::<u32>()
+                .map(|v| config.inference_ctx_size = v)
+                .map_err(|_| "expected a positive integer".to_string()),
+            "ctp_trigger_interval_secs" => value.parse::<u64>()
+                .map(|v| config.ctp_trigger_interval_secs = v)
+                .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
+            "ctp_trigger_sensitivity" => value.parse::<f64>()
+                .map(|v| config.ctp_trigger_sensitivity = v)
+                .map_err(|_| "expected a decimal number (0.0–1.0)".to_string()),
+            "tts_rate" => value.parse::<f32>()
+                .map(|v| config.tts_rate = v)
+                .map_err(|_| "expected a decimal number (0.5–2.0)".to_string()),
+            "memory_limit_mb" => value.parse::<usize>()
+                .map(|v| config.memory_limit_mb = v)
+                .map_err(|_| "expected a positive integer (MB)".to_string()),
+            "shutdown_timeout_secs" => value.parse::<u64>()
+                .map(|v| config.shutdown_timeout_secs = v)
+                .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
+            "preferred_model" => {
+                config.preferred_model = if value == "auto" || value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                Ok(())
+            }
+            _ => Err(format!(
+                "unknown key '{}'. Run /config to see editable keys.",
+                key
+            )),
+        };
+
+        match result {
+            Err(e) => {
+                self.add_message(MessageRole::Warning, format!("Config set failed: {}", e));
+            }
+            Ok(()) => {
+                match runtime::save_config(&config).await {
+                    Ok(_) => {
+                        self.add_message(
+                            MessageRole::System,
+                            format!("Config updated: {} = {}", key, value),
+                        );
+                        // Some keys can take effect immediately without restart
+                        self.add_message(
+                            MessageRole::System,
+                            "Changes saved. Restart Sena (tray → Quit → reopen) for actor-level changes.".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("Failed to save config: {}", e),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Show speech configuration and status.

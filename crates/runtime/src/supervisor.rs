@@ -157,8 +157,9 @@ fn open_cli_in_new_terminal() {
 #[cfg(target_os = "windows")]
 fn open_cli_impl(exe_path: std::path::PathBuf) {
     let exe = exe_path.display().to_string();
+    // Quote the executable path to handle spaces (e.g. OneDrive paths).
     let result = std::process::Command::new("cmd")
-        .args(["/c", "start", "cmd", "/k", &format!("{} cli", exe)])
+        .args(["/c", "start", "cmd", "/k", &format!("\"{}\" cli", exe)])
         .spawn();
     if let Err(e) = result {
         tracing::error!("failed to open CLI terminal: {}", e);
