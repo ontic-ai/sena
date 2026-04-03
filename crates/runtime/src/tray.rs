@@ -91,7 +91,7 @@ impl TrayManager {
 
 fn event_for_menu_item(item: TrayMenuItem) -> Event {
     match item {
-        TrayMenuItem::ShowStatus | TrayMenuItem::ShowLastThought => {
+        TrayMenuItem::ShowStatus | TrayMenuItem::ShowLastThought | TrayMenuItem::ViewLogs => {
             Event::System(SystemEvent::TrayMenuClicked(item))
         }
         TrayMenuItem::OpenCli => Event::System(SystemEvent::CliAttachRequested),
@@ -164,6 +164,7 @@ fn run_tray_loop(
     let item_status = MenuItem::new("Show Status", true, None);
     let item_thought = MenuItem::new("Show Last Thought", true, None);
     let item_cli = MenuItem::new("Open CLI", true, None);
+    let item_logs = MenuItem::new("View Log Folder", true, None);
     let separator = PredefinedMenuItem::separator();
     let item_quit = MenuItem::new("Quit", true, None);
 
@@ -172,6 +173,8 @@ fn run_tray_loop(
     menu.append(&item_thought)
         .map_err(|e| TrayError::MenuCreationFailed(e.to_string()))?;
     menu.append(&item_cli)
+        .map_err(|e| TrayError::MenuCreationFailed(e.to_string()))?;
+    menu.append(&item_logs)
         .map_err(|e| TrayError::MenuCreationFailed(e.to_string()))?;
     menu.append(&separator)
         .map_err(|e| TrayError::MenuCreationFailed(e.to_string()))?;
@@ -215,6 +218,8 @@ fn run_tray_loop(
                 Some(TrayMenuItem::ShowLastThought)
             } else if menu_event.id == item_cli.id() {
                 Some(TrayMenuItem::OpenCli)
+            } else if menu_event.id == item_logs.id() {
+                Some(TrayMenuItem::ViewLogs)
             } else if menu_event.id == item_quit.id() {
                 Some(TrayMenuItem::Quit)
             } else {

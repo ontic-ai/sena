@@ -938,7 +938,9 @@ impl Shell {
                         );
                     }
                 }
-                bus::events::TrayMenuItem::OpenCli | bus::events::TrayMenuItem::Quit => {}
+                bus::events::TrayMenuItem::OpenCli
+                | bus::events::TrayMenuItem::ViewLogs
+                | bus::events::TrayMenuItem::Quit => {}
             },
             Event::System(bus::events::SystemEvent::CliAttachRequested) => {
                 self.add_message(MessageRole::System, "CLI session already open.".to_string());

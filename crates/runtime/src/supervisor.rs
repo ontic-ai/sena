@@ -111,6 +111,11 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                     Ok(Event::System(SystemEvent::CliAttachRequested)) => {
                         open_cli_in_new_terminal();
                     }
+                    Ok(Event::System(SystemEvent::TrayMenuClicked(
+                        bus::TrayMenuItem::ViewLogs,
+                    ))) => {
+                        open_log_folder();
+                    }
                     Ok(Event::System(SystemEvent::ActorFailed(info))) => {
                         let count = failure_counts.entry(info.actor_name).or_insert(0);
                         *count += 1;
@@ -156,16 +161,17 @@ fn open_cli_in_new_terminal() {
 
 #[cfg(target_os = "windows")]
 fn open_cli_impl(exe_path: std::path::PathBuf) {
-    // Windows cmd start command quirk: first quoted arg is interpreted as window title.
-    // Use empty quotes "" as title, then pass the actual command.
-    // Format: start "" cmd /k "<exe_path>" cli
-    let exe = exe_path.display().to_string();
-    let command = format!("\"{}\" cli", exe);
-    
-    let result = std::process::Command::new("cmd")
-        .args(["/c", "start", "\"\"", "cmd", "/k", &command])
+    use std::os::windows::process::CommandExt;
+    // CREATE_NEW_CONSOLE: spawn the child process in its own new console window.
+    // This avoids the cmd.exe /c start quoting issues that produce
+    // "Windows cannot find '\\'" errors when the exe path contains spaces.
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+    let result = std::process::Command::new(&exe_path)
+        .arg("cli")
+        .creation_flags(CREATE_NEW_CONSOLE)
         .spawn();
-    
+
     if let Err(e) = result {
         tracing::error!("failed to open CLI terminal: {}", e);
     }
@@ -197,4 +203,75 @@ fn open_cli_impl(exe_path: std::path::PathBuf) {
         }
     }
     eprintln!("[sena] no terminal emulator found to open CLI terminal");
+}
+
+/// Open the Sena log folder in the OS file manager.
+///
+/// On Windows: `explorer.exe <dir>`
+/// On macOS: `open <dir>`
+/// On Linux: `xdg-open <dir>`
+///
+/// Non-fatal — errors are logged but do not affect the running daemon.
+fn open_log_folder() {
+    let log_dir = sena_log_dir();
+
+    #[cfg(target_os = "windows")]
+    {
+        let result = std::process::Command::new("explorer.exe")
+            .arg(&log_dir)
+            .spawn();
+        if let Err(e) = result {
+            tracing::error!("failed to open log folder: {}", e);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let result = std::process::Command::new("open")
+            .arg(&log_dir)
+            .spawn();
+        if let Err(e) = result {
+            tracing::error!("failed to open log folder: {}", e);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let result = std::process::Command::new("xdg-open")
+            .arg(&log_dir)
+            .spawn();
+        if let Err(e) = result {
+            tracing::error!("failed to open log folder: {}", e);
+        }
+    }
+}
+
+/// Return the Sena log directory path (same convention as `cli::sena_log_dir`).
+fn sena_log_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("sena")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("Library")
+            .join("Application Support")
+            .join("sena")
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("sena")
+    }
 }

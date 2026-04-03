@@ -18,6 +18,8 @@ pub enum TrayMenuItem {
     ShowLastThought,
     /// Open CLI in a new terminal window.
     OpenCli,
+    /// Open the log folder in the system file manager.
+    ViewLogs,
     /// Quit Sena.
     Quit,
 }
