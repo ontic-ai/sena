@@ -14,6 +14,7 @@ pub mod audio_output;
 pub mod download;
 pub mod error;
 pub mod onboarding;
+mod silence_detector;
 pub mod stt_actor;
 pub mod tts_actor;
 pub mod wakeword;

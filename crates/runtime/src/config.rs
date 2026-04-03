@@ -291,7 +291,7 @@ fn default_stt_energy_threshold() -> f32 {
     0.01
 }
 fn default_wakeword_enabled() -> bool {
-    true
+    false
 }
 fn default_wakeword_sensitivity() -> f32 {
     0.5

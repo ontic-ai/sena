@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "whisper")]
@@ -40,10 +40,9 @@ pub struct SttActor {
     whisper_model_path: Option<String>,
     model_dir: Option<PathBuf>,
     silence_duration_secs: f32,
-    // Silence detection state
-    accumulated_samples: Vec<f32>,
-    last_voice_activity: Option<Instant>,
-    speech_started: bool,
+    // Silence detection state (separate instances prevent cross-contamination)
+    always_listening_vad: crate::silence_detector::SilenceDetector,
+    listen_mode_vad: crate::silence_detector::SilenceDetector,
     // Listen mode state (continuous transcription session)
     listen_session_id: Option<u64>,
     listen_audio_rx: Option<mpsc::UnboundedReceiver<AudioBuffer>>,
@@ -73,9 +72,14 @@ impl SttActor {
             whisper_model_path,
             model_dir: None,
             silence_duration_secs: 1.5,
-            accumulated_samples: Vec::new(),
-            last_voice_activity: None,
-            speech_started: false,
+            always_listening_vad: crate::silence_detector::SilenceDetector::new(
+                stt_energy_threshold,
+                1.5,
+            ),
+            listen_mode_vad: crate::silence_detector::SilenceDetector::new(
+                stt_energy_threshold,
+                1.5,
+            ),
             listen_session_id: None,
             listen_audio_rx: None,
             listen_audio_stream: None,
@@ -93,6 +97,10 @@ impl SttActor {
     /// When silence lasts longer than this after speech, transcription is triggered.
     pub fn with_silence_duration(mut self, secs: f32) -> Self {
         self.silence_duration_secs = secs;
+        self.always_listening_vad =
+            crate::silence_detector::SilenceDetector::new(self.stt_energy_threshold, secs);
+        self.listen_mode_vad =
+            crate::silence_detector::SilenceDetector::new(self.stt_energy_threshold, secs);
         self
     }
 
@@ -171,7 +179,7 @@ impl SttActor {
     async fn transcribe(&self, buffer: AudioBuffer) -> Result<TranscriptionResult, SpeechError> {
         match self.backend_handle.as_ref() {
             Some(SttBackendHandle::Mock) => {
-                let rms = calculate_rms(&buffer.samples);
+                let rms = crate::silence_detector::calculate_rms(&buffer.samples);
                 if rms < 0.001 {
                     Ok(TranscriptionResult {
                         text: String::new(),
@@ -262,108 +270,38 @@ impl SttActor {
         session_id: u64,
         bus: &Arc<EventBus>,
     ) {
-        let rms = calculate_rms(&buffer.samples);
-        let is_voice = rms > self.stt_energy_threshold;
-        let now = Instant::now();
-
-        if is_voice {
-            if !self.speech_started {
-                self.speech_started = true;
-                self.accumulated_samples.clear();
-            }
-            self.accumulated_samples.extend_from_slice(&buffer.samples);
-            self.last_voice_activity = Some(now);
-        } else if self.speech_started {
-            if let Some(last_voice) = self.last_voice_activity {
-                let silence_secs = now.duration_since(last_voice).as_secs_f32();
-                if silence_secs >= self.silence_duration_secs
-                    && !self.accumulated_samples.is_empty()
-                {
-                    let request_id = self.next_request_id();
-                    let transcription_buffer = AudioBuffer {
-                        samples: self.accumulated_samples.clone(),
-                        sample_rate: buffer.sample_rate,
-                        channels: buffer.channels,
-                    };
-                    // Transcribe and emit as listen-mode transcription.
-                    match tokio::time::timeout(
-                        TRANSCRIPTION_TIMEOUT,
-                        self.transcribe(transcription_buffer),
-                    )
-                    .await
-                    {
-                        Ok(Ok(result)) => {
-                            if !result.text.trim().is_empty() {
-                                let _ = bus
-                                    .broadcast(Event::Speech(
-                                        SpeechEvent::ListenModeTranscription {
-                                            text: result.text,
-                                            is_final: true,
-                                            confidence: result.confidence,
-                                            session_id,
-                                        },
-                                    ))
-                                    .await;
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!("listen: transcription error: {}", e);
-                        }
-                        Err(_) => {
-                            tracing::warn!("listen: transcription timeout");
-                        }
+        if let Some(ready_buffer) =
+            self.listen_mode_vad
+                .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+        {
+            match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(ready_buffer)).await {
+                Ok(Ok(result)) => {
+                    if !result.text.trim().is_empty() {
+                        let _ = bus
+                            .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                text: result.text,
+                                is_final: true,
+                                confidence: result.confidence,
+                                session_id,
+                            }))
+                            .await;
                     }
-                    // Reset for next utterance.
-                    self.accumulated_samples.clear();
-                    self.speech_started = false;
-                    self.last_voice_activity = None;
-                    let _ = request_id; // consumed by transcribe path
                 }
+                Ok(Err(e)) => tracing::warn!("listen: transcription error: {}", e),
+                Err(_) => tracing::warn!("listen: transcription timeout"),
             }
         }
     }
 
     /// Handle an audio buffer with silence detection for always-listening mode.
     async fn handle_audio_buffer(&mut self, buffer: AudioBuffer, bus: &Arc<EventBus>) {
-        let rms = calculate_rms(&buffer.samples);
-        let is_voice = rms > self.stt_energy_threshold;
-        let now = Instant::now();
-
-        if is_voice {
-            // Voice activity detected
-            if !self.speech_started {
-                // Start of a new speech segment
-                self.speech_started = true;
-                self.accumulated_samples.clear();
-            }
-            self.accumulated_samples.extend_from_slice(&buffer.samples);
-            self.last_voice_activity = Some(now);
-        } else {
-            // Silence detected
-            if self.speech_started {
-                if let Some(last_voice) = self.last_voice_activity {
-                    let silence_duration = now.duration_since(last_voice).as_secs_f32();
-
-                    if silence_duration >= self.silence_duration_secs {
-                        // Silence threshold exceeded — transcribe accumulated audio
-                        if !self.accumulated_samples.is_empty() {
-                            let request_id = self.next_request_id();
-                            let transcription_buffer = AudioBuffer {
-                                samples: self.accumulated_samples.clone(),
-                                sample_rate: buffer.sample_rate,
-                                channels: buffer.channels,
-                            };
-                            self.transcribe_with_timeout(transcription_buffer, request_id, bus)
-                                .await;
-                        }
-
-                        // Reset state for next speech segment
-                        self.accumulated_samples.clear();
-                        self.speech_started = false;
-                        self.last_voice_activity = None;
-                    }
-                }
-            }
+        if let Some(ready_buffer) =
+            self.always_listening_vad
+                .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+        {
+            let request_id = self.next_request_id();
+            self.transcribe_with_timeout(ready_buffer, request_id, bus)
+                .await;
         }
     }
 }
@@ -455,10 +393,8 @@ impl Actor for SttActor {
                                     })).await;
                                 }
                             }
-                            // Reset silence detection state to start fresh capture
-                            self.accumulated_samples.clear();
-                            self.last_voice_activity = None;
-                            self.speech_started = false;
+                            // Reset only always-listening VAD, not listen mode VAD
+                            self.always_listening_vad.reset();
                         }
                         Ok(Event::Speech(SpeechEvent::ListenModeRequested { session_id })) => {
                             if self.listen_session_id.is_some() {
@@ -477,10 +413,8 @@ impl Actor for SttActor {
                                     self.listen_session_id = Some(session_id);
                                     self.listen_audio_stream = Some(stream);
                                     self.listen_audio_rx = Some(rx);
-                                    // Reset silence detection state for a clean session.
-                                    self.accumulated_samples.clear();
-                                    self.speech_started = false;
-                                    self.last_voice_activity = None;
+                                    // Reset listen mode VAD for a clean session.
+                                    self.listen_mode_vad.reset();
                                     tracing::info!("listen: session {} started", session_id);
                                 }
                                 Err(e) => {
@@ -498,9 +432,7 @@ impl Actor for SttActor {
                                 self.listen_session_id = None;
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
-                                self.accumulated_samples.clear();
-                                self.speech_started = false;
-                                self.last_voice_activity = None;
+                                self.listen_mode_vad.reset();
                                 tracing::info!("listen: session {} stopped", session_id);
                                 let _ = bus
                                     .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
@@ -596,15 +528,6 @@ fn decode_audio_samples(bytes: &[u8]) -> Result<Vec<f32>, SpeechError> {
     Err(SpeechError::TranscriptionFailed(
         "unsupported audio byte payload".to_string(),
     ))
-}
-
-fn calculate_rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-
-    let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
-    (sum_squares / samples.len() as f32).sqrt()
 }
 
 #[cfg(feature = "whisper")]
@@ -703,7 +626,7 @@ fn transcribe_with_whisper(
     let confidence = if normalized.is_empty() {
         0.0
     } else {
-        (calculate_rms(samples) * 10.0).clamp(0.55, 0.99)
+        (crate::silence_detector::calculate_rms(samples) * 10.0).clamp(0.55, 0.99)
     };
 
     Ok(TranscriptionResult {

@@ -333,6 +333,27 @@ impl Actor for WakewordActor {
                                 .broadcast(Event::Speech(SpeechEvent::WakewordResumed))
                                 .await;
                         }
+                        Ok(Event::Speech(SpeechEvent::ListenModeRequested { .. })) => {
+                            self.suppressed = true;
+                            // Release audio stream while listen mode is active.
+                            self.audio_stream.take();
+                            self.audio_rx.take();
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::WakewordSuppressed {
+                                    reason: "listen mode active".to_string(),
+                                }))
+                                .await;
+                        }
+                        Ok(Event::Speech(SpeechEvent::ListenModeStopped { .. })) => {
+                            self.suppressed = false;
+                            // Restart audio capture.
+                            if let Err(e) = self.start_audio_capture() {
+                                tracing::warn!("wakeword: failed to restart audio after listen mode: {}", e);
+                            }
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::WakewordResumed))
+                                .await;
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => {

@@ -1061,10 +1061,12 @@ impl Shell {
                 );
             }
             Event::Speech(SpeechEvent::WakewordDetected { confidence }) => {
-                self.add_message(
-                    MessageRole::System,
-                    format!("[speech] Wakeword detected (confidence: {:.2})", confidence),
-                );
+                if !self.listen_mode_active {
+                    self.add_message(
+                        MessageRole::System,
+                        format!("[speech] Wakeword detected (confidence: {:.2})", confidence),
+                    );
+                }
             }
             Event::Speech(SpeechEvent::SpeechOnboardingStarted) => {
                 self.add_message(
