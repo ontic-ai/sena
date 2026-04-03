@@ -237,12 +237,12 @@ The `list_input_devices()` function currently in `crates/speech/src/audio_input.
 
 | # | Finding | Crates Affected | Severity | Proposed Action | Phase |
 |---|---|---|---|---|---|
-| 1 | STT actor owns too many concerns | `speech` | HIGH | Extract `AudioCaptureManager` + `SilenceDetector` structs internally | 7 |
-| 2 | Dual simultaneous audio streams from same device | `speech` | HIGH | Role-handoff option B: wakeword pauses when STT activates | 7 |
+| 1 | STT actor owns too many concerns | `speech` | HIGH | Extract `AudioCaptureManager` + `SilenceDetector` structs internally | **PARTIAL** — SilenceDetector extracted (25a87d9); AudioCaptureManager deferred to Phase 7 |
+| 2 | Dual simultaneous audio streams from same device | `speech` | HIGH | Role-handoff option B: wakeword pauses when STT activates | **RESOLVED** — Option B implemented (25a87d9); Option A (audio mux) planned Phase 7 |
 | 3a | Speech transcriptions not in CTP signal buffer | `ctp`, `speech` | MEDIUM | Add `SpeechDigest` signal type to CTP | 7 |
 | 3b | CTP does not govern STT activation | `ctp`, `speech` | MEDIUM | Backlog: Phase 8 feature, add ROADMAP note now | 8 |
-| 4 | CLI writes config directly instead of dispatching events | `cli`, `runtime`, `bus` | HIGH | New `ConfigSetRequested` event; supervisor owns config I/O | 6 (before M6.2 IPC) |
-| 5 | Config writes in supervision hot loop without spawn_blocking | `runtime` | MEDIUM | Supervisor holds in-memory config; writes via `spawn_blocking` | 6 |
+| 4 | CLI writes config directly instead of dispatching events | `cli`, `runtime`, `bus` | HIGH | New `ConfigSetRequested` event; supervisor owns config I/O | **RESOLVED** (024b863) |
+| 5 | Config writes in supervision hot loop without spawn_blocking | `runtime` | MEDIUM | Supervisor holds in-memory config; writes via `spawn_blocking` | **RESOLVED** (024b863) |
 | 6 | `analytics.rs` misplaced in `runtime` | `runtime`, `ctp` | LOW | Move `TokenTuner` to `ctp/analytics.rs` | 7 |
 | 7 | `/listen` predates scheduled phase | `cli`, `speech` | LOW | Update ROADMAP.md M7.5 partial-complete status | Now |
 | 8 | Audio device management outside `PlatformAdapter` | `platform`, `speech` | LOW | Plan `PlatformAdapter` audio API for Phase 7 start | 7 |

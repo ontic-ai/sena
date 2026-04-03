@@ -299,15 +299,19 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Transcription pipeline: audio buffer → whisper inference → TranscriptionCompleted event
 - [x] On-demand mode: transcribe on VoiceInputDetected event
 - [x] Always-listening mode: continuous capture with VAD-triggered transcription
+- [x] `SilenceDetector` struct extracted — per-mode VAD instances prevent cross-mode state contamination (Audit Finding F1 partial)
 - [x] Integration test: audio capture → transcription round-trip
 
 #### M5.4 — Wakeword Detection ✅
-- [x] Energy-based wakeword detection (OpenWakeWord model deferred — requires ONNX runtime)
+- [x] Energy-based wakeword detection (placeholder — OpenWakeWord model deferred to BF.1)
 - [x] Always-on low-power detection loop (verified: 0% idle CPU — async bus recv, no polling)
 - [x] Wakeword detected → activate STT for full transcription
 - [x] Configurable wakeword sensitivity threshold
 - [x] Debounce prevents false-positive bursts
 - [x] Graceful fallback: if wakeword model unavailable, uses energy-based detection
+- [x] Wakeword disabled by default (energy-based placeholder not suitable for production use)
+- [x] Wakeword suppressed during `/listen` mode (role handoff — Audit Finding F2 resolved)
+- [x] CLI suppresses wakeword messages during active listen mode
 
 #### M5.5 — Speech + Inference Integration ✅
 - [x] TranscriptionCompleted → inference pipeline (same as CLI chat, via bus)
@@ -386,13 +390,17 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 #### M6.3 — Configuration UI
 - [x] `/config` slash command: view all settings and config file path
-- [x] `/config set <key> <value>`: edit settings from CLI (dispatches ConfigReloadRequested after save)
+- [x] `/config set <key> <value>`: edit settings from CLI (dispatches ConfigSetRequested → supervisor handles save → ConfigReloaded)
+- [x] Config writes moved from CLI to supervisor via `ConfigSetRequested` event (Audit Finding F4 resolved)
+- [x] `/microphone select` config write moved to bus event dispatch (Audit Finding F4)
+- [x] Supervisor config writes use `spawn_blocking` (Audit Finding F5 resolved)
 - [ ] Advanced mode toggle: hides technical settings from general users
 - [ ] Config validation before save
 
 #### M6.4 — Analytics-Driven Auto-Configuration
 - [ ] Local-only hardware profiling: available RAM, VRAM, CPU cores
 - [x] Token limit auto-tuning based on usage telemetry (P95 rolling window, 20% headroom, 10% delta threshold) — implemented as local-only analytics, not hardware-profile-based
+- [x] Token auto-tuner config writes use `spawn_blocking` via supervisor (Audit Finding F5)
 - [ ] Automatic fallback: if inference fails due to resource limits, reduce tokens and retry
 - [ ] Analytics dashboard in CLI: show recommended vs current settings
 
@@ -467,6 +475,7 @@ Parallel-safe with M7.1, M7.2, M7.3, M7.4.
 - [x] New slash command `/listen` in `crates/cli/src/shell.rs`
 - [x] CLI dispatches `SpeechEvent::ListenModeRequested { session_id }`
 - [x] STT actor: enables continuous capture, transcribes after silence threshold, emits `ListenModeTranscription { text, is_final, confidence, session_id }`
+- [x] Listen mode uses independent `SilenceDetector` — wakeword events no longer wipe listen audio (bug fix)
 - [ ] CLI renders: partial results in gray (overwritten), final results in white — currently all renders same style
 - [x] Ctrl+C → `ListenModeStopRequested` → `ListenModeStopped` → clean exit
 - [ ] `[unclear]` in red for confidence < 0.6 — currently low-confidence results are skipped, not labeled
