@@ -488,3 +488,81 @@ If not, please paste: <relevant log excerpt or terminal output>
 - **Level override**: `SENA_LOG` env var overrides the default level (e.g. `SENA_LOG=debug sena`).
 - Keys, passphrases, and DEKs must NEVER appear in any log at any level.
 
+---
+
+## 15. Decision-Making and Autonomy Rules
+
+The agent (Copilot) must follow these meta-rules when making implementation decisions:
+
+### 15.1 Quality First, Then Performance
+
+Implement for correctness and quality first. Optimise for performance second. A correct, well-integrated implementation that is slow is better than a fast, broken one. Performance is a refinement pass, not a design goal.
+
+### 15.2 Choose the Best Option, Not the Easiest
+
+When multiple implementation paths exist:
+- **Easiest ≠ best.** A shortcut that creates governance debt is not acceptable.
+- **Hardest ≠ best.** Over-engineering a simple concern is equally wrong.
+- The right choice depends on the subsystem's complexity requirements. An OS-level personal assistant with a novel CTP system demands high-complexity solutions in some areas and simple ones in others. Use judgment, not defaults.
+
+### 15.3 Ask, Don't Infer
+
+When a decision falls outside the architecture or governance documents, **do not silently infer** what the developer would prefer. Use the `vscode_askQuestions` tool to present:
+- The identified gap
+- 2–4 concrete options (with trade-offs)
+- A recommended default (with reasoning)
+
+This applies to: dependency choices, event routing design, new bus event types, responsibility assignment between crates, and any architectural concern not explicitly covered.
+
+### 15.4 Governance Before Implementation
+
+Before writing code for a new feature or fixing a finding from an audit:
+1. Check that the relevant architecture/governance documents match what you're about to implement.
+2. If they don't, **update the document first**, then implement. Architecture drift is harder to fix than code bugs.
+3. If the document update requires a design decision, ask (per §15.3).
+
+### 15.5 Plug-and-Play Resilience
+
+Every subsystem must degrade gracefully when disabled or when its dependencies are unavailable:
+- Turning off speech must not crash CTP, inference, or memory.
+- Turning off CTP must not crash speech or inference.
+- Disabling any actor must produce a clear log message and a bus event that dependent actors can observe.
+- During development, systematically test on/off combinations to discover governance gaps that are invisible in code review.
+
+### 15.6 Autonomy Over Manual
+
+Sena is designed as an autonomous system. Manual CLI interaction is a **development convenience**, not the product's primary mode. Implementation decisions must always favor the autonomous path:
+- CTP and proactive inference are the primary loops. CLI commands are secondary.
+- Any feature built for CLI must also work (or degrade gracefully) in daemon-only mode.
+- "Works in CLI" is not "works." "Works in background daemon without CLI" is "works."
+
+---
+
+## 16. CTP Governance
+
+CTP (Continuous Thought Processing) is Sena's most architecturally novel subsystem. It is not a simple polling loop — it is the observation and reasoning cortex.
+
+### 16.1 Respect CTP's Complexity
+
+CTP is not a cron job. It is a context-aware, multi-signal processing pipeline:
+1. **Signal ingestion**: platform events, speech transcriptions (planned), visual context
+2. **Context assembly**: multi-modal snapshot construction
+3. **Trigger gating**: intelligent decision on when to think
+4. **Thought emission**: structured ThoughtEvent with full context
+
+Every signal type Sena can observe must eventually flow through CTP's signal buffer. CTP is the only subsystem that decides whether Sena should think proactively. Other actors may request inference (e.g., user chat), but proactive thought is CTP's exclusive domain.
+
+### 16.2 CTP Signal Completeness
+
+If Sena observes it, CTP must know about it. The following must eventually be CTP signals:
+- Active window, clipboard, file events, keystroke cadence (done)
+- Screen captures / visual context (done)
+- Speech transcriptions (planned — see `docs/SUBSYSTEM_AUDIT.md` Finding 3a)
+- Future: calendar events, notification metadata, system resource pressure
+
+A signal that bypasses CTP's buffer is a context gap. Context gaps make CTP's trigger decisions less intelligent, which makes Sena less useful.
+
+### 16.3 CTP Is Not Downplayable
+
+In planning and prioritisation, CTP improvements must not be consistently deferred in favor of surface-level features. CTP is the product's core differentiator. A polished CLI with a weak CTP is a chatbot, not an ambient intelligence.
+

@@ -318,6 +318,28 @@ pub struct ContextSnapshot {
 - CTP never calls the inference layer directly. It emits `ThoughtEventTriggered` on the bus.
 - The trigger gate must be tunable without code changes. Thresholds live in config.
 
+### 6.3 Signal Completeness
+
+If Sena observes it, CTP must eventually know about it. The following must flow through CTP's signal buffer:
+
+| Signal | Status |
+|---|---|
+| Active window, clipboard, file events, keystroke cadence | Done |
+| Screen captures / visual context | Done |
+| Speech transcriptions (STT output) | Planned — see `docs/SUBSYSTEM_AUDIT.md` F3a |
+| Future: calendar events, notification metadata, system resource pressure | Backlog |
+
+A signal that bypasses CTP's buffer is a context gap. Context gaps make CTP's trigger decisions less intelligent. CTP is the product's core differentiator — it must not be consistently deprioritised in favor of surface-level features.
+
+### 6.4 Actor Coordination During Audio Capture
+
+When multiple speech actors require microphone access (wakeword detection, STT always-listening, listen mode), audio capture lifecycle must be coordinated:
+
+- Only one purpose should hold an active audio stream to a given device at any time.
+- When listen mode activates, wakeword detection must be suppressed (via `WakewordSuppressed` event) and its audio stream released.
+- When listen mode deactivates, wakeword can resume (via `WakewordResumed` event) and reclaim its stream.
+- Shared state (accumulated samples, VAD state) must be scoped per-mode, never shared between concurrent capture purposes.
+
 ---
 
 ## 7. Inference
