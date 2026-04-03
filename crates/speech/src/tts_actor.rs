@@ -159,7 +159,12 @@ impl TtsActor {
         let text = text.to_string();
         let rate = self.tts_rate;
 
-        tracing::debug!("tts: generate_and_play — backend={:?} text_len={} rate={}", backend, text.len(), rate);
+        tracing::debug!(
+            "tts: generate_and_play — backend={:?} text_len={} rate={}",
+            backend,
+            text.len(),
+            rate
+        );
 
         match backend {
             ActiveTtsBackend::Mock => {
@@ -172,23 +177,28 @@ impl TtsActor {
                 tracing::debug!("tts: using system platform TTS");
                 let result = tokio::task::spawn_blocking(move || {
                     tracing::debug!("tts: creating default Tts instance");
-                    let mut tts = tts::Tts::default()
-                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("Tts::default failed: {e}")))?;
-                    
+                    let mut tts = tts::Tts::default().map_err(|e| {
+                        SpeechError::SpeechGenerationFailed(format!("Tts::default failed: {e}"))
+                    })?;
+
                     tracing::debug!("tts: setting rate to {}", rate);
-                    tts.set_rate(rate)
-                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("set_rate failed: {e}")))?;
-                    
+                    tts.set_rate(rate).map_err(|e| {
+                        SpeechError::SpeechGenerationFailed(format!("set_rate failed: {e}"))
+                    })?;
+
                     tracing::debug!("tts: calling speak() with text_len={}", text.len());
-                    tts.speak(&text, false)
-                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("speak failed: {e}")))?;
-                    
+                    tts.speak(&text, false).map_err(|e| {
+                        SpeechError::SpeechGenerationFailed(format!("speak failed: {e}"))
+                    })?;
+
                     tracing::debug!("tts: system TTS speak() returned successfully");
                     Ok::<(), SpeechError>(())
                 })
                 .await
-                .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?;
-                
+                .map_err(|e| {
+                    SpeechError::SpeechGenerationFailed(format!("task join failed: {e}"))
+                })?;
+
                 tracing::info!("tts: system platform playback complete");
                 result
             }
@@ -204,7 +214,9 @@ impl TtsActor {
                     Ok::<(), SpeechError>(())
                 })
                 .await
-                .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?
+                .map_err(|e| {
+                    SpeechError::SpeechGenerationFailed(format!("task join failed: {e}"))
+                })?
             }
         }
     }
@@ -231,7 +243,10 @@ impl Actor for TtsActor {
     }
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {
-        tracing::info!("tts: initializing backend (preference: {:?})", self.backend_preference);
+        tracing::info!(
+            "tts: initializing backend (preference: {:?})",
+            self.backend_preference
+        );
         if let Err(e) = self.initialize_backend().await {
             tracing::error!("tts: backend init failed: {}", e);
             let _ = bus

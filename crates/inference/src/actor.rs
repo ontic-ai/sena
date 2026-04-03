@@ -196,7 +196,9 @@ impl InferenceActor {
 
         tracing::info!(
             "inference: loading model '{}' from {:?} with backend {:?}",
-            model_name, path_clone, backend_type
+            model_name,
+            path_clone,
+            backend_type
         );
 
         let load_result = tokio::task::spawn_blocking(move || {
@@ -214,7 +216,11 @@ impl InferenceActor {
             Ok(()) => {
                 // Set current model name for chat template detection
                 self.current_model_name = Some(model_name.clone());
-                tracing::info!("inference: model loaded successfully: {} ({})", model_name, self.backend_type);
+                tracing::info!(
+                    "inference: model loaded successfully: {} ({})",
+                    model_name,
+                    self.backend_type
+                );
 
                 let _ = bus
                     .broadcast(Event::Inference(InferenceEvent::ModelLoaded {
@@ -618,7 +624,9 @@ impl InferenceActor {
         };
         tracing::info!(
             "inference: calling infer request_id={} prompt_len={} max_tokens={}",
-            request_id, prompt_len, params.max_tokens
+            request_id,
+            prompt_len,
+            params.max_tokens
         );
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone

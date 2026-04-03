@@ -276,7 +276,9 @@ impl SttActor {
         } else if self.speech_started {
             if let Some(last_voice) = self.last_voice_activity {
                 let silence_secs = now.duration_since(last_voice).as_secs_f32();
-                if silence_secs >= self.silence_duration_secs && !self.accumulated_samples.is_empty() {
+                if silence_secs >= self.silence_duration_secs
+                    && !self.accumulated_samples.is_empty()
+                {
                     let request_id = self.next_request_id();
                     let transcription_buffer = AudioBuffer {
                         samples: self.accumulated_samples.clone(),
@@ -389,7 +391,10 @@ impl Actor for SttActor {
         }
         tracing::info!("stt: backend initialized");
 
-        tracing::info!("stt: starting audio capture (always_listening={})", self.voice_always_listening);
+        tracing::info!(
+            "stt: starting audio capture (always_listening={})",
+            self.voice_always_listening
+        );
         if let Err(e) = self.maybe_start_audio_capture() {
             tracing::error!("stt: audio capture failed: {}", e);
             let _ = bus

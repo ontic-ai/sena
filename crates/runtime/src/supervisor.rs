@@ -284,9 +284,7 @@ fn open_log_folder() {
 
     #[cfg(target_os = "macos")]
     {
-        let result = std::process::Command::new("open")
-            .arg(&log_dir)
-            .spawn();
+        let result = std::process::Command::new("open").arg(&log_dir).spawn();
         if let Err(e) = result {
             tracing::error!("failed to open log folder: {}", e);
         }
@@ -294,9 +292,7 @@ fn open_log_folder() {
 
     #[cfg(target_os = "linux")]
     {
-        let result = std::process::Command::new("xdg-open")
-            .arg(&log_dir)
-            .spawn();
+        let result = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
         if let Err(e) = result {
             tracing::error!("failed to open log folder: {}", e);
         }

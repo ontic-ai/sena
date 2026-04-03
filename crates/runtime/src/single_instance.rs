@@ -8,7 +8,6 @@
 //! The lock is automatically released when the `SingleInstanceGuard` is dropped (on shutdown).
 
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -56,11 +55,11 @@ impl SingleInstanceGuard {
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;
-            let socket_path = std::env::temp_dir()
-                .join(format!("sena-test-{}.sock", std::process::id()));
+            let socket_path =
+                std::env::temp_dir().join(format!("sena-test-{}.sock", std::process::id()));
             let _ = std::fs::remove_file(&socket_path);
-            let listener = UnixListener::bind(&socket_path)
-                .expect("test dummy guard should always succeed");
+            let listener =
+                UnixListener::bind(&socket_path).expect("test dummy guard should always succeed");
             Self {
                 _listener: listener,
                 socket_path,
@@ -85,7 +84,7 @@ pub fn try_acquire_lock() -> Result<SingleInstanceGuard, SingleInstanceError> {
     #[cfg(unix)]
     {
         let socket_path = ipc_socket_path();
-        
+
         // Try to connect first — if successful, another instance is running.
         if UnixStream::connect(&socket_path).is_ok() {
             return Err(SingleInstanceError::AlreadyRunning);
@@ -167,7 +166,7 @@ pub fn try_acquire_lock() -> Result<SingleInstanceGuard, SingleInstanceError> {
         // CRITICAL: We must NOT close the handle here. Closing it would release the lock.
         // Instead, we intentionally leak the handle so it stays open for the process lifetime.
         // The OS will clean it up when the process exits.
-        std::mem::forget(handle);
+        let _ = handle; // Keep handle value alive without dropping it (raw pointer — OS owns it).
 
         Ok(SingleInstanceGuard {
             _pipe_name: pipe_name,
@@ -191,10 +190,7 @@ pub fn is_daemon_running() -> bool {
         use std::ffi::OsStr;
 
         let pipe_name = r"\\.\pipe\sena_single_instance";
-        let wide_name: Vec<u16> = OsStr::new(pipe_name)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let wide_name: Vec<u16> = OsStr::new(pipe_name).encode_wide().chain(Some(0)).collect();
 
         let handle = unsafe {
             winapi::um::fileapi::CreateFileW(

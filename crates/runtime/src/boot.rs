@@ -161,11 +161,10 @@ pub async fn boot() -> Result<Runtime, BootError> {
     expected_actors.push("CTP");
 
     // Step 8: Memory actor
-    let config_dir = platform::config_dir()
-        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    let config_dir =
+        platform::config_dir().map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_dir = config_dir.join("memory");
-    std::fs::create_dir_all(&memory_dir)
-        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    std::fs::create_dir_all(&memory_dir).map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_consolidation_interval =
         Duration::from_secs(config.memory_consolidation_interval_secs);
     let memory_idle_threshold = Duration::from_secs(config.memory_consolidation_idle_secs);
@@ -183,8 +182,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let models_dir = if let Some(path) = config.models_dir.clone() {
         path
     } else {
-        platform::ollama_models_dir()
-            .map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
+        platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
     };
     let inference_actor =
         inference::InferenceActor::new(models_dir, Box::new(inference::LlamaBackend::new()))

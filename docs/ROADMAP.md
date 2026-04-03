@@ -405,6 +405,94 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ---
 
+## Phase 7 — Natural Speech: Voice Cloning and Continuous Listening
+
+**Goal:** Transform Sena's speech capabilities from basic TTS/STT to natural, emotionally-aware voice interaction. TTS gains voice cloning and emotional prosody driven by Soul state. STT becomes continuous, low-latency, and speaker-aware.
+
+**Entry gate:** Phase 6 exit gate fully satisfied. OQ-TTS-7 and OQ-STT-7 resolved.
+
+**Open Questions (must resolve before work begins):**
+
+| # | Question | Blocks |
+|---|---|---|
+| OQ-TTS-7 | StyleTTS2 integration path: ONNX + onnxruntime-rs vs Python FFI via pyo3? Decision criteria: ONNX preferred if latency < 500ms/sentence and cross-platform builds pass all 3 OS's. | M7.2 |
+| OQ-STT-7 | Does whisper-rs support streaming incremental transcription, or must we buffer and transcribe? If chunked, define max acceptable chunk size for < 800ms latency from speech end to text display. | M7.4 |
+| OQ-VOICE-7 | Voice cloning embeddings are sensitive biometric data. Must be encrypted at rest via crypto crate. Schema: new Soul table `voice_embeddings` AES-256-GCM. Deletion policy: embedding removed when Soul deleted. | M7.3 |
+
+### Milestones
+
+#### M7.1 — Soul Personality Schema Extension
+- [ ] Schema migration v3: add `voice::urgency` [0,100] and `voice::stress_level` [0,100] identity signal keys
+- [ ] Migration file: `crates/soul/src/schema/migrations/003_add_voice_emotion_signals.rs`
+- [ ] Extend `PersonalityUpdated` event: add `urgency: u8`, `stress_level: u8` fields
+- [ ] Soul actor `compute_personality()` reads new signals, defaults: urgency=30, stress=10
+- [ ] Soul logs every `PersonalityUpdated` emission to event log
+- [ ] Unit tests: migration v3 clean, defaults correct, event logged
+
+#### M7.2 — StyleTTS2 Backend Integration (TTS Layer 1)
+Requires OQ-TTS-7 resolved. Parallel-safe with M7.5.
+- [ ] Add ONNX runtime dependency (audit: cross-platform, maintained, MSRV compatible)
+- [ ] New `TtsBackend::StyleTTS2` variant in `crates/speech/src/lib.rs`
+- [ ] `crates/speech/src/styletts2_backend.rs`: ONNX model loading + synthesis → Vec<i16> PCM
+- [ ] TTS actor integration: route to StyleTTS2 when active, fallback to Piper when models absent
+- [ ] Add StyleTTS2 ONNX model URLs to download manifest + SHA-256 checksums
+- [ ] Config: `tts_backend_preference` field (default: "styletts2" if models present, else "piper")
+- [ ] Integration tests: synthesis non-empty on all 3 OS's, fallback works
+- [ ] Exit: synthesis latency < 500ms/sentence on target hardware
+
+#### M7.3 — Voice Cloning (TTS Layer 3)
+Requires M7.2 complete, OQ-VOICE-7 resolved.
+- [ ] New slash command `/voice clone`: CLI dispatches `VoiceCloneRequested { request_id }`
+- [ ] STT actor captures 10s audio → StyleTTS2 speaker encoder → 256-dim embedding
+- [ ] Emits `VoiceCloneCompleted { embedding: Vec<f32>, request_id }`
+- [ ] Soul actor stores encrypted embedding in new `VOICE_EMBEDDINGS` redb table
+- [ ] TTS actor reads embedding from Soul at boot, uses it in every synthesis call
+- [ ] `/voice reset` slash command: clears stored embedding
+- [ ] New bus events: `VoiceCloneRequested`, `VoiceCloneCompleted`, `VoiceEmbeddingRequested`, `VoiceEmbeddingRetrieved`
+- [ ] Privacy: embedding never logged (custom Debug redacts), encrypted at rest via crypto crate
+- [ ] Exit: cloned voice persists across restarts, encrypted in Soul (hex-dump verified)
+
+#### M7.4 — Emotional Prosody (TTS Layer 4)
+Requires M7.1 and M7.3 complete.
+- [ ] StyleTTS2 backend: `compute_style_embedding(warmth, urgency, stress) -> Vec<f32>` — maps personality to style latent space via pre-trained style anchors
+- [ ] TTS actor subscribes to `PersonalityUpdated`, updates `current_personality` state
+- [ ] Every synthesis call passes `current_personality` to backend style conditioning
+- [ ] CTP identity signal path: high work cadence → raise urgency; long calm session → lower stress
+- [ ] Integration test: `PersonalityUpdated` with high urgency → synthesis uses urgent style
+- [ ] Exit: 3/3 blind testers distinguish calm vs urgent prosody; cloned voice identity preserved
+
+#### M7.5 — `/listen` CLI Command (STT Layer 1)
+Requires OQ-STT-7 resolved. Parallel-safe with M7.1, M7.2, M7.3, M7.4.
+- [ ] New slash command `/listen` in `crates/cli/src/shell.rs`
+- [ ] CLI dispatches `SpeechEvent::ListenModeRequested { session_id }`
+- [ ] STT actor: enables continuous capture, transcribes in 1-2s chunks, emits `ListenModeTranscription { text, is_final, confidence, session_id }`
+- [ ] CLI renders: partial results in gray (overwritten), final results in white, `[unclear]` in red for confidence < 0.6
+- [ ] Ctrl+C → `ListenModeStopRequested` → `ListenModeStopped` → clean exit
+- [ ] New bus events: `ListenModeRequested`, `ListenModeTranscription`, `ListenModeStopRequested`, `ListenModeStopped`
+- [ ] Integration test: mock STT emits 3 partial + 1 final, CLI renders all 4 correctly
+- [ ] Exit: partial results < 1s, final results < 2s from silence, unclear words flagged
+
+#### M7.6 — Speaker Diarization (STT Layer 2)
+Requires M7.5 complete. Requires speaker diarization model research complete.
+- [ ] Research phase: evaluate pyannote.audio ONNX export vs Silero VAD + speaker embeddings; document choice in `docs/speech/speaker-diarization-model-choice.md`
+- [ ] `crates/speech/src/diarization.rs`: extract speaker embeddings per chunk, cluster to assign speaker IDs
+- [ ] Extend `ListenModeTranscription`: add `speaker_id: Option<u8>` (0 = primary user, 1+ = others)
+- [ ] CLI displays speaker labels: `[User]` and `[Speaker 1]`
+- [ ] Integration test: mock diarization with alternating speaker IDs renders correctly
+- [ ] Exit: speaker accuracy > 85% in 2-speaker test (5 min, 10+ speaker switches), diarization latency < 300ms/chunk
+
+**Exit gate — Phase 7 complete when:**
+- [ ] All milestones M7.1–M7.6 checked off
+- [ ] TTS uses StyleTTS2 with voice cloning on all 3 OS's
+- [ ] Emotional prosody perceptibly different in calm vs urgent states (3/3 blind testers confirm)
+- [ ] `/listen` command: < 2s latency for final results, unclear words flagged
+- [ ] Speaker diarization accuracy > 85% in 2-speaker test
+- [ ] Voice embedding encrypted at rest (hex-dump verified, no plaintext floats)
+- [ ] StyleTTS2 OOM fallback to Piper works on < 8 GB VRAM configurations
+- [ ] All Phase 1-6 exit gate conditions still hold
+
+---
+
 ## Planned Features — Assistant Evolution Backlog
 
 **Goal:** Expand Sena's usefulness as a daily personal assistant while preserving strict local-first behavior, privacy boundaries, and hardware efficiency.

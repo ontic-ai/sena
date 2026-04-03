@@ -87,9 +87,7 @@ fn sena_log_dir() -> PathBuf {
     {
         std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|_| {
-                std::env::var("HOME").map(|h| PathBuf::from(h).join(".config"))
-            })
+            .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("sena")
     }
@@ -128,20 +126,18 @@ async fn main() -> Result<()> {
                 let _ = std::io::stdin().read_line(&mut String::new());
                 return Ok(());
             }
-            let runtime = runtime::boot_ready()
-                .await
-                .map_err(anyhow::Error::from)?;
+            let runtime = runtime::boot_ready().await.map_err(anyhow::Error::from)?;
             let is_first_boot = runtime.is_first_boot;
             shell::run_with_runtime(runtime, is_first_boot).await
         }
-        None => runtime::run_background()
-            .await
-            .map_err(anyhow::Error::from),
+        None => runtime::run_background().await.map_err(anyhow::Error::from),
         _ => {
-            tracing::error!("unknown argument: {}", args.get(1).map(String::as_str).unwrap_or(""));
+            tracing::error!(
+                "unknown argument: {}",
+                args.get(1).map(String::as_str).unwrap_or("")
+            );
             eprintln!("Usage: sena [cli|query <type>|models]");
             anyhow::bail!("unknown argument")
         }
     }
 }
-

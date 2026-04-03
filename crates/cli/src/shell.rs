@@ -319,10 +319,7 @@ impl Shell {
         // ── Body: conversation (60%) + sidebar (40%) ──────────────────────────
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(60),
-                Constraint::Percentage(40),
-            ])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(main_chunks[1]);
 
         self.render_header(frame, main_chunks[0]);
@@ -475,10 +472,7 @@ impl Shell {
             ),
             Span::styled("\u{203a} ", Style::default().fg(Color::DarkGray)),
             Span::raw(&self.editor.input),
-            Span::styled(
-                "\u{258c}",
-                Style::default().fg(Color::LightMagenta),
-            ),
+            Span::styled("\u{258c}", Style::default().fg(Color::LightMagenta)),
         ]);
 
         // ── Line 2: status ────────────────────────────────────────────────────
@@ -520,7 +514,9 @@ impl Shell {
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 " Input ",
-                Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
             ));
 
         let paragraph = Paragraph::new(vec![prompt_line, status_line, hints_line]).block(block);
@@ -608,10 +604,7 @@ impl Shell {
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", dot), Style::default().fg(color)),
-                Span::styled(
-                    format!("{:<10}", name),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(format!("{:<10}", name), Style::default().fg(Color::White)),
                 Span::styled(label, Style::default().fg(color)),
             ]));
         }
@@ -878,7 +871,11 @@ impl Shell {
                 }
             }
             Event::System(bus::events::SystemEvent::ActorFailed(ref info)) => {
-                tracing::error!("cli: actor '{}' failed: {}", info.actor_name, info.error_msg);
+                tracing::error!(
+                    "cli: actor '{}' failed: {}",
+                    info.actor_name,
+                    info.error_msg
+                );
                 self.add_message(
                     MessageRole::Warning,
                     format!("Actor '{}' failed: {}", info.actor_name, info.error_msg),
@@ -1116,10 +1113,7 @@ impl Shell {
                 } else if is_final {
                     self.add_message(MessageRole::Sena, text);
                 } else {
-                    self.add_message(
-                        MessageRole::System,
-                        format!("[\u{2026}] {}", text),
-                    );
+                    self.add_message(MessageRole::System, format!("[\u{2026}] {}", text));
                 }
             }
             Event::Speech(SpeechEvent::ListenModeStopped { session_id })
@@ -1232,9 +1226,9 @@ impl Shell {
                     self.listen_mode_active = false;
                     if let Err(e) = self
                         .bus
-                        .broadcast(Event::Speech(
-                            SpeechEvent::ListenModeStopRequested { session_id },
-                        ))
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
+                            session_id,
+                        }))
                         .await
                     {
                         self.add_message(
@@ -1264,9 +1258,9 @@ impl Shell {
                     let session_id = self.listen_session_id;
                     if let Err(e) = self
                         .bus
-                        .broadcast(Event::Speech(
-                            SpeechEvent::ListenModeRequested { session_id },
-                        ))
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
+                            session_id,
+                        }))
                         .await
                     {
                         self.listen_mode_active = false;
@@ -1313,7 +1307,11 @@ impl Shell {
                                                     format!(
                                                         "\u{1f3a4} Microphone set to: {}{}",
                                                         name,
-                                                        if idx == 0 { " (system default)" } else { "" }
+                                                        if idx == 0 {
+                                                            " (system default)"
+                                                        } else {
+                                                            ""
+                                                        }
                                                     ),
                                                 );
                                                 self.add_message(
@@ -1339,7 +1337,10 @@ impl Shell {
                             } else {
                                 self.add_message(
                                     MessageRole::Warning,
-                                    format!("No device at index {}. Run /microphone to list devices.", idx),
+                                    format!(
+                                        "No device at index {}. Run /microphone to list devices.",
+                                        idx
+                                    ),
                                 );
                             }
                         }
@@ -1347,11 +1348,18 @@ impl Shell {
                 } else {
                     // /microphone — list available devices
                     let devices = runtime::list_input_devices();
-                    let current = self.runtime.config.microphone_device.as_deref()
+                    let current = self
+                        .runtime
+                        .config
+                        .microphone_device
+                        .as_deref()
                         .unwrap_or("(system default)");
                     self.add_message(
                         MessageRole::System,
-                        format!("\u{2501}\u{2501}  Available Microphones  (current: {})", current),
+                        format!(
+                            "\u{2501}\u{2501}  Available Microphones  (current: {})",
+                            current
+                        ),
                     );
                     if devices.is_empty() {
                         self.add_message(
@@ -1360,14 +1368,12 @@ impl Shell {
                         );
                     } else {
                         for (idx, name) in &devices {
-                            self.add_message(
-                                MessageRole::System,
-                                format!("  [{}]  {}", idx, name),
-                            );
+                            self.add_message(MessageRole::System, format!("  [{}]  {}", idx, name));
                         }
                         self.add_message(
                             MessageRole::System,
-                            "Use /microphone select <index> to switch. Index 0 = system default.".to_string(),
+                            "Use /microphone select <index> to switch. Index 0 = system default."
+                                .to_string(),
                         );
                     }
                 }
@@ -1419,7 +1425,11 @@ impl Shell {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.get(1) == Some(&"set") {
                     let key = parts.get(2).copied().unwrap_or("");
-                    let value = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+                    let value = if parts.len() > 3 {
+                        parts[3..].join(" ")
+                    } else {
+                        String::new()
+                    };
                     self.set_config_value(key, &value).await;
                 } else {
                     self.show_config().await;
@@ -1527,7 +1537,11 @@ impl Shell {
         self.pending_inference_id = Some(request_id);
         self.stats.messages_sent += 1;
 
-        tracing::info!("cli: dispatching chat request_id={} prompt_len={}", request_id, prompt.len());
+        tracing::info!(
+            "cli: dispatching chat request_id={} prompt_len={}",
+            request_id,
+            prompt.len()
+        );
 
         if let Err(e) = self
             .bus
@@ -1549,7 +1563,10 @@ impl Shell {
                 format!("Could not reach inference actor: {}", e),
             );
         } else {
-            tracing::info!("cli: chat request_id={} dispatched to inference actor", request_id);
+            tracing::info!(
+                "cli: chat request_id={} dispatched to inference actor",
+                request_id
+            );
         }
     }
 
@@ -1586,7 +1603,8 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "/microphone            List microphones or select one (/microphone select <index>)".to_string(),
+            "/microphone            List microphones or select one (/microphone select <index>)"
+                .to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -1695,7 +1713,8 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "Examples: /config set speech_enabled true  |  /config set inference_max_tokens 1024".to_string(),
+            "Examples: /config set speech_enabled true  |  /config set inference_max_tokens 1024"
+                .to_string(),
         );
     }
 
@@ -1716,52 +1735,68 @@ impl Shell {
         };
 
         let result: Result<(), String> = match key {
-            "speech_enabled" => value.parse::<bool>()
+            "speech_enabled" => value
+                .parse::<bool>()
                 .map(|v| config.speech_enabled = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "voice_always_listening" => value.parse::<bool>()
+            "voice_always_listening" => value
+                .parse::<bool>()
                 .map(|v| config.voice_always_listening = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "wakeword_enabled" => value.parse::<bool>()
+            "wakeword_enabled" => value
+                .parse::<bool>()
                 .map(|v| config.wakeword_enabled = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "proactive_speech_enabled" => value.parse::<bool>()
+            "proactive_speech_enabled" => value
+                .parse::<bool>()
                 .map(|v| config.proactive_speech_enabled = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "clipboard_observation_enabled" => value.parse::<bool>()
+            "clipboard_observation_enabled" => value
+                .parse::<bool>()
                 .map(|v| config.clipboard_observation_enabled = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "screen_capture_enabled" => value.parse::<bool>()
+            "screen_capture_enabled" => value
+                .parse::<bool>()
                 .map(|v| config.screen_capture_enabled = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "inference_max_tokens" => value.parse::<usize>()
+            "inference_max_tokens" => value
+                .parse::<usize>()
                 .map(|v| config.inference_max_tokens = v)
                 .map_err(|_| "expected a positive integer".to_string()),
-            "inference_ctx_size" => value.parse::<u32>()
+            "inference_ctx_size" => value
+                .parse::<u32>()
                 .map(|v| config.inference_ctx_size = v)
                 .map_err(|_| "expected a positive integer".to_string()),
-            "auto_tune_tokens" => value.parse::<bool>()
+            "auto_tune_tokens" => value
+                .parse::<bool>()
                 .map(|v| config.auto_tune_tokens = v)
                 .map_err(|_| "expected true or false".to_string()),
-            "auto_tune_min_tokens" => value.parse::<usize>()
+            "auto_tune_min_tokens" => value
+                .parse::<usize>()
                 .map(|v| config.auto_tune_min_tokens = v)
                 .map_err(|_| "expected a positive integer".to_string()),
-            "auto_tune_max_tokens" => value.parse::<usize>()
+            "auto_tune_max_tokens" => value
+                .parse::<usize>()
                 .map(|v| config.auto_tune_max_tokens = v)
                 .map_err(|_| "expected a positive integer".to_string()),
-            "ctp_trigger_interval_secs" => value.parse::<u64>()
+            "ctp_trigger_interval_secs" => value
+                .parse::<u64>()
                 .map(|v| config.ctp_trigger_interval_secs = v)
                 .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
-            "ctp_trigger_sensitivity" => value.parse::<f64>()
+            "ctp_trigger_sensitivity" => value
+                .parse::<f64>()
                 .map(|v| config.ctp_trigger_sensitivity = v)
                 .map_err(|_| "expected a decimal number (0.0–1.0)".to_string()),
-            "tts_rate" => value.parse::<f32>()
+            "tts_rate" => value
+                .parse::<f32>()
                 .map(|v| config.tts_rate = v)
                 .map_err(|_| "expected a decimal number (0.5–2.0)".to_string()),
-            "memory_limit_mb" => value.parse::<usize>()
+            "memory_limit_mb" => value
+                .parse::<usize>()
                 .map(|v| config.memory_limit_mb = v)
                 .map_err(|_| "expected a positive integer (MB)".to_string()),
-            "shutdown_timeout_secs" => value.parse::<u64>()
+            "shutdown_timeout_secs" => value
+                .parse::<u64>()
                 .map(|v| config.shutdown_timeout_secs = v)
                 .map_err(|_| "expected a non-negative integer (seconds)".to_string()),
             "preferred_model" => {
@@ -1793,7 +1828,9 @@ impl Shell {
                         // hot-reload non-actor config values in the supervision loop.
                         let _ = self
                             .bus
-                            .broadcast(Event::System(bus::events::SystemEvent::ConfigReloadRequested))
+                            .broadcast(Event::System(
+                                bus::events::SystemEvent::ConfigReloadRequested,
+                            ))
                             .await;
                         // Some keys can take effect immediately without restart
                         self.add_message(
@@ -1827,7 +1864,10 @@ impl Shell {
         let tts_rate = self.runtime.config.tts_rate;
         let proactive = self.runtime.config.proactive_speech_enabled;
 
-        self.add_message(MessageRole::System, "\u{2501}\u{2501}  Speech Configuration".to_string());
+        self.add_message(
+            MessageRole::System,
+            "\u{2501}\u{2501}  Speech Configuration".to_string(),
+        );
         self.add_message(
             MessageRole::System,
             format!("speech_enabled            {}", enabled),

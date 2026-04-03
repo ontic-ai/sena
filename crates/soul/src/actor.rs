@@ -195,9 +195,7 @@ impl SoulActor {
     /// Derive TTS personality parameters from stored identity signals.
     ///
     /// Returns default middle-ground values when signals are absent (new install).
-    fn compute_personality(
-        &self,
-    ) -> Result<bus::events::soul::PersonalityUpdated, SoulError> {
+    fn compute_personality(&self) -> Result<bus::events::soul::PersonalityUpdated, SoulError> {
         let db = self
             .db
             .as_ref()

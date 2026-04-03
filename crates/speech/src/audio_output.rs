@@ -24,7 +24,10 @@ impl AudioOutput {
             .default_output_device()
             .ok_or_else(|| SpeechError::AudioPlaybackFailed("no output device".to_string()))?;
 
-        tracing::debug!("audio output device: {:?}", device.name().unwrap_or_else(|_| "unknown".to_string()));
+        tracing::debug!(
+            "audio output device: {:?}",
+            device.name().unwrap_or_else(|_| "unknown".to_string())
+        );
 
         let config = device
             .default_output_config()
@@ -46,8 +49,9 @@ impl AudioOutput {
             return Ok(());
         }
 
-        tracing::debug!("play_pcm16_mono_22050: {} samples, output_rate={} channels={}", 
-            samples.len(), 
+        tracing::debug!(
+            "play_pcm16_mono_22050: {} samples, output_rate={} channels={}",
+            samples.len(),
             self.config.sample_rate().0,
             self.config.channels()
         );

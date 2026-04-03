@@ -85,7 +85,10 @@ impl AudioInputStream {
         config: AudioInputConfig,
     ) -> Result<(Self, mpsc::UnboundedReceiver<AudioBuffer>), SpeechError> {
         let device = resolve_input_device(config.device_name.as_deref())?;
-        tracing::debug!("audio input device: {:?}", device.name().unwrap_or_else(|_| "unknown".to_string()));
+        tracing::debug!(
+            "audio input device: {:?}",
+            device.name().unwrap_or_else(|_| "unknown".to_string())
+        );
         let (buffer_tx, buffer_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), SpeechError>>();

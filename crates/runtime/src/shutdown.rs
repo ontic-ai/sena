@@ -40,7 +40,8 @@ pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), Shu
             // their directed channel before this hint arrives — that is expected.
             tracing::debug!(
                 "directed shutdown hint for actor '{}' skipped (already stopped): {}",
-                actor, error
+                actor,
+                error
             );
         }
     }

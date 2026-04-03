@@ -170,7 +170,11 @@ mod tests {
         }
         // P95 = 430, recommended = ceil(430*1.2) = 516.
         // delta = |516-512| = 4 < 51.2 → no recommendation.
-        assert!(result.is_none(), "expected no recommendation, got {:?}", result);
+        assert!(
+            result.is_none(),
+            "expected no recommendation, got {:?}",
+            result
+        );
     }
 
     #[test]

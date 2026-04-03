@@ -7,6 +7,5 @@ pub use inference::{discover_models, InferenceError, ModelRegistry};
 ///
 /// Wraps `platform::ollama_models_dir()` and maps the error to `InferenceError`.
 pub fn ollama_models_dir() -> Result<std::path::PathBuf, InferenceError> {
-    platform::ollama_models_dir()
-        .map_err(|e| InferenceError::ModelLoadFailed(e.to_string()))
+    platform::ollama_models_dir().map_err(|e| InferenceError::ModelLoadFailed(e.to_string()))
 }

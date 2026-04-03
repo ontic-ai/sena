@@ -92,8 +92,7 @@ impl TriggerGate {
     /// Sets `last_trigger` to a time already past the interval so the interval check
     /// fires on the very next call, bypassing the startup warm-up guard.
     pub fn reset(&mut self) {
-        self.last_trigger =
-            Some(Instant::now() - self.interval - Duration::from_secs(1));
+        self.last_trigger = Some(Instant::now() - self.interval - Duration::from_secs(1));
     }
 }
 
