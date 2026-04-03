@@ -314,7 +314,7 @@ impl Actor for SttActor {
             return Err(ActorError::StartupFailed(e.to_string()));
         }
 
-        bus.broadcast(Event::System(SystemEvent::ActorReady { actor_name: "STT" }))
+        bus.broadcast(Event::System(SystemEvent::ActorReady { actor_name: "stt" }))
             .await
             .map_err(|e| {
                 ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e))

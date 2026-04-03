@@ -223,14 +223,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
         )
         .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, stt_actor);
-        expected_actors.push("STT");
+        expected_actors.push("stt");
 
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
             .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, tts_actor);
-        expected_actors.push("TTS");
+        expected_actors.push("tts");
 
         if config.wakeword_enabled {
             let wakeword_config = speech::wakeword::WakewordConfig {

@@ -224,7 +224,7 @@ impl Actor for TtsActor {
         self.bus_rx = Some(bus.subscribe_broadcast());
         self.bus = Some(Arc::clone(&bus));
 
-        bus.broadcast(Event::System(SystemEvent::ActorReady { actor_name: "TTS" }))
+        bus.broadcast(Event::System(SystemEvent::ActorReady { actor_name: "tts" }))
             .await
             .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {e}")))?;
 

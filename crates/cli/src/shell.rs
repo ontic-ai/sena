@@ -1421,13 +1421,14 @@ impl Shell {
     }
 
     /// Show config file path and current settings (reads directly from config file).
+    ///
+    /// Displays ALL settings in TOML format so new fields are never silently omitted.
     async fn show_config(&mut self) {
         let config_path = runtime::config::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "(unavailable)".to_string());
 
-        // Read fresh config from file — not the boot-time snapshot — so edits
-        // made since startup are reflected immediately.
+        // Read fresh config from file — not the boot-time snapshot.
         let config = match runtime::config::load_or_create_config().await {
             Ok(c) => c,
             Err(e) => {
@@ -1443,56 +1444,37 @@ impl Shell {
         self.add_message(MessageRole::System, format!("Config file: {}", config_path));
         self.add_message(MessageRole::System, "".to_string());
 
-        self.add_message(
-            MessageRole::System,
-            format!("inference_max_tokens       {}", config.inference_max_tokens),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("inference_ctx_size         {}", config.inference_ctx_size),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!(
-                "preferred_model            {}",
-                config.preferred_model.as_deref().unwrap_or("(auto)")
-            ),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("speech_enabled             {}", config.speech_enabled),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("clipboard_observation      {}", config.clipboard_observation_enabled),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("ctp_trigger_interval       {}s", config.ctp_trigger_interval_secs),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("ctp_trigger_sensitivity    {}", config.ctp_trigger_sensitivity),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!(
-                "working_memory_budget      {} tokens",
-                config.working_memory_token_budget
-            ),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("memory_limit               {}MB", config.memory_limit_mb),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("shutdown_timeout           {}s", config.shutdown_timeout_secs),
-        );
+        // Serialize the full config to TOML so all fields are shown dynamically.
+        // New fields added to SenaConfig appear here automatically.
+        match toml::to_string_pretty(&config) {
+            Ok(toml_str) => {
+                // Show each line as a separate message for proper TUI wrapping
+                for line in toml_str.lines() {
+                    // Add ⚠ markers for settings that may need careful adjustment
+                    let marked = if line.starts_with("inference_max_tokens") {
+                        format!("{line}  ← low values truncate responses; auto-tune planned")
+                    } else if line.starts_with("inference_ctx_size") {
+                        format!("{line}  ← must not exceed model training context")
+                    } else if line.starts_with("ctp_trigger_sensitivity") {
+                        format!("{line}  ← 0.0–1.0; lower = less proactive")
+                    } else {
+                        line.to_string()
+                    };
+                    self.add_message(MessageRole::System, marked);
+                }
+            }
+            Err(e) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Could not serialize config: {}", e),
+                );
+            }
+        }
+
         self.add_message(MessageRole::System, "".to_string());
         self.add_message(
             MessageRole::System,
-            "Use /config set <key> <value> to change a setting. Restart Sena for actor-level changes.".to_string(),
+            "Use /config set <key> <value> to edit. Restart actors for most changes.".to_string(),
         );
         self.add_message(
             MessageRole::System,
