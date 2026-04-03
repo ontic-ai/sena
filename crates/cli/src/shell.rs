@@ -962,6 +962,19 @@ impl Shell {
             Event::System(bus::events::SystemEvent::ConfigReloaded) => {
                 self.add_message(MessageRole::System, "Config reloaded.".to_string());
             }
+            Event::System(bus::events::SystemEvent::TokenBudgetAutoTuned {
+                old_max_tokens,
+                new_max_tokens,
+                p95_tokens,
+            }) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!(
+                        "[auto-tune] Token budget adjusted: {} \u{2192} {} (P95 usage: {}). Use /config set auto_tune_tokens false to disable.",
+                        old_max_tokens, new_max_tokens, p95_tokens
+                    ),
+                );
+            }
             Event::Speech(SpeechEvent::TranscriptionCompleted {
                 text,
                 confidence: _,
@@ -1726,6 +1739,15 @@ impl Shell {
                 .map_err(|_| "expected a positive integer".to_string()),
             "inference_ctx_size" => value.parse::<u32>()
                 .map(|v| config.inference_ctx_size = v)
+                .map_err(|_| "expected a positive integer".to_string()),
+            "auto_tune_tokens" => value.parse::<bool>()
+                .map(|v| config.auto_tune_tokens = v)
+                .map_err(|_| "expected true or false".to_string()),
+            "auto_tune_min_tokens" => value.parse::<usize>()
+                .map(|v| config.auto_tune_min_tokens = v)
+                .map_err(|_| "expected a positive integer".to_string()),
+            "auto_tune_max_tokens" => value.parse::<usize>()
+                .map(|v| config.auto_tune_max_tokens = v)
                 .map_err(|_| "expected a positive integer".to_string()),
             "ctp_trigger_interval_secs" => value.parse::<u64>()
                 .map(|v| config.ctp_trigger_interval_secs = v)

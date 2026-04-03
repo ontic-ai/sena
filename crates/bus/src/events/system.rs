@@ -63,6 +63,15 @@ pub enum SystemEvent {
     ConfigReloadRequested,
     /// Configuration was successfully reloaded.
     ConfigReloaded,
+    /// inference_max_tokens was automatically adjusted based on observed usage.
+    TokenBudgetAutoTuned {
+        /// Previous token limit.
+        old_max_tokens: usize,
+        /// New token limit after tuning.
+        new_max_tokens: usize,
+        /// P95 token count from the observation window that drove this decision.
+        p95_tokens: usize,
+    },
 }
 
 #[cfg(test)]

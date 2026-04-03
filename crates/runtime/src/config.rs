@@ -179,6 +179,23 @@ pub struct SenaConfig {
     /// Default: 2048
     #[serde(default = "default_inference_ctx_size")]
     pub inference_ctx_size: u32,
+
+    /// When true, Sena automatically adjusts `inference_max_tokens` based on observed
+    /// token usage from recent inference completions. Uses a P95 rolling window with
+    /// 20% headroom to right-size the budget without truncating responses.
+    /// Default: true
+    #[serde(default = "default_auto_tune_tokens")]
+    pub auto_tune_tokens: bool,
+
+    /// Minimum value auto-tune will ever set `inference_max_tokens` to.
+    /// Default: 256
+    #[serde(default = "default_auto_tune_min_tokens")]
+    pub auto_tune_min_tokens: usize,
+
+    /// Maximum value auto-tune will ever set `inference_max_tokens` to.
+    /// Default: 4096
+    #[serde(default = "default_auto_tune_max_tokens")]
+    pub auto_tune_max_tokens: usize,
 }
 
 impl Default for SenaConfig {
@@ -215,6 +232,9 @@ impl Default for SenaConfig {
             microphone_device: None,
             inference_max_tokens: default_inference_max_tokens(),
             inference_ctx_size: default_inference_ctx_size(),
+            auto_tune_tokens: default_auto_tune_tokens(),
+            auto_tune_min_tokens: default_auto_tune_min_tokens(),
+            auto_tune_max_tokens: default_auto_tune_max_tokens(),
         }
     }
 }
@@ -290,6 +310,15 @@ fn default_inference_max_tokens() -> usize {
 }
 fn default_inference_ctx_size() -> u32 {
     2048
+}
+fn default_auto_tune_tokens() -> bool {
+    true
+}
+fn default_auto_tune_min_tokens() -> usize {
+    256
+}
+fn default_auto_tune_max_tokens() -> usize {
+    4096
 }
 
 /// Configuration-related errors.

@@ -12,8 +12,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use bus::{Event, SystemEvent};
+use bus::{Event, InferenceEvent, SystemEvent};
 
+use crate::analytics::TokenTuner;
 use crate::boot::{BootError, Runtime};
 
 /// Maximum consecutive failures per actor before the daemon requests shutdown.
@@ -98,6 +99,15 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
     let mut bus_rx = runtime.bus.subscribe_broadcast();
     let mut failure_counts: HashMap<&'static str, u32> = HashMap::new();
 
+    // Token budget auto-tuner — observes InferenceCompleted events and adjusts
+    // inference_max_tokens in config when usage consistently diverges from the budget.
+    let mut token_tuner = TokenTuner::new(
+        runtime.config.auto_tune_min_tokens,
+        runtime.config.auto_tune_max_tokens,
+    );
+    let auto_tune_enabled = runtime.config.auto_tune_tokens;
+    let mut current_max_tokens = runtime.config.inference_max_tokens;
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -127,6 +137,39 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                             }
                             Err(e) => {
                                 tracing::warn!("config reload failed: {}", e);
+                            }
+                        }
+                    }
+                    Ok(Event::Inference(InferenceEvent::InferenceCompleted {
+                        token_count, ..
+                    })) if auto_tune_enabled => {
+                        if let Some(recommended) =
+                            token_tuner.record(token_count, current_max_tokens)
+                        {
+                            // Load config, apply new limit, save.
+                            if let Ok(mut cfg) =
+                                crate::config::load_or_create_config().await
+                            {
+                                let old = cfg.inference_max_tokens;
+                                let p95 = token_count; // approximate; tuner uses window
+                                cfg.inference_max_tokens = recommended;
+                                if let Ok(()) = crate::config::save_config(&cfg).await {
+                                    current_max_tokens = recommended;
+                                    tracing::info!(
+                                        "analytics: token budget auto-tuned {} → {} (p95≈{})",
+                                        old, recommended, p95
+                                    );
+                                    let _ = runtime
+                                        .bus
+                                        .broadcast(Event::System(
+                                            SystemEvent::TokenBudgetAutoTuned {
+                                                old_max_tokens: old,
+                                                new_max_tokens: recommended,
+                                                p95_tokens: p95,
+                                            },
+                                        ))
+                                        .await;
+                                }
                             }
                         }
                     }

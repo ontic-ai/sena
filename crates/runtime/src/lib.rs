@@ -4,6 +4,7 @@
 //! - `run_background()` — boot + readiness gate + supervision loop (daemon mode).
 //! - `boot_ready()` — boot + readiness gate, returning the live `Runtime` (CLI mode).
 
+pub mod analytics;
 pub mod boot;
 pub mod config;
 pub mod models;
