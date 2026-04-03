@@ -320,16 +320,17 @@ pub struct ContextSnapshot {
 
 ### 6.3 Signal Completeness
 
-If Sena observes it, CTP must eventually know about it. The following must flow through CTP's signal buffer:
+**If Sena observes it, CTP must eventually know about it.** This is a general architectural principle — the list below is the *current* implementation status, not a ceiling.
 
 | Signal | Status |
 |---|---|
 | Active window, clipboard, file events, keystroke cadence | Done |
 | Screen captures / visual context | Done |
 | Speech transcriptions (STT output) | Planned — see `docs/SUBSYSTEM_AUDIT.md` F3a |
-| Future: calendar events, notification metadata, system resource pressure | Backlog |
 
-A signal that bypasses CTP's buffer is a context gap. Context gaps make CTP's trigger decisions less intelligent. CTP is the product's core differentiator — it must not be consistently deprioritised in favor of surface-level features.
+Any new sensor or observation capability added in future phases must include a CTP signal ingestion path as part of its design. A signal that bypasses CTP's buffer is a context gap. Context gaps make CTP's trigger decisions less intelligent.
+
+CTP is the product's core differentiator — it must not be consistently deprioritised in favor of surface-level features.
 
 ### 6.4 Actor Coordination During Audio Capture
 

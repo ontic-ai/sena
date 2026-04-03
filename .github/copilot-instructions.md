@@ -545,7 +545,7 @@ CTP (Continuous Thought Processing) is Sena's most architecturally novel subsyst
 ### 16.1 Respect CTP's Complexity
 
 CTP is not a cron job. It is a context-aware, multi-signal processing pipeline:
-1. **Signal ingestion**: platform events, speech transcriptions (planned), visual context
+1. **Signal ingestion**: any observable signal from any sensor
 2. **Context assembly**: multi-modal snapshot construction
 3. **Trigger gating**: intelligent decision on when to think
 4. **Thought emission**: structured ThoughtEvent with full context
@@ -554,13 +554,9 @@ Every signal type Sena can observe must eventually flow through CTP's signal buf
 
 ### 16.2 CTP Signal Completeness
 
-If Sena observes it, CTP must know about it. The following must eventually be CTP signals:
-- Active window, clipboard, file events, keystroke cadence (done)
-- Screen captures / visual context (done)
-- Speech transcriptions (planned — see `docs/SUBSYSTEM_AUDIT.md` Finding 3a)
-- Future: calendar events, notification metadata, system resource pressure
+**If Sena observes it, CTP must know about it.**
 
-A signal that bypasses CTP's buffer is a context gap. Context gaps make CTP's trigger decisions less intelligent, which makes Sena less useful.
+This is a general principle, not a finite checklist. The signal types CTP ingests will grow as Sena gains new sensors and observation capabilities. The current implementation status of specific signals is tracked in `docs/architecture.md §6.3`. What matters here is the rule: **no observation may bypass CTP's signal buffer.** A signal that does not reach CTP is a context gap, and context gaps make CTP's trigger decisions less intelligent — which makes Sena less useful.
 
 ### 16.3 CTP Is Not Downplayable
 
