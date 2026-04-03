@@ -18,7 +18,7 @@ pub use config::{save_config, ConfigError, SenaConfig};
 pub use models::{discover_models, ollama_models_dir, InferenceError, ModelRegistry};
 pub use registry::ActorRegistry;
 pub use shutdown::{shutdown, wait_for_sigint, ShutdownError};
-pub use single_instance::{try_acquire_lock, SingleInstanceError, SingleInstanceGuard};
+pub use single_instance::{is_daemon_running, try_acquire_lock, SingleInstanceError, SingleInstanceGuard};
 pub use tray::TrayManager;
 
 use std::time::Duration;

@@ -111,6 +111,23 @@ async fn main() -> Result<()> {
         Some("query") => query::run_from_args(&args).await,
         Some("models") => model_selector::run().await,
         Some("cli") | Some("interactive") => {
+            // If the daemon is already running, the CLI cannot share its encrypted
+            // stores (Soul redb, memory redb). Show a clear message instead of
+            // silently crashing. Phase 6 (IPC) will resolve this by connecting
+            // the CLI to the running daemon instead of booting a second runtime.
+            if runtime::is_daemon_running() {
+                println!();
+                println!("  Sena daemon is running in the background.");
+                println!("  The CLI and daemon cannot run simultaneously in this version.");
+                println!();
+                println!("  To use the CLI:");
+                println!("  1. Right-click the tray icon \u{2192} Quit (stops the daemon)");
+                println!("  2. Then run: sena cli");
+                println!();
+                println!("  Press Enter to close this window...");
+                let _ = std::io::stdin().read_line(&mut String::new());
+                return Ok(());
+            }
             let runtime = runtime::boot_ready()
                 .await
                 .map_err(anyhow::Error::from)?;

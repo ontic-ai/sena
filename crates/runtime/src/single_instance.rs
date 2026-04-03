@@ -182,6 +182,47 @@ fn ipc_socket_path() -> PathBuf {
     std::env::temp_dir().join(format!("sena-{}.sock", user))
 }
 
+/// Non-destructive check: returns `true` if the Sena daemon is already running.
+///
+/// Does NOT acquire or modify the lock — safe to call from any mode.
+pub fn is_daemon_running() -> bool {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+
+        let pipe_name = r"\\.\pipe\sena_single_instance";
+        let wide_name: Vec<u16> = OsStr::new(pipe_name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+
+        let handle = unsafe {
+            winapi::um::fileapi::CreateFileW(
+                wide_name.as_ptr(),
+                winapi::um::winnt::GENERIC_READ,
+                winapi::um::winnt::FILE_SHARE_READ | winapi::um::winnt::FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                3, // OPEN_EXISTING
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
+            unsafe { winapi::um::handleapi::CloseHandle(handle) };
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        UnixStream::connect(ipc_socket_path()).is_ok()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SingleInstanceError {
     #[error("another instance of Sena is already running")]
