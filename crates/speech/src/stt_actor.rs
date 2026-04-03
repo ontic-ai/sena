@@ -44,6 +44,10 @@ pub struct SttActor {
     accumulated_samples: Vec<f32>,
     last_voice_activity: Option<Instant>,
     speech_started: bool,
+    // Listen mode state (continuous transcription session)
+    listen_session_id: Option<u64>,
+    listen_audio_rx: Option<mpsc::UnboundedReceiver<AudioBuffer>>,
+    listen_audio_stream: Option<AudioInputStream>,
 }
 
 impl SttActor {
@@ -70,6 +74,9 @@ impl SttActor {
             accumulated_samples: Vec::new(),
             last_voice_activity: None,
             speech_started: false,
+            listen_session_id: None,
+            listen_audio_rx: None,
+            listen_audio_stream: None,
         }
     }
 
@@ -234,6 +241,75 @@ impl SttActor {
         }
     }
 
+    /// Handle an audio buffer for continuous listen mode.
+    ///
+    /// Emits `ListenModeTranscription` with `is_final=false` for low-energy buffers and
+    /// `is_final=true` after silence-threshold silence within the session.
+    async fn handle_listen_audio_buffer(
+        &mut self,
+        buffer: AudioBuffer,
+        session_id: u64,
+        bus: &Arc<EventBus>,
+    ) {
+        let rms = calculate_rms(&buffer.samples);
+        let is_voice = rms > self.stt_energy_threshold;
+        let now = Instant::now();
+
+        if is_voice {
+            if !self.speech_started {
+                self.speech_started = true;
+                self.accumulated_samples.clear();
+            }
+            self.accumulated_samples.extend_from_slice(&buffer.samples);
+            self.last_voice_activity = Some(now);
+        } else if self.speech_started {
+            if let Some(last_voice) = self.last_voice_activity {
+                let silence_secs = now.duration_since(last_voice).as_secs_f32();
+                if silence_secs >= self.silence_duration_secs && !self.accumulated_samples.is_empty() {
+                    let request_id = self.next_request_id();
+                    let transcription_buffer = AudioBuffer {
+                        samples: self.accumulated_samples.clone(),
+                        sample_rate: buffer.sample_rate,
+                        channels: buffer.channels,
+                    };
+                    // Transcribe and emit as listen-mode transcription.
+                    match tokio::time::timeout(
+                        TRANSCRIPTION_TIMEOUT,
+                        self.transcribe(transcription_buffer),
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            if !result.text.trim().is_empty() {
+                                let _ = bus
+                                    .broadcast(Event::Speech(
+                                        SpeechEvent::ListenModeTranscription {
+                                            text: result.text,
+                                            is_final: true,
+                                            confidence: result.confidence,
+                                            session_id,
+                                        },
+                                    ))
+                                    .await;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("listen: transcription error: {}", e);
+                        }
+                        Err(_) => {
+                            tracing::warn!("listen: transcription timeout");
+                        }
+                    }
+                    // Reset for next utterance.
+                    self.accumulated_samples.clear();
+                    self.speech_started = false;
+                    self.last_voice_activity = None;
+                    let _ = request_id; // consumed by transcribe path
+                }
+            }
+        }
+    }
+
     /// Handle an audio buffer with silence detection for always-listening mode.
     async fn handle_audio_buffer(&mut self, buffer: AudioBuffer, bus: &Arc<EventBus>) {
         let rms = calculate_rms(&buffer.samples);
@@ -368,6 +444,54 @@ impl Actor for SttActor {
                             self.last_voice_activity = None;
                             self.speech_started = false;
                         }
+                        Ok(Event::Speech(SpeechEvent::ListenModeRequested { session_id })) => {
+                            if self.listen_session_id.is_some() {
+                                tracing::warn!("listen: new session {} requested while session {:?} active — stopping old session first", session_id, self.listen_session_id);
+                                self.listen_audio_rx = None;
+                                self.listen_audio_stream = None;
+                            }
+                            let config = AudioInputConfig {
+                                sample_rate: 16_000,
+                                buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
+                                energy_threshold: self.stt_energy_threshold,
+                            };
+                            match AudioInputStream::start(config) {
+                                Ok((stream, rx)) => {
+                                    self.listen_session_id = Some(session_id);
+                                    self.listen_audio_stream = Some(stream);
+                                    self.listen_audio_rx = Some(rx);
+                                    // Reset silence detection state for a clean session.
+                                    self.accumulated_samples.clear();
+                                    self.speech_started = false;
+                                    self.last_voice_activity = None;
+                                    tracing::info!("listen: session {} started", session_id);
+                                }
+                                Err(e) => {
+                                    tracing::error!("listen: failed to start audio capture: {}", e);
+                                    let _ = bus
+                                        .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
+                                            session_id,
+                                        }))
+                                        .await;
+                                }
+                            }
+                        }
+                        Ok(Event::Speech(SpeechEvent::ListenModeStopRequested { session_id })) => {
+                            if self.listen_session_id == Some(session_id) {
+                                self.listen_session_id = None;
+                                self.listen_audio_rx = None;
+                                self.listen_audio_stream = None;
+                                self.accumulated_samples.clear();
+                                self.speech_started = false;
+                                self.last_voice_activity = None;
+                                tracing::info!("listen: session {} stopped", session_id);
+                                let _ = bus
+                                    .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
+                                        session_id,
+                                    }))
+                                    .await;
+                            }
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => {
@@ -386,6 +510,17 @@ impl Actor for SttActor {
                         self.handle_audio_buffer(buffer, &bus).await;
                     }
                 }
+                listen_buffer = async {
+                    if let Some(rx) = self.listen_audio_rx.as_mut() {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<AudioBuffer>>().await
+                    }
+                } => {
+                    if let (Some(buffer), Some(session_id)) = (listen_buffer, self.listen_session_id) {
+                        self.handle_listen_audio_buffer(buffer, session_id, &bus).await;
+                    }
+                }
             }
         }
 
@@ -395,6 +530,9 @@ impl Actor for SttActor {
     async fn stop(&mut self) -> Result<(), ActorError> {
         self.audio_rx = None;
         self.audio_stream = None;
+        self.listen_audio_rx = None;
+        self.listen_audio_stream = None;
+        self.listen_session_id = None;
 
         #[cfg(feature = "whisper")]
         if let Some(SttBackendHandle::WhisperWorker { tx }) = self.backend_handle.take() {

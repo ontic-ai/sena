@@ -125,6 +125,40 @@ pub enum SpeechEvent {
 
     /// Wakeword detection resumed after suppression.
     WakewordResumed,
+
+    /// User requested continuous listen mode (e.g., via `/listen` CLI command).
+    ListenModeRequested {
+        /// Session ID for correlating start/stop and transcription events.
+        session_id: u64,
+    },
+
+    /// Incremental transcription result from continuous listen mode.
+    ///
+    /// May be emitted multiple times per utterance:
+    /// - `is_final = false`: partial, may be superseded by the next emission.
+    /// - `is_final = true`: confirmed utterance after silence detected.
+    ListenModeTranscription {
+        /// Transcribed text.
+        text: String,
+        /// True when silence detected and this utterance is complete.
+        is_final: bool,
+        /// Confidence score [0.0, 1.0].
+        confidence: f32,
+        /// Session ID from the originating `ListenModeRequested`.
+        session_id: u64,
+    },
+
+    /// Request to stop an active continuous listen session.
+    ListenModeStopRequested {
+        /// Session ID that should be stopped.
+        session_id: u64,
+    },
+
+    /// Continuous listen session stopped cleanly.
+    ListenModeStopped {
+        /// Session ID that was stopped.
+        session_id: u64,
+    },
 }
 
 #[cfg(test)]

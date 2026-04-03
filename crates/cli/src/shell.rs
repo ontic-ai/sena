@@ -91,6 +91,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "View speech configuration and status",
     },
     SlashCommand {
+        command: "/listen",
+        description: "Start/stop continuous live transcription",
+    },
+    SlashCommand {
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
     },
@@ -239,6 +243,10 @@ struct Shell {
     voice_enabled: bool,
     /// Last emitted download-progress bucket (0..=10) keyed by speech request ID.
     speech_download_progress: HashMap<u64, u64>,
+    /// True while continuous listen mode is active in this CLI session.
+    listen_mode_active: bool,
+    /// Session ID of the currently active listen session (0 when inactive).
+    listen_session_id: u64,
 }
 
 impl Shell {
@@ -287,6 +295,8 @@ impl Shell {
             runtime,
             voice_enabled,
             speech_download_progress: HashMap::new(),
+            listen_mode_active: false,
+            listen_session_id: 0,
         }
     }
 
@@ -1072,6 +1082,35 @@ impl Shell {
                     format!("[speech] Speech failed: {}", reason),
                 );
             }
+            Event::Speech(SpeechEvent::ListenModeTranscription {
+                text,
+                is_final,
+                confidence,
+                session_id,
+            }) if session_id == self.listen_session_id => {
+                if confidence < 0.6 {
+                    self.add_message(
+                        MessageRole::Warning,
+                        format!("[listen ~{:.0}%] {}", confidence * 100.0, text),
+                    );
+                } else if is_final {
+                    self.add_message(MessageRole::Sena, text);
+                } else {
+                    self.add_message(
+                        MessageRole::System,
+                        format!("[\u{2026}] {}", text),
+                    );
+                }
+            }
+            Event::Speech(SpeechEvent::ListenModeStopped { session_id })
+                if session_id == self.listen_session_id =>
+            {
+                self.listen_mode_active = false;
+                self.add_message(
+                    MessageRole::System,
+                    "\u{1f3a4} Listen mode stopped.".to_string(),
+                );
+            }
             other if self.verbose => {
                 if let Some(msg) = verbose_format(&other) {
                     self.add_message(MessageRole::System, msg);
@@ -1164,6 +1203,64 @@ impl Shell {
             }
             "/speech" => {
                 self.show_speech_config();
+                DispatchResult::Continue
+            }
+            "/listen" => {
+                if self.listen_mode_active {
+                    // Toggle off — stop the active session.
+                    let session_id = self.listen_session_id;
+                    self.listen_mode_active = false;
+                    if let Err(e) = self
+                        .bus
+                        .broadcast(Event::Speech(
+                            SpeechEvent::ListenModeStopRequested { session_id },
+                        ))
+                        .await
+                    {
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("[listen] Failed to send stop: {}", e),
+                        );
+                    }
+                    self.add_message(
+                        MessageRole::System,
+                        "\u{1f3a4} Stopping listen mode...".to_string(),
+                    );
+                } else {
+                    if !self.runtime.config.speech_enabled {
+                        self.add_message(
+                            MessageRole::Warning,
+                            "Speech must be enabled for /listen. Use /config set speech_enabled true".to_string(),
+                        );
+                        return DispatchResult::Continue;
+                    }
+                    // Derive a monotonically increasing session ID from message count.
+                    self.listen_session_id = self.stats.messages_sent as u64
+                        + std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                    self.listen_mode_active = true;
+                    let session_id = self.listen_session_id;
+                    if let Err(e) = self
+                        .bus
+                        .broadcast(Event::Speech(
+                            SpeechEvent::ListenModeRequested { session_id },
+                        ))
+                        .await
+                    {
+                        self.listen_mode_active = false;
+                        self.add_message(
+                            MessageRole::Warning,
+                            format!("[listen] Failed to start: {}", e),
+                        );
+                        return DispatchResult::Continue;
+                    }
+                    self.add_message(
+                        MessageRole::System,
+                        "\u{1f3a4} Listen mode started — type /listen again to stop.".to_string(),
+                    );
+                }
                 DispatchResult::Continue
             }
             "/screenshot" => {
@@ -1372,6 +1469,10 @@ impl Shell {
         self.add_message(
             MessageRole::System,
             "/speech                View speech configuration and status".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/listen                Start/stop continuous live transcription".to_string(),
         );
         self.add_message(
             MessageRole::System,
