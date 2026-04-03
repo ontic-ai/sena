@@ -20,7 +20,7 @@ use bus::events::transparency::{
     InferenceExplanationResponse, MemoryResponse, ObservationResponse, TransparencyEvent,
     TransparencyQuery,
 };
-use bus::{Event, SystemEvent, TransparencyEvent as BusTransparencyEvent};
+use bus::{Event, TransparencyEvent as BusTransparencyEvent};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -1991,49 +1991,32 @@ fn verbose_format(ev: &Event) -> Option<String> {
 
 /// Boot the runtime and run the application. This is the main entry point
 /// for both CLI and headless (tray) modes.
-pub async fn run_with_boot(open_cli_on_start: bool) -> anyhow::Result<()> {
-    if open_cli_on_start {
-        crate::display::banner();
-        crate::display::info("Booting runtime...");
-    }
+/// Open a CLI TUI session with an already-booted runtime.
+///
+/// Handles onboarding if needed, then runs the TUI. After the user exits,
+/// triggers graceful shutdown of all actors.
+pub async fn run_with_runtime(
+    runtime: runtime::Runtime,
+    needs_onboarding_flag: bool,
+) -> anyhow::Result<()> {
+    crate::display::banner();
+    crate::display::success("Sena is ready.");
 
-    let runtime_arc = Arc::new(runtime::boot().await?);
+    let runtime_arc = Arc::new(runtime);
+    let mut needs_onboarding = needs_onboarding_flag;
 
-    // Force CLI open on first boot for onboarding.
-    let open_cli = open_cli_on_start || runtime_arc.is_first_boot;
+    run_onboarding_if_needed(&runtime_arc, &mut needs_onboarding).await?;
 
-    if open_cli {
-        crate::display::success("Runtime ready.");
-    }
+    let exit_reason = run(Arc::clone(&runtime_arc)).await;
 
-    let mut needs_onboarding = runtime_arc.is_first_boot;
-
-    if open_cli {
-        match open_cli_session(Arc::clone(&runtime_arc), &mut needs_onboarding).await {
-            Ok(ShellExitReason::Shutdown) => {
-                return do_shutdown(runtime_arc, false).await;
-            }
-            Ok(ShellExitReason::Close) => {
-                crate::display::info("CLI closed. Tray/runtime still running.");
-            }
-            Err(e) => {
-                crate::display::error(&format!("CLI session error: {}", e));
-                crate::display::info("CLI detached. Runtime continues.");
-            }
-        }
-    } else {
-        crate::display::info("Running in background mode.");
-    }
-
-    run_headless(runtime_arc, needs_onboarding).await
-}
-
-async fn open_cli_session(
-    runtime: Arc<Runtime>,
-    needs_onboarding: &mut bool,
-) -> anyhow::Result<ShellExitReason> {
-    run_onboarding_if_needed(&runtime, needs_onboarding).await?;
-    run(runtime).await
+    // Recover the Runtime from the Arc for shutdown.
+    drop(exit_reason);
+    let runtime = Arc::try_unwrap(runtime_arc)
+        .map_err(|_| anyhow::anyhow!("runtime still referenced at CLI exit"))?;
+    let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
+    runtime::shutdown(runtime, timeout).await?;
+    crate::display::success("Sena stopped cleanly.");
+    Ok(())
 }
 
 async fn run_onboarding_if_needed(
@@ -2063,56 +2046,6 @@ async fn run_onboarding_if_needed(
     }
     *needs_onboarding = false;
 
-    Ok(())
-}
-
-async fn run_headless(
-    runtime: Arc<Runtime>,
-    mut needs_onboarding: bool,
-) -> anyhow::Result<()> {
-    let mut bus_rx = runtime.bus.subscribe_broadcast();
-
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("[sena] shutdown requested");
-                break;
-            }
-            event = bus_rx.recv() => {
-                match event {
-                    Ok(Event::System(SystemEvent::CliAttachRequested)) => {
-                        match open_cli_session(Arc::clone(&runtime), &mut needs_onboarding).await {
-                            Ok(ShellExitReason::Shutdown) => break,
-                            Ok(ShellExitReason::Close) => eprintln!("[sena] CLI session closed"),
-                            Err(e) => {
-                                eprintln!("[sena] CLI session error: {}", e);
-                                eprintln!("[sena] Runtime continues in headless mode");
-                            }
-                        }
-                    }
-                    Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-
-    drop(bus_rx);
-    do_shutdown(runtime, true).await
-}
-
-async fn do_shutdown(runtime: Arc<Runtime>, quiet: bool) -> anyhow::Result<()> {
-    let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
-    let runtime = Arc::try_unwrap(runtime)
-        .map_err(|_| anyhow::anyhow!("runtime has remaining references at shutdown"))?;
-    runtime::shutdown(runtime, timeout).await?;
-    if quiet {
-        eprintln!("[sena] stopped cleanly");
-    } else {
-        crate::display::success("Sena stopped cleanly.");
-    }
     Ok(())
 }
 

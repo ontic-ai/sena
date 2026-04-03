@@ -48,7 +48,6 @@ impl TrayManager {
             if let Err(e) = run_tray_loop(bus.clone(), command_rx, runtime_handle.clone()) {
                 // Initialization failed — emit TrayUnavailable.
                 let reason = e.to_string();
-                eprintln!("Tray unavailable: {}", reason);
                 runtime_handle.block_on(async {
                     let _ = bus
                         .broadcast(Event::System(SystemEvent::TrayUnavailable {
@@ -155,8 +154,7 @@ fn run_tray_loop(
 
     // Load icon from assets/logo.png — compiled in at build time.
     // Falls back to a green square if decode fails.
-    let icon = load_icon().unwrap_or_else(|e| {
-        eprintln!("[tray] icon load failed ({}), using fallback", e);
+    let icon = load_icon().unwrap_or_else(|_| {
         let fallback_rgba = [0u8, 128, 0, 255].repeat(16 * 16);
         Icon::from_rgba(fallback_rgba, 16, 16).expect("fallback icon always valid")
     });
@@ -199,27 +197,17 @@ fn run_tray_loop(
     loop {
         #[cfg(target_os = "windows")]
         {
-            // Win32 tray interactions require a native message pump.
+            // Win32 tray interactions require a native message pump so that menu
+            // events are delivered via MenuEvent::receiver().
             pump_windows_messages();
         }
 
-        // Process tray menu events.
-        if let Ok(event) = menu_channel.try_recv() {
-            match event {
-                TrayIconEvent::Click { .. } => {
-                    // Main tray icon click — no action for now.
-                }
-                TrayIconEvent::Enter { .. } | TrayIconEvent::Leave { .. } => {
-                    // Mouse hover events — ignored for now.
-                }
-                _ => {
-                    // Other events — ignored.
-                }
-            }
+        // Process tray icon events (click, hover).
+        if let Ok(_event) = menu_channel.try_recv() {
+            // Tray icon click events — main icon click has no action for now.
         }
 
-        // Check for menu item clicks using the menu item IDs.
-        // tray-icon emits menu events separately from tray icon events.
+        // Check for menu item clicks.
         if let Ok(menu_event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             let menu_item = if menu_event.id == item_status.id() {
                 Some(TrayMenuItem::ShowStatus)
@@ -246,9 +234,8 @@ fn run_tray_loop(
             Ok(TrayCommand::UpdateStatus(text)) => {
                 let _ = tray_icon.set_tooltip(Some(text));
             }
-            Ok(TrayCommand::ShowNotification(text)) => {
-                // OS notifications are complex — just log for now.
-                eprintln!("[Tray Notification] {}", text);
+            Ok(TrayCommand::ShowNotification(_text)) => {
+                // OS notifications are complex — no-op for now.
             }
             Ok(TrayCommand::Shutdown) => {
                 break;

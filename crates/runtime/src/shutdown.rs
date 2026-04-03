@@ -119,6 +119,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         // Spawn shutdown task
@@ -157,6 +158,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -190,6 +192,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: _rx,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -222,6 +225,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;

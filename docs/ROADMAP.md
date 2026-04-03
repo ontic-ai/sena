@@ -335,6 +335,31 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ---
 
+## M-Refactor — Runtime as Process Owner ✅
+
+**Scope:** Post-Phase-5 architectural cleanup. Addresses crash investigation findings and separates daemon lifetime from CLI.
+
+**Entry gate:** Phase 5 exit gate satisfied (M5.1–M5.6 complete).
+
+### Completed
+
+- [x] `crates/runtime/src/supervisor.rs` — new module: readiness gate + supervision loop
+- [x] `supervisor::wait_for_readiness()` — blocks until all `expected_actors` emit `ActorReady` (30s timeout)
+- [x] `supervisor::supervision_loop()` — keeps daemon alive; handles ShutdownSignal, CliAttachRequested (→ new terminal), ActorFailed (retry ×3 → shutdown)
+- [x] `runtime::run_background()` — public API for `sena` (daemon mode): boot → readiness → BootComplete → supervision
+- [x] `runtime::boot_ready()` — public API for `sena cli`: boot → readiness → BootComplete → returns Runtime
+- [x] `boot::boot()` no longer broadcasts BootComplete (moved to `boot_ready_impl` after readiness gate)
+- [x] `Runtime.expected_actors: Vec<&'static str>` — populated as actors are spawned; drives readiness gate
+- [x] Tray "Open CLI" menu item → broadcasts `CliAttachRequested` → supervisor calls `open_cli_in_new_terminal()` (platform-specific terminal spawn)
+- [x] `pump_windows_messages()` restored (was commented out during crash investigation)
+- [x] All diagnostic `eprintln!("[boot] ...")`, `eprintln!("[tray] ...")`, `eprintln!("[memory] ...")` removed from production paths
+- [x] `cli/src/shell.rs`: removed `run_with_boot`, `run_headless`, `do_shutdown`, `open_cli_session`; added `run_with_runtime()`
+- [x] `cli/src/main.rs`: `None =>` calls `runtime::run_background()`, `Some("cli") =>` calls `runtime::boot_ready()` + `shell::run_with_runtime()`
+- [x] Post-boot TTS greeting: "Hi, I'm Sena" broadcast when `config.speech_enabled`
+- [x] `cargo clippy --workspace -- -D warnings` clean
+
+---
+
 ## Phase 6 — CLI Decoupling and Configuration
 
 **Goal:** CLI becomes a separate process communicating over IPC. Configuration is accessible through CLI menu and auto-tuned based on local analytics.

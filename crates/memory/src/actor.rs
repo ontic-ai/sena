@@ -366,9 +366,6 @@ impl Actor for MemoryActor {
                     if error_msg.contains("Manual upgrade required")
                         || error_msg.contains("Expected file format version")
                     {
-                        eprintln!("[memory] Database format migration detected");
-                        eprintln!("[memory] Backing up old memory store and creating new one");
-
                         // Close the encrypted store to release file locks
                         drop(encrypted_store);
 
@@ -467,7 +464,6 @@ impl Actor for MemoryActor {
             .ok_or_else(|| ActorError::RuntimeError("broadcast_rx not set".into()))?;
 
         let mut consolidation_ticker = tokio::time::interval(self.consolidation_interval);
-        // Skip ticks that we missed while processing — no burst-catch-up.
         consolidation_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the first immediate tick so we don't consolidate on startup.
         consolidation_ticker.tick().await;

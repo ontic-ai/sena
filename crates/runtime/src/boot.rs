@@ -26,6 +26,9 @@ pub struct Runtime {
     pub(crate) _keep_alive: tokio::sync::broadcast::Receiver<Event>,
     /// Memory monitor task handle (if enabled).
     pub(crate) memory_monitor_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Names of actors expected to emit `ActorReady` before `BootComplete`.
+    /// Used by the supervisor readiness gate.
+    pub expected_actors: Vec<&'static str>,
 }
 
 /// Boot sequence errors.
@@ -63,6 +66,9 @@ pub enum BootError {
 
     #[error("boot complete broadcast failed: {0}")]
     BroadcastFailed(String),
+
+    #[error("readiness timeout: {0}")]
+    ReadinessTimeout(String),
 }
 
 /// Full boot sequence per architecture §4.1 (all 13 steps).
@@ -108,7 +114,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 5: Actor registry — spawn Soul first (lowest-level subsystem)
     let mut registry = ActorRegistry::new();
+    let mut expected_actors: Vec<&'static str> = Vec::new();
     spawn_actor(&bus, &mut registry, soul_actor);
+    expected_actors.push("Soul");
 
     // Step 6: Initialize and spawn platform adapter
     let platform_adapter = platform::create_platform_adapter();
@@ -121,6 +129,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Shared between platform actor (writer) and inference actor (reader).
     let vision_frame_store = platform_actor.latest_frame_store();
     spawn_actor(&bus, &mut registry, platform_actor);
+    expected_actors.push("Platform");
 
     // Step 7: Initialize and spawn CTP actor
     let ctp_trigger_interval = Duration::from_secs(config.ctp_trigger_interval_secs);
@@ -130,6 +139,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_trigger_sensitivity(config.ctp_trigger_sensitivity)
         .with_screen_capture_enabled(config.screen_capture_enabled);
     spawn_actor(&bus, &mut registry, ctp_actor);
+    expected_actors.push("CTP");
 
     // Step 8: Memory actor
     let config_dir = platform::config_dir()
@@ -148,6 +158,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     )
     .with_consolidation_idle_threshold(memory_idle_threshold);
     spawn_actor(&bus, &mut registry, memory_actor);
+    expected_actors.push("Memory");
 
     // Step 9: Inference actor
     let models_dir = if let Some(path) = config.models_dir.clone() {
@@ -166,6 +177,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
             .with_proactive_speech(config.proactive_speech_enabled)
             .with_speech_rate_limit(config.speech_rate_limit_secs);
     spawn_actor(&bus, &mut registry, inference_actor);
+    expected_actors.push("Inference");
 
     // Step 10: PromptComposer is stateless — no spawn needed.
 
@@ -182,7 +194,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         match speech::onboarding::run_speech_onboarding(&bus, &speech_model_dir).await {
             Ok(_downloaded) => {}
             Err(e) => {
-                eprintln!("WARN: Speech onboarding failed, disabling speech: {}", e);
+                eprintln!("WARN: speech onboarding failed, disabling speech: {}", e);
                 speech_available = false;
             }
         }
@@ -203,12 +215,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
         )
         .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, stt_actor);
+        expected_actors.push("STT");
 
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
             .with_model_dir(Some(speech_model_dir.clone()));
         spawn_actor(&bus, &mut registry, tts_actor);
+        expected_actors.push("TTS");
 
         if config.wakeword_enabled {
             let wakeword_config = speech::wakeword::WakewordConfig {
@@ -229,10 +243,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 12.5: Spawn memory monitor task.
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
 
-    // Step 13: Broadcast BootComplete
-    bus.broadcast(Event::System(SystemEvent::BootComplete))
-        .await
-        .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
+    // Step 13: BootComplete is broadcast by `lib::boot_ready_impl()` after the
+    // supervisor readiness gate confirms all actors are up.
 
     Ok(Runtime {
         bus,
@@ -244,6 +256,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         vision_frame_store,
         _keep_alive: keep_alive,
         memory_monitor_handle: Some(memory_monitor_handle),
+        expected_actors,
     })
 }
 
@@ -420,6 +433,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         assert_eq!(runtime.registry.actor_count(), 0);
@@ -545,6 +559,7 @@ mod tests {
             vision_frame_store: Arc::new(Mutex::new(None)),
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
+            expected_actors: vec![],
         };
 
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -181,7 +181,7 @@ pub trait Actor: Send + 'static {
 
 ## 4. Runtime
 
-The runtime lives in `crates/runtime`. It owns the boot sequence, the actor registry, and the shutdown protocol.
+The runtime lives in `crates/runtime`. It owns the boot sequence, the actor registry, the readiness gate, the supervision loop, and the shutdown protocol. It is the process lifetime owner for daemon mode.
 
 ### 4.1 Boot Sequence
 
@@ -192,18 +192,41 @@ Order is strict and non-negotiable:
 2. Encryption init       — derive or retrieve master key; must complete before any store opens
 3. EventBus init         — bus is live before any actor starts
 4. Soul init             — SoulBox schema loaded/migrated before anything writes to it
-5. Core actors spawn     — bus, runtime internal actors
+5. Core actors spawn     — Soul, Platform, CTP, Memory, Inference (each pushed to expected_actors)
 6. Platform adapter      — OS signal collection begins
 7. CTP actor             — begins observation loop
 8. Memory actor          — loads indexes, prepares write queues
 9. Inference actor       — discovers models, does NOT load weights yet
 10. Prompt actor         — ready to compose, idle until ThoughtEvent
-11. BootComplete event   — emitted on bus. Actors waiting on this may now activate.
+11. Speech actors        — STT, TTS spawned conditionally if speech_enabled (pushed to expected_actors)
+12. System tray          — tray icon created in dedicated thread
+13. (no BootComplete here — emitted by supervisor after readiness gate)
 ```
 
-If any step from 1–4 fails, Sena exits with a clear error. Steps 5–10 failing emit `ActorFailed` and Sena continues in degraded mode.
+If any step from 1–4 fails, Sena exits with a clear error. Steps 5–11 failing emit `ActorFailed`.
 
-### 4.2 Shutdown Protocol
+### 4.2 Readiness Gate
+
+After `boot::boot()` returns, the supervisor (`crates/runtime/src/supervisor.rs`) waits up to 30 seconds for every actor in `runtime.expected_actors` to emit `SystemEvent::ActorReady`. Only then is `BootComplete` broadcast.
+
+This ensures `BootComplete` listeners (like CTP and inference) only activate once all lower-level actors are confirmed up.
+
+### 4.3 Process Lifetime (Daemon vs CLI Mode)
+
+Two entry points, one binary:
+
+| Mode | Invocation | Lifetime owner |
+|---|---|---|
+| Daemon | `sena` (no args) | `runtime::run_background()` → supervision loop |
+| CLI | `sena cli` | Boot → `shell::run_with_runtime()` → TUI → shutdown |
+
+In daemon mode, `runtime::run_background()` boots, passes the readiness gate, broadcasts BootComplete, optionally emits TTS greeting, then enters `supervisor::supervision_loop()` which blocks until ShutdownSignal or Ctrl+C.
+
+In CLI mode, `runtime::boot_ready()` handles boot+readiness+BootComplete and returns the live `Runtime` to `main.rs`. The CLI then opens the TUI via `shell::run_with_runtime()`. When the user exits the TUI, shutdown is triggered.
+
+**Open CLI from tray:** The "Open CLI" tray menu item broadcasts `CliAttachRequested`. The supervision loop handles this by calling `open_cli_in_new_terminal()` which spawns a new terminal process running `sena cli`. This keeps the daemon and CLI as independent processes.
+
+### 4.4 Shutdown Protocol
 
 Shutdown is always graceful. Signal: OS SIGINT/SIGTERM or `ShutdownSignal` event on bus.
 
@@ -221,9 +244,9 @@ Shutdown is always graceful. Signal: OS SIGINT/SIGTERM or `ShutdownSignal` event
 - Shutdown timeout is configurable. Default: 5 seconds per actor before force-kill.
 - Soul always flushes before exit. Data loss in Soul is treated as a critical failure.
 
-### 4.3 Actor Registry
+### 4.5 Actor Registry
 
-The registry maps actor names to their `JoinHandle`. The runtime uses this to monitor liveness and restart failed actors within policy.
+The registry maps actor names to their `JoinHandle`. The runtime uses this to monitor liveness. The supervisor restarts failed actors up to `MAX_ACTOR_RETRIES` (3) times before triggering shutdown.
 
 ---
 
