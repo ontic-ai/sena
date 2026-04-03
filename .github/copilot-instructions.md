@@ -298,6 +298,40 @@ If the architecture graph does not have an arrow for the import you want, the ar
 
 ---
 
+## 8.1 CLI Design Principle — Wrapper, Not Owner
+
+The CLI is a **thin wrapper** over the daemon's capabilities. It does not own business logic.
+
+**What the CLI IS:**
+- A TUI surface for the user to manually trigger daemon operations
+- A window into the bus event stream (observation, status, transparency)
+- A command dispatcher: sends typed bus events to request work (inference, STT, model swap, config)
+
+**What the CLI is NOT:**
+- An owner of actors — CLI never constructs Soul, Memory, Inference, Platform, CTP, or Speech actors
+- A re-implementor of business logic — if the daemon already does it, the CLI requests it via bus
+- An independent inference pipeline — CLI requests inference by broadcasting events, waits for response events
+
+**Hard rules:**
+- Every CLI command maps to exactly one bus event or IPC command dispatched to the daemon. No CLI logic that duplicates what an actor already does.
+- When the daemon is running, CLI connects to it (Phase 6 IPC). It does NOT boot a second runtime.
+- In CLI-only mode (no daemon), CLI boots the full runtime as the owner — this path is transitional. Target state is always IPC-attached.
+- New slash commands added to the CLI must have a corresponding daemon-side event handler. No orphaned CLI commands.
+- CLI renders bus events. It does not compute them.
+
+```rust
+// CORRECT — CLI dispatches a bus event, waits for response
+self.bus.broadcast(Event::Speech(SpeechEvent::TranscribeRequested { ... })).await?;
+
+// WRONG — CLI runs inference itself
+let result = llama_model.infer(prompt); // FORBIDDEN — inference belongs to the actor
+
+// WRONG — CLI constructs actors
+let actor = InferenceActor::new(...); // FORBIDDEN — runtime owns actor construction
+```
+
+---
+
 ## 9. SoulBox-Specific Rules
 
 - Never write SQL directly in a file outside of `crates/soul/`.

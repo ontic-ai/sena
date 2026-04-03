@@ -213,6 +213,9 @@ This ensures `BootComplete` listeners (like CTP and inference) only activate onc
 
 ### 4.3 Process Lifetime (Daemon vs CLI Mode)
 
+**CLI design principle — wrapper, not owner:**
+The CLI is a thin wrapper over the daemon's capabilities. All business logic (inference, memory, STT, CTP, Soul writes) lives in the daemon and its actors. The CLI dispatches typed bus events to request work and renders the resulting event stream. It has no actors of its own. In Phase 6, CLI connects to the running daemon over IPC. Before Phase 6 (current state), CLI boots the full runtime as the owner — this is a transitional state. Any code written for CLI must be compatible with the Phase 6 IPC model: if a feature would not work when CLI is a separate process, it is coupling that must be fixed.
+
 Two entry points, one binary:
 
 | Mode | Invocation | Lifetime owner |

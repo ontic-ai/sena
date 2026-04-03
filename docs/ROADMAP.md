@@ -362,7 +362,9 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ## Phase 6 — CLI Decoupling and Configuration
 
-**Goal:** CLI becomes a separate process communicating over IPC. Configuration is accessible through CLI menu and auto-tuned based on local analytics.
+**Goal:** CLI becomes a fully separated thin wrapper process communicating over IPC. Every CLI command dispatches a typed bus event to the daemon; the daemon owns all actors and business logic. Configuration is accessible through CLI menu and auto-tuned based on local analytics.
+
+**Design contract (non-negotiable):** The CLI is a wrapper, not an owner. It dispatches events, renders responses, and never contains business logic that duplicates what a daemon actor already does. See `architecture.md §4.3` and `copilot-instructions.md §8.1`.
 
 **Entry gate:** Phase 5 exit gate fully satisfied.
 
@@ -375,14 +377,16 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [ ] CLI connects as a client, receives bus event stream, sends commands
 
 #### M6.2 — CLI as Separate Process
-- [ ] CLI binary connects to runtime over IPC
+- [ ] CLI binary connects to running daemon over IPC (daemon must be running)
+- [ ] CLI is a pure event dispatcher + renderer: every slash command maps to one IPC command or bus event
 - [ ] CLI crash does not affect runtime
 - [ ] Multiple CLI sessions supported simultaneously
 - [ ] Session attach/detach without runtime restart
+- [ ] `sena cli` with no daemon running: show clear instructions, do not boot a second runtime
 
 #### M6.3 — Configuration UI
 - [ ] `/config` slash command: view all settings and config file path
-- [ ] `/config set <key> <value>`: edit settings from CLI
+- [ ] `/config set <key> <value>`: edit settings from CLI (dispatches ConfigReloadRequested after save)
 - [ ] Advanced mode toggle: hides technical settings from general users
 - [ ] Config validation before save
 
@@ -394,6 +398,7 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 **Exit gate — Phase 6 complete when:**
 - [ ] CLI is a separate process, runtime survives CLI crashes
+- [ ] Every CLI slash command maps 1:1 to a daemon-side bus event handler — no orphaned commands
 - [ ] Configuration viewable and editable from CLI
 - [ ] Token limits auto-tuned based on hardware profile
 - [ ] All previous exit gate conditions still hold
