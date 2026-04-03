@@ -209,6 +209,7 @@ impl InferenceActor {
             Ok(()) => {
                 // Set current model name for chat template detection
                 self.current_model_name = Some(model_name.clone());
+                tracing::info!("model loaded: {} ({})", model_name, self.backend_type);
 
                 let _ = bus
                     .broadcast(Event::Inference(InferenceEvent::ModelLoaded {
@@ -218,7 +219,10 @@ impl InferenceActor {
                     .await;
                 Ok(())
             }
-            Err(e) => Err(format!("model load failed: {}", e)),
+            Err(e) => {
+                tracing::error!("model load failed: {}", e);
+                Err(format!("model load failed: {}", e))
+            }
         }
     }
 
@@ -986,10 +990,10 @@ impl Actor for InferenceActor {
             .map_err(|e| ActorError::StartupFailed(format!("register directed failed: {}", e)))?;
         self.directed_rx = Some(rx);
 
-        // Check for backend mismatch: GPU detected but CPU-only llama-cpp-2 build
-        // Currently compiled without GPU features. When GPU features are added,
-        // update this check to: cfg!(feature = "cuda") || cfg!(feature = "metal")
-        let gpu_features_compiled = false;
+        // Check for backend mismatch: GPU detected at runtime but binary compiled without GPU features.
+        // gpu_features_compiled is a compile-time constant derived from Cargo feature flags.
+        // Add `--features cuda` (or `metal`) to the build to enable GPU acceleration.
+        let gpu_features_compiled = cfg!(feature = "cuda") || cfg!(feature = "metal");
         if !gpu_features_compiled
             && (self.backend_type == BackendType::Cuda || self.backend_type == BackendType::Metal)
         {
@@ -1005,6 +1009,11 @@ impl Actor for InferenceActor {
             // Force CPU: GPU was detected but this binary has no GPU features compiled in.
             // Without this override, load_model passes n_gpu_layers=999 to llama.cpp which
             // attempts CUDA/Metal allocations and crashes with STATUS_ACCESS_VIOLATION.
+            tracing::warn!(
+                "GPU detected ({}) but binary compiled CPU-only \
+                 — falling back to CPU. Rebuild with --features cuda to enable GPU.",
+                self.backend_type
+            );
             self.backend_type = BackendType::Cpu;
         }
 

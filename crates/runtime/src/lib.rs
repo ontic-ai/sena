@@ -36,9 +36,9 @@ pub enum RuntimeError {
 /// broadcasts `BootComplete`, then enters the supervision loop.
 /// Blocks until shutdown completes.
 pub async fn run_background() -> Result<(), RuntimeError> {
-    eprintln!("[sena] starting in background mode");
+    tracing::info!("starting in background mode");
     let runtime = boot_ready_impl().await?;
-    eprintln!("[sena] all actors ready — entering supervision loop");
+    tracing::info!("all actors ready — entering supervision loop");
     supervisor::supervision_loop(runtime).await?;
     Ok(())
 }
@@ -55,11 +55,18 @@ pub async fn boot_ready() -> Result<Runtime, BootError> {
 async fn boot_ready_impl() -> Result<Runtime, BootError> {
     use bus::{Event, SystemEvent};
 
-    let runtime = boot::boot().await?;
+    let mut runtime = boot::boot().await?;
+
+    // Take the pre-made receiver (subscribed before any actor was spawned).
+    // Fall back to a fresh subscription only if somehow not set.
+    let readiness_rx = runtime
+        .readiness_rx
+        .take()
+        .unwrap_or_else(|| runtime.bus.subscribe_broadcast());
 
     // Wait up to 30 seconds for all spawned actors to emit ActorReady.
     supervisor::wait_for_readiness(
-        &runtime.bus,
+        readiness_rx,
         &runtime.expected_actors,
         Duration::from_secs(30),
     )

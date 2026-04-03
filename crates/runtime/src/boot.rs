@@ -29,6 +29,10 @@ pub struct Runtime {
     /// Names of actors expected to emit `ActorReady` before `BootComplete`.
     /// Used by the supervisor readiness gate.
     pub expected_actors: Vec<&'static str>,
+    /// Broadcast receiver subscribed BEFORE any actor is spawned.
+    /// Handed to `wait_for_readiness` so no `ActorReady` event is missed
+    /// due to the race between actor spawn and supervisor subscription.
+    pub(crate) readiness_rx: Option<tokio::sync::broadcast::Receiver<Event>>,
 }
 
 /// Boot sequence errors.
@@ -94,6 +98,10 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 3: Initialize EventBus
     let bus = Arc::new(EventBus::new());
     let keep_alive = bus.subscribe_broadcast();
+
+    // Subscribe BEFORE spawning any actor so no ActorReady is missed due to the
+    // race between tokio::spawn scheduling and wait_for_readiness subscription.
+    let readiness_rx = bus.subscribe_broadcast();
 
     bus.broadcast(Event::System(SystemEvent::EncryptionInitialized))
         .await
@@ -257,6 +265,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         _keep_alive: keep_alive,
         memory_monitor_handle: Some(memory_monitor_handle),
         expected_actors,
+        readiness_rx: Some(readiness_rx),
     })
 }
 
@@ -319,7 +328,7 @@ where
     let bus_for_events = Arc::clone(bus);
     let handle = tokio::spawn(async move {
         if let Err(e) = actor.start(bus_for_actor).await {
-            eprintln!("Actor '{}' failed to start: {}", name, e);
+            tracing::error!("actor '{}' failed to start: {}", name, e);
             let _ = bus_for_events
                 .broadcast(Event::System(SystemEvent::ActorFailed(ActorFailureInfo {
                     actor_name: name,
@@ -329,7 +338,7 @@ where
             return;
         }
         if let Err(e) = actor.run().await {
-            eprintln!("Actor '{}' failed during run: {}", name, e);
+            tracing::error!("actor '{}' failed during run: {}", name, e);
             let _ = bus_for_events
                 .broadcast(Event::System(SystemEvent::ActorFailed(ActorFailureInfo {
                     actor_name: name,
@@ -434,6 +443,7 @@ mod tests {
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         assert_eq!(runtime.registry.actor_count(), 0);
@@ -560,6 +570,7 @@ mod tests {
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         tokio::time::sleep(Duration::from_millis(20)).await;

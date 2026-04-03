@@ -30,6 +30,9 @@ toml = "1.1.2"
 anyhow = "1.0"
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 aes-gcm = "0.10"
 argon2 = "0.5"
 keyring = "3"

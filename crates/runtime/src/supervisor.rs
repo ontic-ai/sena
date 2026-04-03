@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use bus::{Event, EventBus, SystemEvent};
+use bus::{Event, SystemEvent};
 
 use crate::boot::{BootError, Runtime};
 
@@ -21,10 +21,13 @@ const MAX_ACTOR_RETRIES: u32 = 3;
 
 /// Block until all named actors have emitted `SystemEvent::ActorReady`.
 ///
+/// `rx` must be a broadcast receiver that was subscribed BEFORE any actor was
+/// spawned — otherwise `ActorReady` events emitted by fast-starting actors will
+/// be missed (broadcast channels do not buffer for late subscribers).
+///
 /// Returns `BootError::ReadinessTimeout` if not all actors become ready within `timeout`.
-/// A lagged broadcast channel (missed events) is treated as non-fatal; we continue polling.
 pub async fn wait_for_readiness(
-    bus: &std::sync::Arc<EventBus>,
+    mut rx: tokio::sync::broadcast::Receiver<Event>,
     expected_actors: &[&'static str],
     timeout: Duration,
 ) -> Result<(), BootError> {
@@ -33,8 +36,9 @@ pub async fn wait_for_readiness(
     }
 
     let mut remaining: HashSet<&'static str> = expected_actors.iter().copied().collect();
-    let mut rx = bus.subscribe_broadcast();
     let deadline = tokio::time::Instant::now() + timeout;
+
+    tracing::info!("waiting for actors: {:?}", expected_actors);
 
     while !remaining.is_empty() {
         tokio::select! {
@@ -42,6 +46,7 @@ pub async fn wait_for_readiness(
             _ = tokio::time::sleep_until(deadline) => {
                 let mut unready: Vec<&str> = remaining.into_iter().collect();
                 unready.sort_unstable();
+                tracing::error!("readiness timeout — actors not ready: {:?}", unready);
                 return Err(BootError::ReadinessTimeout(format!(
                     "actors not ready within {}s: {:?}",
                     timeout.as_secs(),
@@ -51,19 +56,22 @@ pub async fn wait_for_readiness(
             result = rx.recv() => {
                 match result {
                     Ok(Event::System(SystemEvent::ActorReady { actor_name })) => {
+                        tracing::info!("actor ready: {}", actor_name);
                         remaining.remove(actor_name);
                     }
                     Ok(Event::System(SystemEvent::ActorFailed(ref info))) => {
+                        tracing::warn!("actor failed during startup: {} — {}", info.actor_name, info.error_msg);
                         // If an actor failed before emitting ActorReady, remove it from
                         // the remaining set so we do not block forever. The supervision
                         // loop will handle retry after startup completes.
                         remaining.remove(info.actor_name);
                     }
                     Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Some events were dropped. Resubscribe and continue; we may
-                        // have missed an ActorReady that was already in the buffer.
-                        rx = bus.subscribe_broadcast();
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Some events were dropped. This means the bus is under heavy load.
+                        // Resubscribe to resume receiving, but log a warning — we may have
+                        // missed an ActorReady already delivered before catching up.
+                        tracing::warn!("readiness receiver lagged by {} events — resubscribing", n);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(BootError::ReadinessTimeout(
@@ -75,6 +83,7 @@ pub async fn wait_for_readiness(
         }
     }
 
+    tracing::info!("all actors ready");
     Ok(())
 }
 
@@ -106,8 +115,8 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                         let count = failure_counts.entry(info.actor_name).or_insert(0);
                         *count += 1;
                         if *count >= MAX_ACTOR_RETRIES {
-                            eprintln!(
-                                "[sena] actor '{}' failed {} times — shutting down",
+                            tracing::error!(
+                                "actor '{}' failed {} times — shutting down",
                                 info.actor_name, count
                             );
                             // Best-effort: request shutdown via bus before dropping the loop.
@@ -141,7 +150,7 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
 fn open_cli_in_new_terminal() {
     match std::env::current_exe() {
         Ok(exe_path) => open_cli_impl(exe_path),
-        Err(e) => eprintln!("[sena] could not locate executable for Open CLI: {}", e),
+        Err(e) => tracing::error!("could not locate executable for Open CLI: {}", e),
     }
 }
 
@@ -152,7 +161,7 @@ fn open_cli_impl(exe_path: std::path::PathBuf) {
         .args(["/c", "start", "cmd", "/k", &format!("{} cli", exe)])
         .spawn();
     if let Err(e) = result {
-        eprintln!("[sena] failed to open CLI terminal: {}", e);
+        tracing::error!("failed to open CLI terminal: {}", e);
     }
 }
 
@@ -164,7 +173,7 @@ fn open_cli_impl(exe_path: std::path::PathBuf) {
         .args(["-e", &script])
         .spawn();
     if let Err(e) = result {
-        eprintln!("[sena] failed to open CLI terminal: {}", e);
+        tracing::error!("failed to open CLI terminal: {}", e);
     }
 }
 

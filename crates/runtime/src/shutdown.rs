@@ -120,6 +120,7 @@ mod tests {
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         // Spawn shutdown task
@@ -159,6 +160,7 @@ mod tests {
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -193,6 +195,7 @@ mod tests {
             _keep_alive: _rx,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -226,6 +229,7 @@ mod tests {
             _keep_alive: keep_alive,
             memory_monitor_handle: None,
             expected_actors: vec![],
+            readiness_rx: None,
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;

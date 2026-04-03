@@ -558,6 +558,7 @@ impl Actor for SoulActor {
         .await
         .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
 
+        tracing::info!("Soul actor ready");
         self.bus = Some(bus);
         Ok(())
     }

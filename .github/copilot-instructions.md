@@ -417,3 +417,40 @@ impl fmt::Debug for MasterKey {
 struct MasterKey(Vec<u8>);
 ```
 
+---
+
+## 14. Debugging Protocol — Human-based Inspection
+
+Since the agent cannot interact with Sena directly when debugging runtime behaviour, the following protocol is mandatory for any runtime debugging session:
+
+### 14.1 Before Initiating a Test
+
+1. **Build Sena** with the latest changes: `cargo build --bin sena`
+2. **Run Sena** in the appropriate mode (background or CLI)
+3. **Send test instructions** to the user specifying:
+   - What to do / what input to provide to Sena
+   - The expected observable behaviour (output, log lines, no crash, etc.)
+   - The exact log file path to share if behaviour is unexpected
+4. **Ask a question** using the `vscode_askQuestions` tool (do NOT send another chat message — this keeps the conversation in-session) asking whether the expected behaviour was met. Request the user describe what happened.
+
+### 14.2 Human-based Inspection Question Format
+
+```
+Did Sena behave as expected?
+Expected: <description>
+If not, please paste: <relevant log excerpt or terminal output>
+```
+
+### 14.3 Log File Location
+
+- Windows:  `%APPDATA%\sena\sena.YYYY-MM-DD.log`
+- macOS:    `~/Library/Application Support/sena/sena.YYYY-MM-DD.log`
+- Linux:    `~/.config/sena/sena.YYYY-MM-DD.log`
+
+### 14.4 Dev vs Production Logging
+
+- **Always persisted**: `INFO` level and above, written to the rotating log file regardless of build profile.
+- **Dev-only stderr**: In `debug` builds (`cfg!(debug_assertions)`) OR when `SENA_LOG_STDERR=1` is set, logs are also emitted to stderr so they appear in the terminal.
+- **Level override**: `SENA_LOG` env var overrides the default level (e.g. `SENA_LOG=debug sena`).
+- Keys, passphrases, and DEKs must NEVER appear in any log at any level.
+

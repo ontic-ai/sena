@@ -89,6 +89,7 @@ impl Actor for CTPActor {
                 ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e))
             })?;
 
+        tracing::info!("CTP actor ready");
         Ok(())
     }
 

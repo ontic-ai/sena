@@ -245,6 +245,7 @@ impl Actor for PlatformActor {
         .await
         .map_err(|e| ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e)))?;
 
+        tracing::info!("Platform actor ready");
         Ok(())
     }
 
