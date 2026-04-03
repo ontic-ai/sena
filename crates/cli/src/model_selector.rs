@@ -99,7 +99,7 @@ pub fn render_popup(popup: &ModelSelectorPopup, frame: &mut ratatui::Frame) {
 
             let style = if i == popup.selected_index {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::LightMagenta)
                     .add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
@@ -123,7 +123,7 @@ pub fn render_popup(popup: &ModelSelectorPopup, frame: &mut ratatui::Frame) {
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::LightMagenta))
             .title("  Select Model (↑↓ navigate, Enter select, Esc cancel)  "),
     );
 

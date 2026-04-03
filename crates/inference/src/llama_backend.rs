@@ -220,9 +220,15 @@ impl LlmBackend for LlamaBackend {
         let n_ctx = NonZeroU32::new(std::cmp::max(tokens.len() as u32, 512))
             .ok_or_else(|| BackendError::EmbeddingFailed("context size is zero".into()))?;
 
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(n_ctx))
-            .with_embeddings(true);
+        // IMPORTANT: `with_embeddings(true)` is intentionally omitted.
+        // For generative models (Gemma, LLaMA, Phi, Mistral, etc.) enabling the
+        // embeddings flag causes STATUS_ACCESS_VIOLATION inside llama.cpp C++ code
+        // when `embeddings_seq_ith` accesses the uninitialized pooled-embedding
+        // buffer. This terminates the entire process. We use a standard decode
+        // context and extract the last-token hidden state instead.
+        // `embeddings_ith` null-checks the pointer and returns Err gracefully when
+        // the context does not expose embeddings in decode mode.
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
 
         let mut ctx = model
             .new_context(backend, ctx_params)
@@ -233,22 +239,18 @@ impl LlmBackend for LlamaBackend {
             .add_sequence(&tokens, 0, true)
             .map_err(|e| BackendError::EmbeddingFailed(format!("batch: {e}")))?;
 
-        // Embedding models use encode; generative models fall back to decode
-        if ctx.encode(&mut batch).is_err() {
-            ctx.decode(&mut batch)
-                .map_err(|e| BackendError::EmbeddingFailed(format!("decode: {e}")))?;
-        }
+        ctx.decode(&mut batch)
+            .map_err(|e| BackendError::EmbeddingFailed(format!("decode: {e}")))?;
 
-        // Try sequence-level (pooled) embeddings first, then token-level
+        // Last-token embedding. `embeddings_ith` null-checks internally and
+        // returns Err if the decode context does not expose embeddings for this
+        // model architecture — no AV risk.
+        let last = i32::try_from(tokens.len().saturating_sub(1)).unwrap_or(0);
         let embeddings = ctx
-            .embeddings_seq_ith(0)
-            .or_else(|_| {
-                let last = i32::try_from(tokens.len().saturating_sub(1)).unwrap_or(0);
-                ctx.embeddings_ith(last)
-            })
-            .map_err(|e| BackendError::EmbeddingFailed(format!("{e}")))?;
+            .embeddings_ith(last)
+            .map_err(|e| BackendError::EmbeddingFailed(format!("no embeddings: {e}")))?;
 
-        // IMMEDIATELY copy to owned Vec before ctx drop to avoid use-after-free
+        // Copy immediately before ctx is dropped
         let owned_embeddings = embeddings.to_vec();
 
         Ok(owned_embeddings)

@@ -350,10 +350,25 @@ impl InferenceActor {
                             .await;
                     }
                     Ok(Err(e)) => {
-                        let _ = response_tx.send(Err(e));
+                        let _ = response_tx.send(Err(e.clone()));
+                        // Broadcast InferenceFailed so SenaEmbedder fails fast
+                        // rather than waiting for the 30-second timeout.
+                        let _ = bus
+                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
+                                request_id,
+                                reason: e,
+                            }))
+                            .await;
                     }
                     Err(e) => {
-                        let _ = response_tx.send(Err(format!("task panicked: {}", e)));
+                        let err = format!("task panicked: {}", e);
+                        let _ = response_tx.send(Err(err.clone()));
+                        let _ = bus
+                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
+                                request_id,
+                                reason: err,
+                            }))
+                            .await;
                     }
                 }
             }

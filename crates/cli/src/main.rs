@@ -15,11 +15,14 @@ use tracing_appender::non_blocking::WorkerGuard;
 /// Set up the `tracing` subscriber.
 ///
 /// - File: `INFO`+ written to `<config_dir>/sena/sena.<date>.log` always.
-/// - Stderr: also emitted in debug builds or when `SENA_LOG_STDERR=1` is set.
+/// - Stderr: also emitted in debug builds or when `SENA_LOG_STDERR=1` is set,
+///   BUT only when `allow_stderr` is true. TUI mode passes `false` because
+///   tracing output written to stderr while ratatui owns the alternate screen
+///   corrupts terminal state and can cause the TUI to exit unexpectedly.
 /// - Level override: `SENA_LOG` env var (default `info`).
 ///
 /// Returns a `WorkerGuard` that must be kept alive for the duration of the process.
-fn setup_logging() -> WorkerGuard {
+fn setup_logging(allow_stderr: bool) -> WorkerGuard {
     let log_dir = sena_log_dir();
     let _ = std::fs::create_dir_all(&log_dir);
 
@@ -29,10 +32,11 @@ fn setup_logging() -> WorkerGuard {
     let level_filter = std::env::var("SENA_LOG").unwrap_or_else(|_| "info".to_string());
     let filter = tracing_subscriber::EnvFilter::new(level_filter);
 
-    let emit_stderr = cfg!(debug_assertions)
-        || std::env::var("SENA_LOG_STDERR")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+    let emit_stderr = allow_stderr
+        && (cfg!(debug_assertions)
+            || std::env::var("SENA_LOG_STDERR")
+                .map(|v| v == "1")
+                .unwrap_or(false));
 
     use tracing_subscriber::prelude::*;
     let file_layer = tracing_subscriber::fmt::layer()
@@ -93,9 +97,15 @@ fn sena_log_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _log_guard = setup_logging();
-
     let args: Vec<String> = std::env::args().collect();
+
+    // In TUI/CLI mode, suppress stderr logging to prevent tracing output from
+    // corrupting ratatui's alternate screen buffer. File logging continues normally.
+    let is_tui_mode = args
+        .get(1)
+        .map(|a| a == "cli" || a == "interactive")
+        .unwrap_or(false);
+    let _log_guard = setup_logging(!is_tui_mode);
 
     match args.get(1).map(String::as_str) {
         Some("query") => query::run_from_args(&args).await,
