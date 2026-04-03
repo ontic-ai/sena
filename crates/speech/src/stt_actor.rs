@@ -166,7 +166,10 @@ impl SttActor {
         let config = AudioInputConfig {
             sample_rate: 16_000,
             buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
-            energy_threshold: self.stt_energy_threshold,
+            // Pass all audio to SilenceDetector — it handles voice/silence classification.
+            // Setting energy_threshold > 0 here would drop silence frames and prevent
+            // the SilenceDetector from ever detecting the speech→silence transition.
+            energy_threshold: 0.0,
             device_name: self.microphone_device.clone(),
         };
 
@@ -405,7 +408,9 @@ impl Actor for SttActor {
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
                                 buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
-                                energy_threshold: self.stt_energy_threshold,
+                                // Pass all audio to SilenceDetector — it handles
+                                // voice/silence classification internally.
+                                energy_threshold: 0.0,
                                 device_name: self.microphone_device.clone(),
                             };
                             match AudioInputStream::start(config) {
