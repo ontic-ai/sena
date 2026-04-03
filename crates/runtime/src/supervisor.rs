@@ -156,11 +156,16 @@ fn open_cli_in_new_terminal() {
 
 #[cfg(target_os = "windows")]
 fn open_cli_impl(exe_path: std::path::PathBuf) {
+    // Windows cmd start command quirk: first quoted arg is interpreted as window title.
+    // Use empty quotes "" as title, then pass the actual command.
+    // Format: start "" cmd /k "<exe_path>" cli
     let exe = exe_path.display().to_string();
-    // Quote the executable path to handle spaces (e.g. OneDrive paths).
+    let command = format!("\"{}\" cli", exe);
+    
     let result = std::process::Command::new("cmd")
-        .args(["/c", "start", "cmd", "/k", &format!("\"{}\" cli", exe)])
+        .args(["/c", "start", "\"\"", "cmd", "/k", &command])
         .spawn();
+    
     if let Err(e) = result {
         tracing::error!("failed to open CLI terminal: {}", e);
     }

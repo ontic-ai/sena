@@ -18,35 +18,62 @@ pub struct AudioOutput {
 
 impl AudioOutput {
     pub fn new() -> Result<Self, SpeechError> {
+        tracing::debug!("AudioOutput::new() — querying default output device");
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or_else(|| SpeechError::AudioPlaybackFailed("no output device".to_string()))?;
 
+        tracing::debug!("audio output device: {:?}", device.name().unwrap_or_else(|_| "unknown".to_string()));
+
         let config = device
             .default_output_config()
             .map_err(|e| SpeechError::AudioPlaybackFailed(format!("config query failed: {e}")))?;
+
+        tracing::debug!(
+            "audio output config — sample_rate={} channels={} format={:?}",
+            config.sample_rate().0,
+            config.channels(),
+            config.sample_format()
+        );
 
         Ok(Self { device, config })
     }
 
     pub fn play_pcm16_mono_22050(&self, samples: &[i16]) -> Result<(), SpeechError> {
         if samples.is_empty() {
+            tracing::debug!("play_pcm16_mono_22050: empty sample buffer, skipping");
             return Ok(());
         }
+
+        tracing::debug!("play_pcm16_mono_22050: {} samples, output_rate={} channels={}", 
+            samples.len(), 
+            self.config.sample_rate().0,
+            self.config.channels()
+        );
 
         let output_sample_rate = self.config.sample_rate().0;
         let channels = usize::from(self.config.channels());
         let resampled = if output_sample_rate == 22_050 {
             samples.to_vec()
         } else {
+            tracing::debug!("resampling from 22050 Hz to {} Hz", output_sample_rate);
             resample_pcm_i16(samples, 22_050, output_sample_rate)
         };
 
         match self.config.sample_format() {
-            SampleFormat::F32 => self.play_f32_stream(&resampled, channels, output_sample_rate),
-            SampleFormat::I16 => self.play_i16_stream(&resampled, channels, output_sample_rate),
-            SampleFormat::U16 => self.play_u16_stream(&resampled, channels, output_sample_rate),
+            SampleFormat::F32 => {
+                tracing::debug!("using F32 output stream");
+                self.play_f32_stream(&resampled, channels, output_sample_rate)
+            }
+            SampleFormat::I16 => {
+                tracing::debug!("using I16 output stream");
+                self.play_i16_stream(&resampled, channels, output_sample_rate)
+            }
+            SampleFormat::U16 => {
+                tracing::debug!("using U16 output stream");
+                self.play_u16_stream(&resampled, channels, output_sample_rate)
+            }
             _ => Err(SpeechError::AudioPlaybackFailed(
                 "unsupported output sample format".to_string(),
             )),

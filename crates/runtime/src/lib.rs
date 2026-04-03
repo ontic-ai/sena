@@ -9,6 +9,7 @@ pub mod config;
 pub mod models;
 pub mod registry;
 pub mod shutdown;
+pub mod single_instance;
 pub mod supervisor;
 pub mod tray;
 
@@ -17,6 +18,7 @@ pub use config::{save_config, ConfigError, SenaConfig};
 pub use models::{discover_models, ollama_models_dir, InferenceError, ModelRegistry};
 pub use registry::ActorRegistry;
 pub use shutdown::{shutdown, wait_for_sigint, ShutdownError};
+pub use single_instance::{try_acquire_lock, SingleInstanceError, SingleInstanceGuard};
 pub use tray::TrayManager;
 
 use std::time::Duration;

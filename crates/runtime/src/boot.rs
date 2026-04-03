@@ -10,6 +10,7 @@ use rand::RngCore;
 
 use crate::config::SenaConfig;
 use crate::registry::ActorRegistry;
+use crate::single_instance::SingleInstanceGuard;
 
 /// Runtime holds initialized subsystems and the event bus.
 pub struct Runtime {
@@ -33,6 +34,9 @@ pub struct Runtime {
     /// Handed to `wait_for_readiness` so no `ActorReady` event is missed
     /// due to the race between actor spawn and supervisor subscription.
     pub(crate) readiness_rx: Option<tokio::sync::broadcast::Receiver<Event>>,
+    /// Single-instance lock guard. Kept alive for the process lifetime.
+    #[allow(dead_code)]
+    pub(crate) single_instance_guard: SingleInstanceGuard,
 }
 
 /// Boot sequence errors.
@@ -73,11 +77,18 @@ pub enum BootError {
 
     #[error("readiness timeout: {0}")]
     ReadinessTimeout(String),
+
+    #[error("single instance check failed: {0}")]
+    SingleInstanceCheckFailed(String),
 }
 
 /// Full boot sequence per architecture §4.1 (all 13 steps).
 /// Runtime is the composition root — all actors are constructed here.
 pub async fn boot() -> Result<Runtime, BootError> {
+    // Step 0: Single-instance enforcement — must be first so we fail fast if another instance is running.
+    let single_instance_guard = crate::single_instance::try_acquire_lock()
+        .map_err(|e| BootError::SingleInstanceCheckFailed(e.to_string()))?;
+
     // Step 1: Config load
     let config = crate::config::load_or_create_config()
         .await
@@ -259,6 +270,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
         registry,
         config,
         tray_manager,
+        single_instance_guard,
         is_first_boot,
         master_key,
         vision_frame_store,
@@ -444,6 +456,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: SingleInstanceGuard::test_dummy(),
         };
 
         assert_eq!(runtime.registry.actor_count(), 0);
@@ -571,6 +584,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: SingleInstanceGuard::test_dummy(),
         };
 
         tokio::time::sleep(Duration::from_millis(20)).await;

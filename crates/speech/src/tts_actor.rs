@@ -159,30 +159,53 @@ impl TtsActor {
         let text = text.to_string();
         let rate = self.tts_rate;
 
+        tracing::debug!("tts: generate_and_play — backend={:?} text_len={} rate={}", backend, text.len(), rate);
+
         match backend {
             ActiveTtsBackend::Mock => {
                 // Deterministic mock synthesis for tests (no hardware dependency).
                 tokio::time::sleep(Duration::from_millis(30)).await;
+                tracing::debug!("tts: mock playback complete");
                 Ok(())
             }
-            ActiveTtsBackend::SystemPlatform => tokio::task::spawn_blocking(move || {
-                let mut tts = tts::Tts::default()
-                    .map_err(|e| SpeechError::SpeechGenerationFailed(e.to_string()))?;
-                tts.set_rate(rate)
-                    .map_err(|e| SpeechError::SpeechGenerationFailed(e.to_string()))?;
-                tts.speak(&text, false)
-                    .map_err(|e| SpeechError::SpeechGenerationFailed(e.to_string()))?;
-                Ok::<(), SpeechError>(())
-            })
-            .await
-            .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?,
-            ActiveTtsBackend::Piper { model } => tokio::task::spawn_blocking(move || {
-                let samples = synthesize_with_piper(&text, model.as_ref(), rate)?;
-                let output = AudioOutput::new()?;
-                output.play_pcm16_mono_22050(&samples)
-            })
-            .await
-            .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?,
+            ActiveTtsBackend::SystemPlatform => {
+                tracing::debug!("tts: using system platform TTS");
+                let result = tokio::task::spawn_blocking(move || {
+                    tracing::debug!("tts: creating default Tts instance");
+                    let mut tts = tts::Tts::default()
+                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("Tts::default failed: {e}")))?;
+                    
+                    tracing::debug!("tts: setting rate to {}", rate);
+                    tts.set_rate(rate)
+                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("set_rate failed: {e}")))?;
+                    
+                    tracing::debug!("tts: calling speak() with text_len={}", text.len());
+                    tts.speak(&text, false)
+                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("speak failed: {e}")))?;
+                    
+                    tracing::debug!("tts: system TTS speak() returned successfully");
+                    Ok::<(), SpeechError>(())
+                })
+                .await
+                .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?;
+                
+                tracing::info!("tts: system platform playback complete");
+                result
+            }
+            ActiveTtsBackend::Piper { model } => {
+                tracing::debug!("tts: using Piper backend with model={:?}", model);
+                tokio::task::spawn_blocking(move || {
+                    let samples = synthesize_with_piper(&text, model.as_ref(), rate)?;
+                    tracing::debug!("tts: piper synthesis complete — {} samples", samples.len());
+                    let output = AudioOutput::new()?;
+                    tracing::debug!("tts: AudioOutput created, starting playback");
+                    output.play_pcm16_mono_22050(&samples)?;
+                    tracing::info!("tts: piper playback complete");
+                    Ok::<(), SpeechError>(())
+                })
+                .await
+                .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join failed: {e}")))?
+            }
         }
     }
 

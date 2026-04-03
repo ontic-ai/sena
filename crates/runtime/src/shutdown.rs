@@ -123,6 +123,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: crate::single_instance::SingleInstanceGuard::test_dummy(),
         };
 
         // Spawn shutdown task
@@ -163,6 +164,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: crate::single_instance::SingleInstanceGuard::test_dummy(),
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -198,6 +200,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: crate::single_instance::SingleInstanceGuard::test_dummy(),
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;
@@ -232,6 +235,7 @@ mod tests {
             memory_monitor_handle: None,
             expected_actors: vec![],
             readiness_rx: None,
+            single_instance_guard: crate::single_instance::SingleInstanceGuard::test_dummy(),
         };
 
         let result = shutdown(runtime, Duration::from_secs(1)).await;

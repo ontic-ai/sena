@@ -52,9 +52,11 @@ impl AudioInputStream {
     ) -> Result<(Self, mpsc::UnboundedReceiver<AudioBuffer>), SpeechError> {
         // Preflight device checks so startup errors are surfaced synchronously.
         let host = cpal::default_host();
-        let _device = host
+        let device = host
             .default_input_device()
             .ok_or_else(|| SpeechError::AudioCaptureFailed("no input device found".to_string()))?;
+
+        tracing::debug!("audio input device: {:?}", device.name().unwrap_or_else(|_| "unknown".to_string()));
 
         let (buffer_tx, buffer_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -62,25 +64,32 @@ impl AudioInputStream {
 
         let worker_config = config.clone();
         let capture_thread = thread::spawn(move || {
+            tracing::debug!("audio capture thread spawned — initializing stream");
             let ready = run_capture_loop(worker_config, buffer_tx, stop_rx);
             let _ = ready_tx.send(ready);
         });
 
-        match ready_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Ok(())) => Ok((
-                Self {
-                    config,
-                    stop_tx: Some(stop_tx),
-                    capture_thread: Some(capture_thread),
-                },
-                buffer_rx,
-            )),
+        tracing::debug!("waiting for audio capture thread to initialize (timeout: 5s)");
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                tracing::debug!("audio capture thread ready");
+                Ok((
+                    Self {
+                        config,
+                        stop_tx: Some(stop_tx),
+                        capture_thread: Some(capture_thread),
+                    },
+                    buffer_rx,
+                ))
+            }
             Ok(Err(e)) => {
+                tracing::error!("audio capture thread initialization failed: {}", e);
                 let _ = stop_tx.send(());
                 let _ = capture_thread.join();
                 Err(e)
             }
             Err(_) => {
+                tracing::error!("audio capture thread startup timed out after 5 seconds");
                 let _ = stop_tx.send(());
                 let _ = capture_thread.join();
                 Err(SpeechError::AudioCaptureFailed(
@@ -122,13 +131,25 @@ fn run_capture_loop(
         .default_input_device()
         .ok_or_else(|| SpeechError::AudioCaptureFailed("no input device found".to_string()))?;
 
+    tracing::debug!("audio capture: querying device default config");
     let input_cfg = device
         .default_input_config()
-        .map_err(|e| SpeechError::AudioCaptureFailed(format!("get config failed: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!("audio capture: failed to get device config: {}", e);
+            SpeechError::AudioCaptureFailed(format!("get config failed: {}", e))
+        })?;
+
+    tracing::debug!(
+        "audio capture: device config — sample_rate={} channels={} format={:?}",
+        input_cfg.sample_rate().0,
+        input_cfg.channels(),
+        input_cfg.sample_format()
+    );
 
     let stream_config = input_cfg.config();
     let shared = Arc::new(Mutex::new(Vec::<f32>::new()));
 
+    tracing::debug!("audio capture: building input stream");
     let stream = build_stream_for_format(
         &device,
         &stream_config,
@@ -140,14 +161,20 @@ fn run_capture_loop(
         config.energy_threshold,
     )?;
 
+    tracing::debug!("audio capture: starting stream playback");
     stream
         .play()
-        .map_err(|e| SpeechError::AudioCaptureFailed(format!("start stream failed: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!("audio capture: failed to start stream: {}", e);
+            SpeechError::AudioCaptureFailed(format!("start stream failed: {}", e))
+        })?;
 
+    tracing::debug!("audio capture: stream active, entering poll loop");
     while stop_rx.try_recv().is_err() {
         thread::sleep(Duration::from_millis(50));
     }
 
+    tracing::debug!("audio capture: stop signal received, exiting");
     Ok(())
 }
 
