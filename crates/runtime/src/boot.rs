@@ -232,7 +232,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
             config.stt_energy_threshold,
             config.whisper_model_path.clone(),
         )
-        .with_model_dir(Some(speech_model_dir.clone()));
+        .with_model_dir(Some(speech_model_dir.clone()))
+        .with_microphone_device(config.microphone_device.clone());
         spawn_actor(&bus, &mut registry, stt_actor);
         expected_actors.push("stt");
 

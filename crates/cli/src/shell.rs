@@ -95,6 +95,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Start/stop continuous live transcription",
     },
     SlashCommand {
+        command: "/microphone",
+        description: "List microphones or select one (/microphone select <index>)",
+    },
+    SlashCommand {
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
     },
@@ -955,6 +959,9 @@ impl Shell {
             Event::System(bus::events::SystemEvent::CliAttachRequested) => {
                 self.add_message(MessageRole::System, "CLI session already open.".to_string());
             }
+            Event::System(bus::events::SystemEvent::ConfigReloaded) => {
+                self.add_message(MessageRole::System, "Config reloaded.".to_string());
+            }
             Event::Speech(SpeechEvent::TranscriptionCompleted {
                 text,
                 confidence: _,
@@ -1263,6 +1270,96 @@ impl Shell {
                 }
                 DispatchResult::Continue
             }
+            "/microphone" => {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.get(1) == Some(&"select") {
+                    // /microphone select <index>
+                    let idx_str = parts.get(2).copied().unwrap_or("");
+                    match idx_str.parse::<usize>() {
+                        Err(_) => {
+                            self.add_message(
+                                MessageRole::Warning,
+                                "Usage: /microphone select <index>  (see /microphone for index list)".to_string(),
+                            );
+                        }
+                        Ok(idx) => {
+                            let devices = runtime::list_input_devices();
+                            if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
+                                // Save to config on disk.
+                                match runtime::config::load_or_create_config().await {
+                                    Ok(mut cfg) => {
+                                        if idx == 0 {
+                                            cfg.microphone_device = None;
+                                        } else {
+                                            cfg.microphone_device = Some(name.clone());
+                                        }
+                                        match runtime::save_config(&cfg).await {
+                                            Ok(_) => {
+                                                self.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "\u{1f3a4} Microphone set to: {}{}",
+                                                        name,
+                                                        if idx == 0 { " (system default)" } else { "" }
+                                                    ),
+                                                );
+                                                self.add_message(
+                                                    MessageRole::System,
+                                                    "Restart Sena for the new microphone to take effect.".to_string(),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                self.add_message(
+                                                    MessageRole::Warning,
+                                                    format!("Failed to save config: {}", e),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.add_message(
+                                            MessageRole::Warning,
+                                            format!("Could not read config: {}", e),
+                                        );
+                                    }
+                                }
+                            } else {
+                                self.add_message(
+                                    MessageRole::Warning,
+                                    format!("No device at index {}. Run /microphone to list devices.", idx),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    // /microphone — list available devices
+                    let devices = runtime::list_input_devices();
+                    let current = self.runtime.config.microphone_device.as_deref()
+                        .unwrap_or("(system default)");
+                    self.add_message(
+                        MessageRole::System,
+                        format!("\u{2501}\u{2501}  Available Microphones  (current: {})", current),
+                    );
+                    if devices.is_empty() {
+                        self.add_message(
+                            MessageRole::Warning,
+                            "No input devices found.".to_string(),
+                        );
+                    } else {
+                        for (idx, name) in &devices {
+                            self.add_message(
+                                MessageRole::System,
+                                format!("  [{}]  {}", idx, name),
+                            );
+                        }
+                        self.add_message(
+                            MessageRole::System,
+                            "Use /microphone select <index> to switch. Index 0 = system default.".to_string(),
+                        );
+                    }
+                }
+                DispatchResult::Continue
+            }
             "/screenshot" => {
                 let capture_status = if self.runtime.config.screen_capture_enabled {
                     "enabled"
@@ -1476,6 +1573,10 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
+            "/microphone            List microphones or select one (/microphone select <index>)".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
             "/screenshot            Show screenshot capture + vision model status".to_string(),
         );
         self.add_message(
@@ -1666,6 +1767,12 @@ impl Shell {
                             MessageRole::System,
                             format!("Config updated: {} = {}", key, value),
                         );
+                        // Broadcast ConfigReloadRequested so the runtime can
+                        // hot-reload non-actor config values in the supervision loop.
+                        let _ = self
+                            .bus
+                            .broadcast(Event::System(bus::events::SystemEvent::ConfigReloadRequested))
+                            .await;
                         // Some keys can take effect immediately without restart
                         self.add_message(
                             MessageRole::System,

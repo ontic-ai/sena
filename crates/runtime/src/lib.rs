@@ -20,6 +20,8 @@ pub use registry::ActorRegistry;
 pub use shutdown::{shutdown, wait_for_sigint, ShutdownError};
 pub use single_instance::{is_daemon_running, try_acquire_lock, SingleInstanceError, SingleInstanceGuard};
 pub use tray::TrayManager;
+/// Re-exported from `speech` crate so `cli` does not need a direct speech dependency.
+pub use speech::list_input_devices;
 
 use std::time::Duration;
 

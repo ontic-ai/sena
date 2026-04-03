@@ -116,6 +116,20 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                     ))) => {
                         open_log_folder();
                     }
+                    Ok(Event::System(SystemEvent::ConfigReloadRequested)) => {
+                        match crate::config::load_or_create_config().await {
+                            Ok(_cfg) => {
+                                tracing::info!("config reloaded from disk");
+                                let _ = runtime
+                                    .bus
+                                    .broadcast(Event::System(SystemEvent::ConfigReloaded))
+                                    .await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("config reload failed: {}", e);
+                            }
+                        }
+                    }
                     Ok(Event::System(SystemEvent::ActorFailed(info))) => {
                         let count = failure_counts.entry(info.actor_name).or_insert(0);
                         *count += 1;

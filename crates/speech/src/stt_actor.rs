@@ -48,6 +48,8 @@ pub struct SttActor {
     listen_session_id: Option<u64>,
     listen_audio_rx: Option<mpsc::UnboundedReceiver<AudioBuffer>>,
     listen_audio_stream: Option<AudioInputStream>,
+    /// Preferred microphone device name (None = system default).
+    microphone_device: Option<String>,
 }
 
 impl SttActor {
@@ -77,6 +79,7 @@ impl SttActor {
             listen_session_id: None,
             listen_audio_rx: None,
             listen_audio_stream: None,
+            microphone_device: None,
         }
     }
 
@@ -90,6 +93,13 @@ impl SttActor {
     /// When silence lasts longer than this after speech, transcription is triggered.
     pub fn with_silence_duration(mut self, secs: f32) -> Self {
         self.silence_duration_secs = secs;
+        self
+    }
+
+    /// Set the preferred microphone device name.
+    /// A case-insensitive substring match is used so partial names work.
+    pub fn with_microphone_device(mut self, device: Option<String>) -> Self {
+        self.microphone_device = device;
         self
     }
 
@@ -149,6 +159,7 @@ impl SttActor {
             sample_rate: 16_000,
             buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
             energy_threshold: self.stt_energy_threshold,
+            device_name: self.microphone_device.clone(),
         };
 
         let (stream, rx) = AudioInputStream::start(config)?;
@@ -454,6 +465,7 @@ impl Actor for SttActor {
                                 sample_rate: 16_000,
                                 buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
                                 energy_threshold: self.stt_energy_threshold,
+                                device_name: self.microphone_device.clone(),
                             };
                             match AudioInputStream::start(config) {
                                 Ok((stream, rx)) => {

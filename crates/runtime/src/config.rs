@@ -162,6 +162,12 @@ pub struct SenaConfig {
     #[serde(default = "default_tts_rate")]
     pub tts_rate: f32,
 
+    /// Selected microphone device name for STT / listen mode.
+    /// When `None`, the system default input device is used.
+    /// Set via `/microphone select <index>` in the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_device: Option<String>,
+
     /// Maximum tokens to generate per inference response.
     /// Hardware-aware: lower values use less VRAM/RAM, higher values allow longer responses.
     /// Default: 512
@@ -206,6 +212,7 @@ impl Default for SenaConfig {
             speech_rate_limit_secs: default_speech_rate_limit_secs(),
             tts_voice: None,
             tts_rate: default_tts_rate(),
+            microphone_device: None,
             inference_max_tokens: default_inference_max_tokens(),
             inference_ctx_size: default_inference_ctx_size(),
         }

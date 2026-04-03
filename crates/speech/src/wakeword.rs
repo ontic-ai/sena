@@ -160,6 +160,7 @@ impl WakewordActor {
             sample_rate: 16_000,
             buffer_duration_secs: 0.5, // Short buffers for low latency
             energy_threshold: 0.0,     // We do our own detection logic
+            device_name: None,         // Wakeword always uses system default
         };
 
         let (stream, rx) = AudioInputStream::start(config)

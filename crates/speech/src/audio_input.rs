@@ -13,6 +13,35 @@ use tokio::sync::mpsc;
 
 use crate::{AudioBuffer, SpeechError};
 
+/// Enumerate available audio input devices.
+///
+/// Returns a list of `(index, display_name)` pairs. Index 0 is always the
+/// system default device. Indices 1..N are enumerated devices in the order
+/// cpal returns them.
+pub fn list_input_devices() -> Vec<(usize, String)> {
+    let host = cpal::default_host();
+    let mut result = Vec::new();
+
+    // Index 0 = system default
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "(default device — unavailable)".to_string());
+    result.push((0, format!("{} [default]", default_name)));
+
+    // Index 1..N = enumerated devices
+    if let Ok(devices) = host.input_devices() {
+        for (i, device) in devices.enumerate() {
+            let name = device
+                .name()
+                .unwrap_or_else(|_| format!("device {}", i + 1));
+            result.push((i + 1, name));
+        }
+    }
+
+    result
+}
+
 /// Audio input configuration.
 #[derive(Debug, Clone)]
 pub struct AudioInputConfig {
@@ -22,6 +51,10 @@ pub struct AudioInputConfig {
     pub buffer_duration_secs: f32,
     /// Energy threshold for voice activity detection (RMS > threshold).
     pub energy_threshold: f32,
+    /// Preferred device name. When `Some`, the named device is used instead of
+    /// the system default. If the name is not found, falls back to the default
+    /// device and logs a warning.
+    pub device_name: Option<String>,
 }
 
 impl Default for AudioInputConfig {
@@ -30,6 +63,7 @@ impl Default for AudioInputConfig {
             sample_rate: 16_000,
             buffer_duration_secs: 3.0,
             energy_threshold: 0.01,
+            device_name: None,
         }
     }
 }
@@ -50,23 +84,16 @@ impl AudioInputStream {
     pub fn start(
         config: AudioInputConfig,
     ) -> Result<(Self, mpsc::UnboundedReceiver<AudioBuffer>), SpeechError> {
-        // Preflight device checks so startup errors are surfaced synchronously.
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| SpeechError::AudioCaptureFailed("no input device found".to_string()))?;
-
+        let device = resolve_input_device(config.device_name.as_deref())?;
         tracing::debug!("audio input device: {:?}", device.name().unwrap_or_else(|_| "unknown".to_string()));
-
         let (buffer_tx, buffer_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), SpeechError>>();
 
         let worker_config = config.clone();
         let capture_thread = thread::spawn(move || {
             tracing::debug!("audio capture thread spawned — initializing stream");
-            let ready = run_capture_loop(worker_config, buffer_tx, stop_rx);
-            let _ = ready_tx.send(ready);
+            run_capture_loop(worker_config, buffer_tx, stop_rx, ready_tx);
         });
 
         tracing::debug!("waiting for audio capture thread to initialize (timeout: 5s)");
@@ -125,19 +152,28 @@ fn run_capture_loop(
     config: AudioInputConfig,
     tx: mpsc::UnboundedSender<AudioBuffer>,
     stop_rx: std::sync::mpsc::Receiver<()>,
-) -> Result<(), SpeechError> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| SpeechError::AudioCaptureFailed("no input device found".to_string()))?;
+    ready_tx: std::sync::mpsc::Sender<Result<(), SpeechError>>,
+) {
+    let device = match resolve_input_device(config.device_name.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+    };
 
     tracing::debug!("audio capture: querying device default config");
-    let input_cfg = device
-        .default_input_config()
-        .map_err(|e| {
+    let input_cfg = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => {
             tracing::error!("audio capture: failed to get device config: {}", e);
-            SpeechError::AudioCaptureFailed(format!("get config failed: {}", e))
-        })?;
+            let _ = ready_tx.send(Err(SpeechError::AudioCaptureFailed(format!(
+                "get config failed: {}",
+                e
+            ))));
+            return;
+        }
+    };
 
     tracing::debug!(
         "audio capture: device config — sample_rate={} channels={} format={:?}",
@@ -150,7 +186,7 @@ fn run_capture_loop(
     let shared = Arc::new(Mutex::new(Vec::<f32>::new()));
 
     tracing::debug!("audio capture: building input stream");
-    let stream = build_stream_for_format(
+    let stream = match build_stream_for_format(
         &device,
         &stream_config,
         input_cfg.sample_format(),
@@ -159,15 +195,26 @@ fn run_capture_loop(
         config.sample_rate,
         config.buffer_duration_secs,
         config.energy_threshold,
-    )?;
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+    };
 
     tracing::debug!("audio capture: starting stream playback");
-    stream
-        .play()
-        .map_err(|e| {
-            tracing::error!("audio capture: failed to start stream: {}", e);
-            SpeechError::AudioCaptureFailed(format!("start stream failed: {}", e))
-        })?;
+    if let Err(e) = stream.play() {
+        tracing::error!("audio capture: failed to start stream: {}", e);
+        let _ = ready_tx.send(Err(SpeechError::AudioCaptureFailed(format!(
+            "start stream failed: {}",
+            e
+        ))));
+        return;
+    }
+
+    // Signal ready BEFORE entering the poll loop so the caller's timeout is not hit.
+    let _ = ready_tx.send(Ok(()));
 
     tracing::debug!("audio capture: stream active, entering poll loop");
     while stop_rx.try_recv().is_err() {
@@ -175,7 +222,6 @@ fn run_capture_loop(
     }
 
     tracing::debug!("audio capture: stop signal received, exiting");
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -350,6 +396,48 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 
     let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
     (sum_squares / samples.len() as f32).sqrt()
+}
+
+/// Resolve the cpal input device to use.
+///
+/// If `device_name` is `None` or matches no device, the system default is
+/// returned. A warning is logged if a named device was requested but not found.
+fn resolve_input_device(device_name: Option<&str>) -> Result<cpal::Device, SpeechError> {
+    let host = cpal::default_host();
+
+    if let Some(name) = device_name {
+        // Try to find an input device whose name contains the requested string
+        // (case-insensitive substring match so partial names work).
+        match host.input_devices() {
+            Ok(mut devices) => {
+                let name_lc = name.to_lowercase();
+                if let Some(device) = devices.find(|d| {
+                    d.name()
+                        .map(|n| n.to_lowercase().contains(&name_lc))
+                        .unwrap_or(false)
+                }) {
+                    tracing::debug!(
+                        "audio capture: using requested device: {}",
+                        device.name().unwrap_or_default()
+                    );
+                    return Ok(device);
+                }
+                tracing::warn!(
+                    "audio capture: device '{}' not found — falling back to system default",
+                    name
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "audio capture: could not enumerate devices ({}), using default",
+                    e
+                );
+            }
+        }
+    }
+
+    host.default_input_device()
+        .ok_or_else(|| SpeechError::AudioCaptureFailed("no input device found".to_string()))
 }
 
 #[cfg(test)]
