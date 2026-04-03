@@ -83,6 +83,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Toggle voice input in this CLI session",
     },
     SlashCommand {
+        command: "/speech",
+        description: "View speech configuration and status",
+    },
+    SlashCommand {
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
     },
@@ -282,92 +286,81 @@ impl Shell {
 
     /// Render the TUI.
     fn render(&self, frame: &mut ratatui::Frame) {
-        let chunks = Layout::default()
+        // ── Vertical layout: header / body / input ────────────────────────────
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(1),    // Conversation log
-                Constraint::Length(3), // Input + status
+                Constraint::Length(3), // Header bar
+                Constraint::Min(1),    // Body area (conversation + sidebar)
+                Constraint::Length(5), // Input area (border + 3 content lines)
             ])
             .split(frame.area());
 
-        // Header
-        self.render_header(frame, chunks[0]);
+        // ── Body: conversation (60%) + sidebar (40%) ──────────────────────────
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(60),
+                Constraint::Percentage(40),
+            ])
+            .split(main_chunks[1]);
 
-        // Conversation log
-        self.render_conversation(frame, chunks[1]);
+        self.render_header(frame, main_chunks[0]);
+        self.render_conversation(frame, body_chunks[0]);
+        self.render_sidebar(frame, body_chunks[1]);
+        self.render_input(frame, main_chunks[2]);
 
-        // Input area
-        self.render_input(frame, chunks[2]);
-
-        // Model selector popup (rendered on top if visible)
+        // ── Overlays ──────────────────────────────────────────────────────────
         if let Some(popup) = &self.model_popup {
             model_selector::render_popup(popup, frame);
         }
-
-        // Slash dropdown (rendered above input area, below other popups)
         if self.model_popup.is_none() && !self.actors_popup_visible {
-            self.render_slash_dropdown(frame, chunks[2]);
+            self.render_slash_dropdown(frame, main_chunks[2]);
         }
-
-        // Actors health popup (rendered on top if visible)
         if self.actors_popup_visible {
             self.render_actors_popup(frame);
         }
     }
 
-    /// Render the header section.
+    /// Render the compact header bar.
     fn render_header(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let elapsed = self.stats.elapsed_formatted();
-        let model = self.current_model.as_deref().unwrap_or("(auto-selecting)");
+        let voice_indicator = if !self.runtime.config.speech_enabled {
+            Span::styled("voice: off", Style::default().fg(Color::DarkGray))
+        } else if self.voice_enabled {
+            Span::styled("voice: \u{25cf} on", Style::default().fg(Color::Green))
+        } else {
+            Span::styled("voice: \u{25cb} off", Style::default().fg(Color::DarkGray))
+        };
 
-        let header_text = vec![
-            Line::from(vec![
-                Span::styled(
-                    "SENA",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" — local-first ambient AI"),
-            ]),
-            Line::from(vec![
-                Span::raw("Session: "),
-                Span::styled(elapsed, Style::default().fg(Color::Green)),
-                Span::raw("  •  Messages: "),
-                Span::styled(
-                    self.stats.messages_sent.to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::raw("  •  Tokens: "),
-                Span::styled(
-                    self.stats.tokens_received.to_string(),
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::raw("  •  Model: "),
-                Span::styled(model, Style::default().fg(Color::Cyan)),
-                Span::raw("  •  VOICE: "),
-                if !self.runtime.config.speech_enabled {
-                    Span::styled("UNAVAILABLE", Style::default().fg(Color::DarkGray))
-                } else {
-                    Span::styled(
-                        if self.voice_enabled { "ON" } else { "OFF" },
-                        Style::default().fg(if self.voice_enabled {
-                            Color::Green
-                        } else {
-                            Color::DarkGray
-                        }),
-                    )
-                },
-            ]),
-        ];
+        let header_line = Line::from(vec![
+            Span::styled(
+                " \u{25c6} SENA",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  \u{2014}  local-first ambient AI",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("    "),
+            Span::styled("\u{25b8} ", Style::default().fg(Color::DarkGray)),
+            Span::styled(elapsed, Style::default().fg(Color::White)),
+            Span::styled("  \u{007c}  ", Style::default().fg(Color::DarkGray)),
+            voice_indicator,
+        ]);
 
-        let header = Paragraph::new(header_text).block(Block::default().borders(Borders::BOTTOM));
+        let header = Paragraph::new(header_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
 
         frame.render_widget(header, area);
     }
 
-    /// Render the conversation log.
+    /// Render the conversation log inside a titled bordered frame.
     fn render_conversation(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let mut lines = Vec::new();
 
@@ -376,24 +369,23 @@ impl Shell {
                 MessageRole::User => {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "> ",
+                            "\u{25b8} ",
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(Color::LightMagenta)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::raw(&msg.text),
+                        Span::styled(&msg.text, Style::default().fg(Color::White)),
                     ]));
-                    lines.push(Line::from("")); // Spacing
+                    lines.push(Line::from("")); // spacing
                 }
                 MessageRole::Sena => {
-                    // Multi-line response wrapping
                     for line in msg.text.lines() {
                         lines.push(Line::from(Span::styled(
                             line,
                             Style::default().fg(Color::Green),
                         )));
                     }
-                    lines.push(Line::from("")); // Spacing
+                    lines.push(Line::from("")); // spacing
                 }
                 MessageRole::System => {
                     lines.push(Line::from(Span::styled(
@@ -406,7 +398,7 @@ impl Shell {
                 MessageRole::Warning => {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "⚠ ",
+                            "\u{26a0} ",
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -419,59 +411,61 @@ impl Shell {
 
         // Calculate scroll position
         let total_lines = lines.len();
-        let visible_lines = area.height.saturating_sub(2) as usize; // Account for block borders
+        let inner_height = area.height.saturating_sub(2) as usize; // subtract borders
         let scroll = if self.scroll_offset == 0 {
-            // Auto-scroll to bottom
-            total_lines.saturating_sub(visible_lines)
+            total_lines.saturating_sub(inner_height)
         } else {
-            // User has scrolled up
-            total_lines.saturating_sub(visible_lines + self.scroll_offset)
+            total_lines.saturating_sub(inner_height + self.scroll_offset)
         };
 
-        let text = Text::from(lines);
-        let paragraph = Paragraph::new(text)
-            .block(Block::default().borders(Borders::NONE))
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title(Span::styled(
+                " Conversation ",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(block)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0));
 
         frame.render_widget(paragraph, area);
     }
 
-    /// Render the input area and status line.
+    /// Render the input area — bordered frame with prompt, status, and key hints.
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let input_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Separator
-                Constraint::Length(1), // Input line
-                Constraint::Length(1), // Status line
-            ])
-            .split(area);
+        // Border color reflects current state
+        let border_color = if self.waiting_for_inference || self.transparency_loading {
+            Color::Yellow
+        } else {
+            Color::Magenta
+        };
 
-        // Top separator
-        let separator = Paragraph::new("").block(Block::default().borders(Borders::TOP));
-        frame.render_widget(separator, input_chunks[0]);
-
-        // Input line
-        let input_text = Line::from(vec![
+        // ── Line 1: prompt ────────────────────────────────────────────────────
+        let prompt_line = Line::from(vec![
             Span::styled(
-                "sena",
+                " sena ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::LightMagenta)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" › ", Style::default().fg(Color::DarkGray)),
+            Span::styled("\u{203a} ", Style::default().fg(Color::DarkGray)),
             Span::raw(&self.editor.input),
-            Span::styled("_", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "\u{258c}",
+                Style::default().fg(Color::LightMagenta),
+            ),
         ]);
-        let input_paragraph = Paragraph::new(input_text);
-        frame.render_widget(input_paragraph, input_chunks[1]);
 
-        // Status line
-        let status_text = if let Some(first_press) = self.ctrl_c_first_press {
+        // ── Line 2: status ────────────────────────────────────────────────────
+        let status_line = if let Some(first_press) = self.ctrl_c_first_press {
             if first_press.elapsed() < Duration::from_secs(3) {
                 Line::from(Span::styled(
-                    "Press Ctrl+C again to exit",
+                    " Press Ctrl+C again to exit",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -481,20 +475,36 @@ impl Shell {
             }
         } else if self.transparency_loading {
             Line::from(Span::styled(
-                "⏳ Loading...",
+                " \u{22ef} Loading...",
                 Style::default().fg(Color::Yellow),
             ))
         } else if self.waiting_for_inference {
             Line::from(Span::styled(
-                "⏳ Thinking...",
+                " \u{22ef} Thinking...",
                 Style::default().fg(Color::Yellow),
             ))
         } else {
             self.status_line_normal()
         };
 
-        let status_paragraph = Paragraph::new(status_text);
-        frame.render_widget(status_paragraph, input_chunks[2]);
+        // ── Line 3: keyboard hints ────────────────────────────────────────────
+        let hints_line = Line::from(Span::styled(
+            " Tab:\u{2508}complete   \u{2191}\u{2193}:\u{2508}history   Ctrl+Y:\u{2508}copy   /help:\u{2508}commands",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(
+                " Input ",
+                Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+            ));
+
+        let paragraph = Paragraph::new(vec![prompt_line, status_line, hints_line]).block(block);
+        frame.render_widget(paragraph, area);
     }
 
     /// Generate the normal status line.
@@ -502,11 +512,133 @@ impl Shell {
         let model_part = self
             .current_model
             .as_deref()
-            .map(|m| format!(" • {}", m))
+            .map(|m| {
+                let truncated = if m.len() > 22 { &m[..22] } else { m };
+                format!(" \u{25b8} {}", truncated)
+            })
             .unwrap_or_default();
-        let verbose_part = if self.verbose { " [verbose]" } else { "" };
-        let text = format!("Ready{}{}", model_part, verbose_part);
+        let verbose_part = if self.verbose { "  [verbose]" } else { "" };
+        let text = format!(" Ready{}{}", model_part, verbose_part);
         Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+    }
+
+    /// Render the right-side status sidebar.
+    fn render_sidebar(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+
+        // ── Model ─────────────────────────────────────────────────────────────
+        lines.push(Line::from(Span::styled(
+            " Model",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let model = self.current_model.as_deref().unwrap_or("(selecting...)");
+        let inner_w = area.width.saturating_sub(4) as usize;
+        let display_model = if model.len() > inner_w {
+            &model[..inner_w]
+        } else {
+            model
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {}", display_model),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(""));
+
+        // ── Session stats ─────────────────────────────────────────────────────
+        lines.push(Line::from(Span::styled(
+            " Session",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                self.stats.messages_sent.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" messages  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                self.stats.tokens_received.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" tokens", Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.push(Line::from(""));
+
+        // ── Actors ────────────────────────────────────────────────────────────
+        lines.push(Line::from(Span::styled(
+            " Actors",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
+        for name in &actor_names {
+            let status = self
+                .actor_health
+                .get(name)
+                .unwrap_or(&ActorStatus::Starting);
+            let (dot, color, label) = match status {
+                ActorStatus::Ready => ("\u{25cf}", Color::Green, "Ready"),
+                ActorStatus::Starting => ("\u{25cb}", Color::Yellow, "Starting"),
+                ActorStatus::Failed(_) => ("\u{00d7}", Color::Red, "Failed"),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", dot), Style::default().fg(color)),
+                Span::styled(
+                    format!("{:<10}", name),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(label, Style::default().fg(color)),
+            ]));
+        }
+        lines.push(Line::from(""));
+
+        // ── Voice ─────────────────────────────────────────────────────────────
+        if self.runtime.config.speech_enabled {
+            lines.push(Line::from(Span::styled(
+                " Voice",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let (dot, color, label) = if self.voice_enabled {
+                ("\u{25cf}", Color::Green, "ON  (listening)")
+            } else {
+                ("\u{25cb}", Color::DarkGray, "OFF")
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", dot), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(color)),
+            ]));
+            lines.push(Line::from(""));
+        }
+
+        // ── Verbose mode indicator ────────────────────────────────────────────
+        if self.verbose {
+            lines.push(Line::from(Span::styled(
+                "  [verbose mode on]",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title(Span::styled(
+                " Status ",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+        let paragraph = Paragraph::new(Text::from(lines)).block(block);
+        frame.render_widget(paragraph, area);
     }
 
     /// Render the actors health popup.
@@ -546,7 +678,7 @@ impl Shell {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
+                    .border_style(Style::default().fg(Color::LightMagenta))
                     .title("  Actor Health  "),
             )
             .header(
@@ -609,7 +741,7 @@ impl Shell {
                     Span::styled(
                         cmd.command,
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(Color::LightMagenta)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("  "),
@@ -622,7 +754,7 @@ impl Shell {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
+                    .border_style(Style::default().fg(Color::LightMagenta))
                     .title("  Tab \u{2508} complete  \u{2191}\u{2193} \u{2508} navigate  Esc \u{2508} close  "),
             )
             .highlight_style(
@@ -708,6 +840,16 @@ impl Shell {
             Event::System(bus::events::SystemEvent::BootComplete) => {
                 if self.verbose {
                     self.add_message(MessageRole::System, "Boot complete".to_string());
+                }
+            }
+            Event::System(bus::events::SystemEvent::ActorFailed(ref info)) => {
+                tracing::error!("cli: actor '{}' failed: {}", info.actor_name, info.error_msg);
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Actor '{}' failed: {}", info.actor_name, info.error_msg),
+                );
+                if let Some(status) = self.actor_health.get_mut(info.actor_name) {
+                    *status = ActorStatus::Failed(info.error_msg.clone());
                 }
             }
             Event::System(bus::events::SystemEvent::MemoryThresholdExceeded {
@@ -997,6 +1139,10 @@ impl Shell {
                 );
                 DispatchResult::Continue
             }
+            "/speech" => {
+                self.show_speech_config();
+                DispatchResult::Continue
+            }
             "/screenshot" => {
                 let capture_status = if self.runtime.config.screen_capture_enabled {
                     "enabled"
@@ -1077,6 +1223,7 @@ impl Shell {
     /// Fire a transparency query on the bus and return immediately.
     /// The response arrives asynchronously via handle_bus_event.
     async fn fire_transparency_query(&mut self, query: TransparencyQuery, loading_msg: &str) {
+        tracing::info!("cli: firing transparency query: {:?}", query);
         self.add_message(MessageRole::System, loading_msg.to_string());
         self.transparency_loading = true;
         if let Err(e) = self
@@ -1143,6 +1290,8 @@ impl Shell {
         self.pending_inference_id = Some(request_id);
         self.stats.messages_sent += 1;
 
+        tracing::info!("cli: dispatching chat request_id={} prompt_len={}", request_id, prompt.len());
+
         if let Err(e) = self
             .bus
             .send_directed(
@@ -1155,12 +1304,15 @@ impl Shell {
             )
             .await
         {
+            tracing::error!("cli: directed send to inference actor failed: {}", e);
             self.waiting_for_inference = false;
             self.pending_inference_id = None;
             self.add_message(
                 MessageRole::Warning,
                 format!("Could not reach inference actor: {}", e),
             );
+        } else {
+            tracing::info!("cli: chat request_id={} dispatched to inference actor", request_id);
         }
     }
 
@@ -1186,6 +1338,10 @@ impl Shell {
         self.add_message(
             MessageRole::System,
             "/voice                 Toggle voice input in this CLI session".to_string(),
+        );
+        self.add_message(
+            MessageRole::System,
+            "/speech                View speech configuration and status".to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -1310,6 +1466,73 @@ impl Shell {
             "Edit the config file directly to change settings. Restart Sena after editing."
                 .to_string(),
         );
+    }
+
+    /// Show speech configuration and status.
+    fn show_speech_config(&mut self) {
+        let enabled = self.runtime.config.speech_enabled;
+        let model_dir = self
+            .runtime
+            .config
+            .speech_model_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(default platform path)".to_string());
+        let always_listening = self.runtime.config.voice_always_listening;
+        let wakeword_enabled = self.runtime.config.wakeword_enabled;
+        let tts_rate = self.runtime.config.tts_rate;
+        let proactive = self.runtime.config.proactive_speech_enabled;
+
+        self.add_message(MessageRole::System, "\u{2501}\u{2501}  Speech Configuration".to_string());
+        self.add_message(
+            MessageRole::System,
+            format!("speech_enabled            {}", enabled),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("speech_model_dir          {}", model_dir),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("voice_always_listening    {}", always_listening),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("wakeword_enabled          {}", wakeword_enabled),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("tts_rate                  {:.1}", tts_rate),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!("proactive_speech_enabled  {}", proactive),
+        );
+        self.add_message(
+            MessageRole::System,
+            format!(
+                "voice_session_active      {}",
+                if self.voice_enabled { "yes" } else { "no" }
+            ),
+        );
+        self.add_message(MessageRole::System, "".to_string());
+        if enabled {
+            self.add_message(
+                MessageRole::System,
+                "Speech is enabled. Use /voice to toggle microphone input for this session."
+                    .to_string(),
+            );
+            self.add_message(
+                MessageRole::System,
+                "To change persistent speech settings: edit config file and restart.".to_string(),
+            );
+        } else {
+            self.add_message(
+                MessageRole::System,
+                "Speech is disabled. To enable: set speech_enabled = true in config and restart."
+                    .to_string(),
+            );
+        }
     }
 
     /// Copy the most recent Sena response to the system clipboard.
@@ -1493,12 +1716,22 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
             // Bus events
             bcast = bus_rx.recv() => {
-                if let Ok(ev) = bcast {
-                    if matches!(ev, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
-                        exit_reason = ShellExitReason::Shutdown;
+                match bcast {
+                    Ok(ev) => {
+                        if matches!(ev, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
+                            tracing::info!("cli: ShutdownSignal received on bus — exiting shell");
+                            exit_reason = ShellExitReason::Shutdown;
+                            break;
+                        }
+                        shell.handle_bus_event(ev).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("cli: broadcast channel closed unexpectedly — exiting shell");
                         break;
                     }
-                    shell.handle_bus_event(ev).await;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("cli: broadcast receiver lagged by {} events — some events dropped", n);
+                    }
                 }
             }
 

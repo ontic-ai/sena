@@ -208,7 +208,9 @@ impl Actor for TtsActor {
     }
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {
+        tracing::info!("tts: initializing backend (preference: {:?})", self.backend_preference);
         if let Err(e) = self.initialize_backend().await {
+            tracing::error!("tts: backend init failed: {}", e);
             let _ = bus
                 .broadcast(Event::Speech(SpeechEvent::SpeechFailed {
                     reason: format!("TTS init failed: {e}"),
@@ -217,6 +219,7 @@ impl Actor for TtsActor {
                 .await;
             return Err(ActorError::StartupFailed(e.to_string()));
         }
+        tracing::info!("tts: backend initialized — {:?}", self.active_backend);
 
         self.bus_rx = Some(bus.subscribe_broadcast());
         self.bus = Some(Arc::clone(&bus));
@@ -258,6 +261,7 @@ impl Actor for TtsActor {
                             self.tts_rate = update.rate.clamp(0.5, 2.0);
                         }
                         Ok(Event::Speech(SpeechEvent::SpeakRequested { text, request_id })) => {
+                            tracing::info!("tts: SpeakRequested request_id={} text_len={}", request_id, text.len());
                             // High-priority interrupt: request_id == 0 clears queue.
                             if request_id == 0 {
                                 self.handle_interrupt();
@@ -265,6 +269,7 @@ impl Actor for TtsActor {
 
                             let request = SpeakRequest { text, request_id };
                             if request_tx.try_send(request).is_err() {
+                                tracing::warn!("tts: queue full, dropping request_id={}", request_id);
                                 if let Some(bus) = &self.bus {
                                     let _ = bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
                                         reason: format!("queue full (max {MAX_QUEUE_SIZE} requests)"),

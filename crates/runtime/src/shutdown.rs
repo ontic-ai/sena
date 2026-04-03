@@ -36,8 +36,10 @@ pub async fn shutdown(mut runtime: Runtime, timeout: Duration) -> Result<(), Shu
             .send_directed(actor, Event::System(SystemEvent::ShutdownSignal))
             .await
         {
-            eprintln!(
-                "Directed shutdown hint for actor '{}' failed: {}",
+            // Actors that received the broadcast first will have already closed
+            // their directed channel before this hint arrives — that is expected.
+            tracing::debug!(
+                "directed shutdown hint for actor '{}' skipped (already stopped): {}",
                 actor, error
             );
         }

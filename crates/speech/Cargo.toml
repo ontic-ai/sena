@@ -11,6 +11,7 @@ bus = { path = "../bus" }
 tokio = { workspace = true, features = ["fs"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 # Audio I/O (cross-platform)
 cpal = "0.15"

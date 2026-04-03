@@ -114,7 +114,7 @@ enum TrayError {
 }
 
 // Load logo from compiled-in bytes — path relative to WORKSPACE ROOT
-const LOGO_PNG: &[u8] = include_bytes!("../../../assets/logo.png");
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/ontic-logo.png");
 
 /// Load the tray icon from the compiled-in logo PNG.
 ///

@@ -289,7 +289,9 @@ impl Actor for SttActor {
         self.bus = Some(bus.clone());
         self.bus_rx = Some(bus.subscribe_broadcast());
 
+        tracing::info!("stt: initializing backend (backend: {:?})", self.backend);
         if let Err(e) = self.initialize_backend().await {
+            tracing::error!("stt: backend init failed: {}", e);
             let _ = bus
                 .broadcast(Event::Speech(SpeechEvent::SpeechFailed {
                     reason: format!("STT model load failed: {}", e),
@@ -298,8 +300,11 @@ impl Actor for SttActor {
                 .await;
             return Err(ActorError::StartupFailed(e.to_string()));
         }
+        tracing::info!("stt: backend initialized");
 
+        tracing::info!("stt: starting audio capture (always_listening={})", self.voice_always_listening);
         if let Err(e) = self.maybe_start_audio_capture() {
+            tracing::error!("stt: audio capture failed: {}", e);
             let _ = bus
                 .broadcast(Event::Speech(SpeechEvent::SpeechFailed {
                     reason: format!("audio device unavailable: {}", e),
@@ -315,6 +320,7 @@ impl Actor for SttActor {
                 ActorError::StartupFailed(format!("broadcast ActorReady failed: {}", e))
             })?;
 
+        tracing::info!("stt: actor ready");
         Ok(())
     }
 

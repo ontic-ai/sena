@@ -194,6 +194,11 @@ impl InferenceActor {
         let backend_clone = self.backend.clone();
         let path_clone = model_path;
 
+        tracing::info!(
+            "inference: loading model '{}' from {:?} with backend {:?}",
+            model_name, path_clone, backend_type
+        );
+
         let load_result = tokio::task::spawn_blocking(move || {
             let mut guard = backend_clone
                 .lock()
@@ -209,7 +214,7 @@ impl InferenceActor {
             Ok(()) => {
                 // Set current model name for chat template detection
                 self.current_model_name = Some(model_name.clone());
-                tracing::info!("model loaded: {} ({})", model_name, self.backend_type);
+                tracing::info!("inference: model loaded successfully: {} ({})", model_name, self.backend_type);
 
                 let _ = bus
                     .broadcast(Event::Inference(InferenceEvent::ModelLoaded {
@@ -220,7 +225,7 @@ impl InferenceActor {
                 Ok(())
             }
             Err(e) => {
-                tracing::error!("model load failed: {}", e);
+                tracing::error!("inference: model load FAILED: {}", e);
                 Err(format!("model load failed: {}", e))
             }
         }
@@ -596,6 +601,10 @@ impl InferenceActor {
             ctx_size: self.inference_ctx_size,
             ..InferenceParams::default()
         };
+        tracing::info!(
+            "inference: calling infer request_id={} prompt_len={} max_tokens={}",
+            request_id, prompt_len, params.max_tokens
+        );
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
                 .lock()
@@ -606,6 +615,8 @@ impl InferenceActor {
         })
         .await
         .map_err(|e| format!("task panicked: {}", e))??;
+
+        tracing::info!("inference: infer completed request_id={}", request_id);
 
         // Update conversation history
         self.conversation_history
@@ -1223,6 +1234,10 @@ impl Actor for InferenceActor {
                                 // Detect if this is a proactive (CTP-triggered) request.
                                 // Convention: request_id < 1000 is proactive, >= 1000 is user-initiated.
                                 let is_proactive = request_id < 1000;
+                                tracing::info!(
+                                    "inference: received InferenceRequested request_id={} is_proactive={} prompt_len={}",
+                                    request_id, is_proactive, prompt.len()
+                                );
 
                                 // Process with memory context directly in event handler with short timeout
                                 // to avoid blocking on memory queries that require embeddings
