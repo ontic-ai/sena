@@ -385,14 +385,14 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [ ] `sena cli` with no daemon running: show clear instructions, do not boot a second runtime
 
 #### M6.3 — Configuration UI
-- [ ] `/config` slash command: view all settings and config file path
-- [ ] `/config set <key> <value>`: edit settings from CLI (dispatches ConfigReloadRequested after save)
+- [x] `/config` slash command: view all settings and config file path
+- [x] `/config set <key> <value>`: edit settings from CLI (dispatches ConfigReloadRequested after save)
 - [ ] Advanced mode toggle: hides technical settings from general users
 - [ ] Config validation before save
 
 #### M6.4 — Analytics-Driven Auto-Configuration
 - [ ] Local-only hardware profiling: available RAM, VRAM, CPU cores
-- [ ] Token limit auto-tuning based on hardware profile
+- [x] Token limit auto-tuning based on usage telemetry (P95 rolling window, 20% headroom, 10% delta threshold) — implemented as local-only analytics, not hardware-profile-based
 - [ ] Automatic fallback: if inference fails due to resource limits, reduce tokens and retry
 - [ ] Analytics dashboard in CLI: show recommended vs current settings
 
@@ -462,13 +462,15 @@ Requires M7.1 and M7.3 complete.
 - [ ] Exit: 3/3 blind testers distinguish calm vs urgent prosody; cloned voice identity preserved
 
 #### M7.5 — `/listen` CLI Command (STT Layer 1)
-Requires OQ-STT-7 resolved. Parallel-safe with M7.1, M7.2, M7.3, M7.4.
-- [ ] New slash command `/listen` in `crates/cli/src/shell.rs`
-- [ ] CLI dispatches `SpeechEvent::ListenModeRequested { session_id }`
-- [ ] STT actor: enables continuous capture, transcribes in 1-2s chunks, emits `ListenModeTranscription { text, is_final, confidence, session_id }`
-- [ ] CLI renders: partial results in gray (overwritten), final results in white, `[unclear]` in red for confidence < 0.6
-- [ ] Ctrl+C → `ListenModeStopRequested` → `ListenModeStopped` → clean exit
-- [ ] New bus events: `ListenModeRequested`, `ListenModeTranscription`, `ListenModeStopRequested`, `ListenModeStopped`
+**PARTIALLY IMPLEMENTED IN PHASE 5 (commit 739d412 / e0d8e56).** Remaining items tracked below.
+Parallel-safe with M7.1, M7.2, M7.3, M7.4.
+- [x] New slash command `/listen` in `crates/cli/src/shell.rs`
+- [x] CLI dispatches `SpeechEvent::ListenModeRequested { session_id }`
+- [x] STT actor: enables continuous capture, transcribes after silence threshold, emits `ListenModeTranscription { text, is_final, confidence, session_id }`
+- [ ] CLI renders: partial results in gray (overwritten), final results in white — currently all renders same style
+- [x] Ctrl+C → `ListenModeStopRequested` → `ListenModeStopped` → clean exit
+- [ ] `[unclear]` in red for confidence < 0.6 — currently low-confidence results are skipped, not labeled
+- [x] New bus events: `ListenModeRequested`, `ListenModeTranscription`, `ListenModeStopRequested`, `ListenModeStopped`
 - [ ] Integration test: mock STT emits 3 partial + 1 final, CLI renders all 4 correctly
 - [ ] Exit: partial results < 1s, final results < 2s from silence, unclear words flagged
 
