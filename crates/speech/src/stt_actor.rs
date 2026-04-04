@@ -47,6 +47,9 @@ pub struct SttActor {
     listen_session_id: Option<u64>,
     listen_audio_rx: Option<mpsc::UnboundedReceiver<AudioBuffer>>,
     listen_audio_stream: Option<AudioInputStream>,
+    /// True while a /listen session is active. Suppresses always-on STT processing
+    /// to prevent conflicting TranscriptionCompleted events during listen mode.
+    listen_mode_active: bool,
     /// Preferred microphone device name (None = system default).
     microphone_device: Option<String>,
 }
@@ -83,6 +86,7 @@ impl SttActor {
             listen_session_id: None,
             listen_audio_rx: None,
             listen_audio_stream: None,
+            listen_mode_active: false,
             microphone_device: None,
         }
     }
@@ -418,6 +422,11 @@ impl Actor for SttActor {
                                     self.listen_session_id = Some(session_id);
                                     self.listen_audio_stream = Some(stream);
                                     self.listen_audio_rx = Some(rx);
+                                    // Suppress always-on STT while listen mode is active to
+                                    // prevent conflicting TranscriptionCompleted events and
+                                    // unintended inference calls.
+                                    self.listen_mode_active = true;
+                                    self.always_listening_vad.reset();
                                     // Reset listen mode VAD for a clean session.
                                     self.listen_mode_vad.reset();
                                     tracing::info!("listen: session {} started", session_id);
@@ -438,6 +447,7 @@ impl Actor for SttActor {
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
                                 self.listen_mode_vad.reset();
+                                self.listen_mode_active = false;
                                 tracing::info!("listen: session {} stopped", session_id);
                                 let _ = bus
                                     .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
@@ -460,8 +470,12 @@ impl Actor for SttActor {
                         std::future::pending().await
                     }
                 } => {
+                    // Skip always-on processing while listen mode is active.
+                    // Listen mode dispatches its own audio via listen_audio_rx.
                     if let Some(buffer) = audio_buffer {
-                        self.handle_audio_buffer(buffer, &bus).await;
+                        if !self.listen_mode_active {
+                            self.handle_audio_buffer(buffer, &bus).await;
+                        }
                     }
                 }
                 listen_buffer = async {

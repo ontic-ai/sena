@@ -288,7 +288,10 @@ fn default_voice_always_listening() -> bool {
     true
 }
 fn default_stt_energy_threshold() -> f32 {
-    0.01
+    // 0.02 provides good discrimination between ambient mic noise (~0.005 RMS)
+    // and normal speech (~0.05+ RMS). The previous default of 0.01 was at the
+    // boundary of high-gain mic ambient noise and triggered false positives.
+    0.02
 }
 fn default_wakeword_enabled() -> bool {
     false

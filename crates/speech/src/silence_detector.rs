@@ -12,6 +12,14 @@ pub(crate) struct SilenceDetector {
     speech_started: bool,
     energy_threshold: f32,
     silence_duration_secs: f32,
+    /// Minimum total voice duration (seconds) required before the accumulated
+    /// buffer is eligible for transcription. Prevents brief sounds (key clicks,
+    /// coughs, desk knocks) from triggering spurious transcription. With 3-second
+    /// chunks this guards against a single noisy chunk; with shorter chunks
+    /// (Phase 7 streaming) it is the primary guard against transient noise.
+    min_speech_duration_secs: f32,
+    /// Tracks total accumulated voice time across all voice chunks in this session.
+    total_voice_duration_secs: f32,
 }
 
 impl SilenceDetector {
@@ -22,12 +30,15 @@ impl SilenceDetector {
             speech_started: false,
             energy_threshold,
             silence_duration_secs,
+            min_speech_duration_secs: 0.5,
+            total_voice_duration_secs: 0.0,
         }
     }
 
     /// Feed an audio buffer.  Returns `Some(accumulated_samples)` when speech
     /// followed by silence has been detected (ready for transcription).
-    /// Returns `None` otherwise (still accumulating or silence without prior speech).
+    /// Returns `None` otherwise (still accumulating, insufficient speech, or
+    /// silence without prior speech).
     pub(crate) fn feed(
         &mut self,
         samples: &[f32],
@@ -37,13 +48,17 @@ impl SilenceDetector {
         let rms = calculate_rms(samples);
         let is_voice = rms > self.energy_threshold;
         let now = Instant::now();
+        let chunk_duration =
+            samples.len() as f32 / (sample_rate as f32 * channels as f32);
 
         if is_voice {
             if !self.speech_started {
                 self.speech_started = true;
                 self.accumulated_samples.clear();
+                self.total_voice_duration_secs = 0.0;
             }
             self.accumulated_samples.extend_from_slice(samples);
+            self.total_voice_duration_secs += chunk_duration;
             self.last_voice_activity = Some(now);
             None
         } else if self.speech_started {
@@ -51,6 +66,7 @@ impl SilenceDetector {
                 let silence_secs = now.duration_since(last_voice).as_secs_f32();
                 if silence_secs >= self.silence_duration_secs
                     && !self.accumulated_samples.is_empty()
+                    && self.total_voice_duration_secs >= self.min_speech_duration_secs
                 {
                     let buffer = crate::AudioBuffer {
                         samples: self.accumulated_samples.clone(),
@@ -59,6 +75,11 @@ impl SilenceDetector {
                     };
                     self.reset();
                     Some(buffer)
+                } else if silence_secs >= self.silence_duration_secs {
+                    // Silence threshold reached but not enough speech accumulated —
+                    // discard and reset to avoid stale state.
+                    self.reset();
+                    None
                 } else {
                     None
                 }
@@ -75,6 +96,7 @@ impl SilenceDetector {
         self.accumulated_samples.clear();
         self.speech_started = false;
         self.last_voice_activity = None;
+        self.total_voice_duration_secs = 0.0;
     }
 }
 
@@ -100,27 +122,41 @@ mod tests {
     #[test]
     fn silence_detector_speech_then_silence_returns_buffer() {
         let mut det = SilenceDetector::new(0.01, 0.0); // 0s silence threshold for instant trigger
-                                                       // Feed speech
-        let speech = vec![0.5; 160];
+        // Feed 1 second of speech at 16kHz (16000 samples) — satisfies 0.5s min_speech_duration.
+        let speech = vec![0.5_f32; 16_000];
         assert!(det.feed(&speech, 16_000, 1).is_none());
-        // Feed silence — should trigger since silence_duration_secs = 0.0
-        let silence = vec![0.001; 160];
+        // Feed silence — should trigger because silence_duration_secs = 0.0 and we have 1s of speech.
+        let silence = vec![0.001_f32; 16_000];
         let result = det.feed(&silence, 16_000, 1);
         assert!(result.is_some());
         let buf = result.expect("feed should return buffer after speech+silence");
-        assert_eq!(buf.samples.len(), 160); // only speech samples
+        assert_eq!(buf.samples.len(), 16_000); // only speech samples
+    }
+
+    #[test]
+    fn silence_detector_insufficient_speech_does_not_transcribe() {
+        // 0.1 seconds of speech at 16kHz: 1600 samples < 0.5s minimum.
+        let mut det = SilenceDetector::new(0.01, 0.0);
+        let brief_sound = vec![0.5_f32; 1_600]; // 0.1s
+        assert!(det.feed(&brief_sound, 16_000, 1).is_none());
+        // Silence: min_speech_duration not met → must discard and return None.
+        let silence = vec![0.001_f32; 16_000];
+        assert!(det.feed(&silence, 16_000, 1).is_none());
+        // State must be reset after discard.
+        assert!(!det.speech_started);
     }
 
     #[test]
     fn silence_detector_reset_clears_state() {
         let mut det = SilenceDetector::new(0.01, 1.5);
-        let speech = vec![0.5; 160];
+        let speech = vec![0.5_f32; 16_000];
         det.feed(&speech, 16_000, 1);
         assert!(det.speech_started);
         det.reset();
         assert!(!det.speech_started);
         assert!(det.accumulated_samples.is_empty());
         assert!(det.last_voice_activity.is_none());
+        assert_eq!(det.total_voice_duration_secs, 0.0);
     }
 
     #[test]
