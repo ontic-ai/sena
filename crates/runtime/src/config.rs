@@ -308,7 +308,7 @@ fn default_speech_rate_limit_secs() -> u64 {
 fn default_tts_rate() -> f32 {
     1.0
 }
-fn default_inference_max_tokens() -> usize {
+pub(crate) fn default_inference_max_tokens() -> usize {
     512
 }
 fn default_inference_ctx_size() -> u32 {

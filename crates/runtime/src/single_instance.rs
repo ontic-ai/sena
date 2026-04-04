@@ -175,7 +175,7 @@ pub fn try_acquire_lock() -> Result<SingleInstanceGuard, SingleInstanceError> {
 }
 
 #[cfg(unix)]
-fn ipc_socket_path() -> PathBuf {
+pub(crate) fn ipc_socket_path() -> PathBuf {
     // Use a temp directory for the socket file. Use a fixed name per user.
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
     std::env::temp_dir().join(format!("sena-{}.sock", user))

@@ -89,10 +89,38 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let single_instance_guard = crate::single_instance::try_acquire_lock()
         .map_err(|e| BootError::SingleInstanceCheckFailed(e.to_string()))?;
 
+    // Step 0.5: Hardware profiling for auto-configuration.
+    let hw_profile = tokio::task::spawn_blocking(crate::hardware_profile::profile_hardware)
+        .await
+        .unwrap_or_default();
+    tracing::info!(
+        "hardware profile: {}MB RAM, {}MB VRAM, {} cores → recommended tokens: {}",
+        hw_profile.total_ram_mb,
+        hw_profile.available_vram_mb,
+        hw_profile.cpu_cores,
+        crate::hardware_profile::recommended_tokens(&hw_profile),
+    );
+
     // Step 1: Config load
-    let config = crate::config::load_or_create_config()
+    let mut config = crate::config::load_or_create_config()
         .await
         .map_err(|e| BootError::ConfigLoadFailed(e.to_string()))?;
+
+    // Step 1.1: Auto-tune inference_max_tokens if still at default.
+    if config.inference_max_tokens == crate::config::default_inference_max_tokens() {
+        let recommended = crate::hardware_profile::recommended_tokens(&hw_profile) as usize;
+        tracing::info!(
+            "inference_max_tokens at default ({}), applying hardware recommendation: {}",
+            config.inference_max_tokens,
+            recommended
+        );
+        config.inference_max_tokens = recommended;
+    } else {
+        tracing::info!(
+            "inference_max_tokens explicitly set to {}, not applying hardware recommendation",
+            config.inference_max_tokens
+        );
+    }
 
     // Step 1.5: First-boot detection — check if Soul.redb exists before any initialization.
     let is_first_boot = {
@@ -261,7 +289,17 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 12.5: Spawn memory monitor task.
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
 
-    // Step 13: BootComplete is broadcast by `lib::boot_ready_impl()` after the
+    // Step 13: Spawn IPC server (CLI communication endpoint).
+    {
+        let ipc_bus = Arc::clone(&bus);
+        tokio::spawn(async move {
+            if let Err(e) = crate::ipc_server::start(ipc_bus).await {
+                tracing::error!("IPC server failed: {}", e);
+            }
+        });
+    }
+
+    // Step 14: BootComplete is broadcast by `lib::boot_ready_impl()` after the
     // supervisor readiness gate confirms all actors are up.
 
     Ok(Runtime {

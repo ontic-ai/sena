@@ -1,0 +1,810 @@
+//! IPC server for CLI ↔ daemon communication.
+//!
+//! Phase 6: The daemon spawns an IPC server (Unix socket on macOS/Linux, named pipe on Windows)
+//! that accepts multiple CLI connections. Each CLI session:
+//! 1. Connects to the IPC endpoint
+//! 2. Sends IpcMessage::Subscribe to register for event stream
+//! 3. Sends slash commands and chat messages
+//! 4. Receives DisplayLine and other response payloads from the daemon
+//!
+//! The server translates IpcPayload commands to bus events and streams relevant bus
+//! events back to subscribed clients.
+
+use bus::events::inference::{InferenceEvent, Priority};
+use bus::events::system::SystemEvent;
+use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
+use bus::ipc::{IpcMessage, IpcPayload, LineStyle};
+use bus::{Event, EventBus};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixListener as StdUnixListener;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+/// IPC server state.
+pub struct IpcServer {
+    bus: Arc<EventBus>,
+    sessions: Arc<Mutex<HashMap<u64, SessionHandle>>>,
+    next_session_id: AtomicU64,
+}
+
+/// Per-session handle for cleanup.
+struct SessionHandle {
+    /// Channel to send DisplayLine messages to the client write task.
+    #[allow(dead_code)]
+    tx: mpsc::UnboundedSender<IpcMessage>,
+}
+
+impl IpcServer {
+    pub fn new(bus: Arc<EventBus>) -> Self {
+        Self {
+            bus,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_session_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Start the IPC server and listen for connections.
+    pub async fn start(self: Arc<Self>) -> Result<(), IpcServerError> {
+        #[cfg(unix)]
+        {
+            self.start_unix().await
+        }
+
+        #[cfg(windows)]
+        {
+            self.start_windows().await
+        }
+    }
+
+    #[cfg(unix)]
+    async fn start_unix(self: Arc<Self>) -> Result<(), IpcServerError> {
+        let socket_path = ipc_socket_path();
+
+        // Remove stale socket file if it exists.
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Bind the Unix socket.
+        let std_listener = StdUnixListener::bind(&socket_path)
+            .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
+
+        let listener = UnixListener::from_std(std_listener)
+            .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
+
+        tracing::info!("IPC server listening on {:?}", socket_path);
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
+                    tracing::info!("IPC client connected: session_id={}", session_id);
+
+                    let server = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_client_unix(stream, server, session_id).await {
+                            tracing::error!("IPC session {} failed: {}", session_id, e);
+                        }
+                        tracing::info!("IPC session {} disconnected", session_id);
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("IPC accept failed: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn start_windows(self: Arc<Self>) -> Result<(), IpcServerError> {
+        let pipe_name = r"\\.\pipe\sena_ipc";
+        tracing::info!("IPC server listening on {}", pipe_name);
+
+        loop {
+            let pipe = ServerOptions::new()
+                .first_pipe_instance(false)
+                .create(pipe_name)
+                .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
+
+            let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
+            tracing::info!("IPC client connected: session_id={}", session_id);
+
+            let server = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_client_windows(pipe, server, session_id).await {
+                    tracing::error!("IPC session {} failed: {}", session_id, e);
+                }
+                tracing::info!("IPC session {} disconnected", session_id);
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    async fn handle_client_unix(
+        stream: UnixStream,
+        server: Arc<IpcServer>,
+        session_id: u64,
+    ) -> Result<(), IpcServerError> {
+        let (read_half, write_half) = stream.into_split();
+        let reader = BufReader::new(read_half);
+        let mut lines = reader.lines();
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<IpcMessage>();
+
+        // Register session.
+        {
+            let mut sessions = server.sessions.lock().unwrap();
+            sessions.insert(session_id, SessionHandle { tx: tx.clone() });
+        }
+
+        // Spawn write task.
+        let mut write_half = write_half;
+        let write_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let json = serde_json::to_string(&msg).unwrap_or_default();
+                let line = format!("{}\n", json);
+                if write_half.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Spawn bus event push task (subscribes to broadcast).
+        let bus_tx = tx.clone();
+        let bus = Arc::clone(&server.bus);
+        let bus_task = tokio::spawn(async move {
+            let mut bus_rx = bus.subscribe_broadcast();
+            while let Ok(event) = bus_rx.recv().await {
+                if let Some(display_msg) = event_to_display_line(&event) {
+                    let _ = bus_tx.send(display_msg);
+                }
+                if matches!(event, Event::System(SystemEvent::ShutdownSignal)) {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::DaemonShutdown,
+                    });
+                    break;
+                }
+            }
+        });
+
+        // Read loop: process incoming messages.
+        while let Ok(Some(line)) = lines.next_line().await {
+            let msg: IpcMessage = match serde_json::from_str(&line) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("IPC session {}: malformed JSON: {}", session_id, e);
+                    continue;
+                }
+            };
+
+            server.handle_message(msg, &tx).await;
+        }
+
+        // Cleanup: remove session, cancel tasks.
+        {
+            let mut sessions = server.sessions.lock().unwrap();
+            sessions.remove(&session_id);
+        }
+        write_task.abort();
+        bus_task.abort();
+
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    async fn handle_client_windows(
+        pipe: NamedPipeServer,
+        server: Arc<IpcServer>,
+        session_id: u64,
+    ) -> Result<(), IpcServerError> {
+        let (read_half, write_half) = tokio::io::split(pipe);
+        let reader = BufReader::new(read_half);
+        let mut lines = reader.lines();
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<IpcMessage>();
+
+        // Register session.
+        {
+            let mut sessions = server.sessions.lock().unwrap();
+            sessions.insert(session_id, SessionHandle { tx: tx.clone() });
+        }
+
+        // Spawn write task.
+        let mut write_half = write_half;
+        let write_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let json = serde_json::to_string(&msg).unwrap_or_default();
+                let line = format!("{}\n", json);
+                if write_half.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Spawn bus event push task.
+        let bus_tx = tx.clone();
+        let bus = Arc::clone(&server.bus);
+        let bus_task = tokio::spawn(async move {
+            let mut bus_rx = bus.subscribe_broadcast();
+            while let Ok(event) = bus_rx.recv().await {
+                if let Some(display_msg) = event_to_display_line(&event) {
+                    let _ = bus_tx.send(display_msg);
+                }
+                if matches!(event, Event::System(SystemEvent::ShutdownSignal)) {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::DaemonShutdown,
+                    });
+                    break;
+                }
+            }
+        });
+
+        // Read loop.
+        while let Ok(Some(line)) = lines.next_line().await {
+            let msg: IpcMessage = match serde_json::from_str(&line) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("IPC session {}: malformed JSON: {}", session_id, e);
+                    continue;
+                }
+            };
+
+            server.handle_message(msg, &tx).await;
+        }
+
+        // Cleanup.
+        {
+            let mut sessions = server.sessions.lock().unwrap();
+            sessions.remove(&session_id);
+        }
+        write_task.abort();
+        bus_task.abort();
+
+        Ok(())
+    }
+
+    /// Handle an incoming IpcMessage from a client.
+    async fn handle_message(&self, msg: IpcMessage, tx: &mpsc::UnboundedSender<IpcMessage>) {
+        match msg.payload {
+            IpcPayload::Subscribe => {
+                tracing::info!("IPC client subscribed");
+                let _ = tx.send(IpcMessage {
+                    id: msg.id,
+                    payload: IpcPayload::SessionReady,
+                });
+            }
+            IpcPayload::Chat { text } => {
+                let request_id = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1);
+
+                if let Err(e) = self
+                    .bus
+                    .send_directed(
+                        "inference",
+                        Event::Inference(InferenceEvent::InferenceRequested {
+                            prompt: text,
+                            priority: Priority::High,
+                            request_id,
+                        }),
+                    )
+                    .await
+                {
+                    let _ = tx.send(IpcMessage {
+                        id: msg.id,
+                        payload: IpcPayload::Error {
+                            to_id: msg.id,
+                            reason: format!("Failed to dispatch chat: {}", e),
+                        },
+                    });
+                } else {
+                    let _ = tx.send(IpcMessage {
+                        id: msg.id,
+                        payload: IpcPayload::Ack { to_id: msg.id },
+                    });
+                }
+            }
+            IpcPayload::SlashCommand { line } => {
+                let outputs = dispatch_slash_command(&line, &self.bus).await;
+                for (content, style) in outputs {
+                    let _ = tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::DisplayLine { content, style },
+                    });
+                }
+                let _ = tx.send(IpcMessage {
+                    id: msg.id,
+                    payload: IpcPayload::Ack { to_id: msg.id },
+                });
+            }
+            IpcPayload::Ping => {
+                let _ = tx.send(IpcMessage {
+                    id: msg.id,
+                    payload: IpcPayload::Pong,
+                });
+            }
+            _ => {
+                let _ = tx.send(IpcMessage {
+                    id: msg.id,
+                    payload: IpcPayload::Error {
+                        to_id: msg.id,
+                        reason: "unknown command".to_string(),
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Dispatch a slash command line to the appropriate handler.
+///
+/// Returns a list of (content, style) tuples to display to the client.
+async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String, LineStyle)> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "/observation" | "/obs" => {
+            if let Err(e) = bus
+                .broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+                    TransparencyQuery::CurrentObservation,
+                )))
+                .await
+            {
+                vec![(
+                    format!("Failed to query observation: {}", e),
+                    LineStyle::Error,
+                )]
+            } else {
+                vec![(
+                    "Querying observation...".to_string(),
+                    LineStyle::SystemNotice,
+                )]
+            }
+        }
+        "/memory" | "/mem" => {
+            if let Err(e) = bus
+                .broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+                    TransparencyQuery::UserMemory,
+                )))
+                .await
+            {
+                vec![(format!("Failed to query memory: {}", e), LineStyle::Error)]
+            } else {
+                vec![("Querying memory...".to_string(), LineStyle::SystemNotice)]
+            }
+        }
+        "/explanation" | "/why" => {
+            if let Err(e) = bus
+                .broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+                    TransparencyQuery::InferenceExplanation,
+                )))
+                .await
+            {
+                vec![(
+                    format!("Failed to query explanation: {}", e),
+                    LineStyle::Error,
+                )]
+            } else {
+                vec![(
+                    "Querying last inference...".to_string(),
+                    LineStyle::SystemNotice,
+                )]
+            }
+        }
+        "/config" => {
+            if parts.get(1) == Some(&"set") {
+                let key = parts.get(2).copied().unwrap_or("");
+                let value = if parts.len() > 3 {
+                    parts[3..].join(" ")
+                } else {
+                    String::new()
+                };
+
+                if let Err(e) = bus
+                    .broadcast(Event::System(SystemEvent::ConfigSetRequested {
+                        key: key.to_string(),
+                        value: value.clone(),
+                    }))
+                    .await
+                {
+                    vec![(format!("Config set failed: {}", e), LineStyle::Error)]
+                } else {
+                    vec![(
+                        format!("Setting {} = {}...", key, value),
+                        LineStyle::SystemNotice,
+                    )]
+                }
+            } else {
+                match crate::config::load_or_create_config().await {
+                    Ok(config) => {
+                        let mut lines = vec![];
+                        lines.push(("━━  Configuration".to_string(), LineStyle::SystemNotice));
+
+                        if let Ok(path) = crate::config::config_path() {
+                            lines.push((
+                                format!("Config file: {}", path.display()),
+                                LineStyle::Normal,
+                            ));
+                        }
+
+                        match toml::to_string_pretty(&config) {
+                            Ok(toml_str) => {
+                                for line in toml_str.lines() {
+                                    lines.push((line.to_string(), LineStyle::Normal));
+                                }
+                            }
+                            Err(e) => {
+                                lines.push((
+                                    format!("Could not serialize config: {}", e),
+                                    LineStyle::Error,
+                                ));
+                            }
+                        }
+
+                        lines.push(("".to_string(), LineStyle::Normal));
+                        lines.push((
+                            "Use /config set <key> <value> to edit.".to_string(),
+                            LineStyle::SystemNotice,
+                        ));
+                        lines
+                    }
+                    Err(e) => {
+                        vec![(format!("Failed to load config: {}", e), LineStyle::Error)]
+                    }
+                }
+            }
+        }
+        "/actors" => {
+            vec![(
+                "Actor health monitoring not yet implemented in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/models" => {
+            vec![(
+                "Model selection not yet implemented in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/voice" => {
+            vec![(
+                "Voice toggle is CLI-local — not applicable in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/speech" => match crate::config::load_or_create_config().await {
+            Ok(config) => {
+                vec![
+                    (
+                        "\u{2501}\u{2501}  Speech Configuration".to_string(),
+                        LineStyle::SystemNotice,
+                    ),
+                    (
+                        format!("speech_enabled: {}", config.speech_enabled),
+                        LineStyle::Normal,
+                    ),
+                    (
+                        format!("voice_always_listening: {}", config.voice_always_listening),
+                        LineStyle::Normal,
+                    ),
+                    (
+                        format!("wakeword_enabled: {}", config.wakeword_enabled),
+                        LineStyle::Normal,
+                    ),
+                    (
+                        format!("tts_rate: {:.1}", config.tts_rate),
+                        LineStyle::Normal,
+                    ),
+                    (
+                        format!(
+                            "proactive_speech_enabled: {}",
+                            config.proactive_speech_enabled
+                        ),
+                        LineStyle::Normal,
+                    ),
+                ]
+            }
+            Err(e) => vec![(format!("Failed to load config: {}", e), LineStyle::Error)],
+        },
+        "/listen" => {
+            vec![(
+                "Live transcription (/listen) not yet implemented in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/microphone" => {
+            vec![(
+                "Microphone selection not yet implemented in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/screenshot" => {
+            vec![(
+                "Screenshot status not yet implemented in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/verbose" => {
+            vec![(
+                "Verbose mode is CLI-local — not applicable in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/copy" => {
+            vec![(
+                "Clipboard copy is CLI-local — not applicable in IPC mode.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/help" | "/h" => {
+            vec![
+                ("━━  Commands".to_string(), LineStyle::SystemNotice),
+                (
+                    "/observation or /obs   — What are you observing right now?".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/memory or /mem        — What do you remember about me?".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/explanation or /why   — Why did you say that?".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/config                — Show and edit settings".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/actors                — Show actor health status".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/speech                — View speech configuration".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/help                  — Show this message".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/shutdown              — Shut down Sena completely".to_string(),
+                    LineStyle::Normal,
+                ),
+            ]
+        }
+        "/close" | "/quit" | "/exit" | "/q" => {
+            vec![(
+                "To close CLI, disconnect. Daemon keeps running.".to_string(),
+                LineStyle::SystemNotice,
+            )]
+        }
+        "/shutdown" => {
+            if let Err(e) = bus
+                .broadcast(Event::System(SystemEvent::ShutdownSignal))
+                .await
+            {
+                vec![(
+                    format!("Failed to send shutdown signal: {}", e),
+                    LineStyle::Error,
+                )]
+            } else {
+                vec![(
+                    "Shutdown signal sent — daemon shutting down.".to_string(),
+                    LineStyle::SystemNotice,
+                )]
+            }
+        }
+        _ if line.starts_with('/') => {
+            vec![(
+                format!("Unknown command '{}'. Type /help for commands.", cmd),
+                LineStyle::Error,
+            )]
+        }
+        _ => {
+            vec![(
+                "Unknown command. Type /help for commands.".to_string(),
+                LineStyle::Error,
+            )]
+        }
+    }
+}
+
+/// Convert a bus event to a DisplayLine message for subscribed clients.
+fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
+    match event {
+        Event::Inference(InferenceEvent::InferenceCompleted { text, .. }) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(IpcMessage {
+                    id: 0,
+                    payload: IpcPayload::DisplayLine {
+                        content: text.clone(),
+                        style: LineStyle::Inference,
+                    },
+                })
+            }
+        }
+        Event::Inference(InferenceEvent::InferenceFailed { reason, .. }) => Some(IpcMessage {
+            id: 0,
+            payload: IpcPayload::DisplayLine {
+                content: format!("Inference failed: {}", reason),
+                style: LineStyle::Error,
+            },
+        }),
+        Event::CTP(bus::events::ctp::CTPEvent::ThoughtEventTriggered(_thought)) => {
+            // Only show in verbose mode (CLI-managed state).
+            None
+        }
+        Event::System(SystemEvent::ConfigReloaded) => Some(IpcMessage {
+            id: 0,
+            payload: IpcPayload::DisplayLine {
+                content: "Config reloaded.".to_string(),
+                style: LineStyle::SystemNotice,
+            },
+        }),
+        Event::System(SystemEvent::ConfigSetFailed { key, reason }) => Some(IpcMessage {
+            id: 0,
+            payload: IpcPayload::DisplayLine {
+                content: format!("Config set '{}' failed: {}", key, reason),
+                style: LineStyle::Error,
+            },
+        }),
+        Event::Transparency(TransparencyEvent::ObservationResponded(resp)) => {
+            let content = format!(
+                "━━  Current Observation\n{}",
+                format_observation_response(resp)
+            );
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content,
+                    style: LineStyle::Normal,
+                },
+            })
+        }
+        Event::Transparency(TransparencyEvent::MemoryResponded(resp)) => {
+            let content = format!("━━  Memory\n{}", format_memory_response(resp));
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content,
+                    style: LineStyle::Normal,
+                },
+            })
+        }
+        Event::Transparency(TransparencyEvent::InferenceExplanationResponded(resp)) => {
+            let content = format!("━━  Last Inference\n{}", format_explanation_response(resp));
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content,
+                    style: LineStyle::Normal,
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn format_observation_response(resp: &bus::events::transparency::ObservationResponse) -> String {
+    let snapshot = &resp.snapshot;
+    let mut parts = vec![];
+
+    // Active app context
+    let app = &snapshot.active_app;
+    let title = app.window_title.as_deref().unwrap_or("(no title)");
+    parts.push(format!("Active window: {} - {}", app.app_name, title));
+
+    // Clipboard digest
+    if let Some(clip) = &snapshot.clipboard_digest {
+        parts.push(format!("Clipboard: {}", clip));
+    }
+
+    // Recent files
+    if !snapshot.recent_files.is_empty() {
+        parts.push(format!("Files: {} events", snapshot.recent_files.len()));
+    }
+
+    if parts.is_empty() {
+        "No observation data.".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn format_memory_response(resp: &bus::events::transparency::MemoryResponse) -> String {
+    let soul = &resp.soul_summary;
+    let user_name = soul.user_name.as_deref().unwrap_or("(not set)");
+    format!(
+        "User: {}\nInference cycles: {}\nMemory chunks: {}\nWork patterns: {}\nTool preferences: {}\nInterests: {}",
+        user_name,
+        soul.inference_cycle_count,
+        resp.memory_chunks.len(),
+        soul.work_patterns.join(", "),
+        soul.tool_preferences.join(", "),
+        soul.interest_clusters.join(", ")
+    )
+}
+
+fn format_explanation_response(
+    resp: &bus::events::transparency::InferenceExplanationResponse,
+) -> String {
+    format!(
+        "Request: {}\nResponse: {} chars\nWorking memory context: {} chunks\nRounds: {}",
+        resp.request_context,
+        resp.response_text.len(),
+        resp.working_memory_context.len(),
+        resp.rounds_completed
+    )
+}
+
+/// IPC socket path — DIFFERENT from single-instance lock path.
+#[cfg(unix)]
+fn ipc_socket_path() -> PathBuf {
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IpcServerError {
+    #[error("bind failed: {0}")]
+    BindFailed(String),
+
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Start the IPC server.
+pub async fn start(bus: Arc<EventBus>) -> Result<(), IpcServerError> {
+    let server = Arc::new(IpcServer::new(bus));
+    server.start().await
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
+    #[test]
+    fn ipc_server_socket_path_is_distinct_from_lock_path() {
+        #[cfg(unix)]
+        {
+            let lock_path = crate::single_instance::ipc_socket_path();
+            let ipc_path = super::ipc_socket_path();
+            assert_ne!(
+                lock_path, ipc_path,
+                "IPC server socket must be different from single-instance lock socket"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let lock_pipe = r"\\.\pipe\sena_single_instance";
+            let ipc_pipe = r"\\.\pipe\sena_ipc";
+            assert_ne!(
+                lock_pipe, ipc_pipe,
+                "IPC server pipe must be different from single-instance lock pipe"
+            );
+        }
+    }
+}

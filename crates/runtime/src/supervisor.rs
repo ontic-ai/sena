@@ -141,6 +141,19 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                         }
                     }
                      Ok(Event::System(SystemEvent::ConfigSetRequested { key, value })) => {
+                        // Validate before applying
+                        if let Err(e) = crate::config_validation::validate_config_set(&key, &value) {
+                            tracing::warn!("config validation failed: {} — {}", key, e);
+                            let _ = runtime
+                                .bus
+                                .broadcast(Event::System(SystemEvent::ConfigSetFailed {
+                                    key,
+                                    reason: e.to_string(),
+                                }))
+                                .await;
+                            continue; // Skip apply_config_set if validation failed
+                        }
+
                         // Spawn async task — tokio::fs already uses spawn_blocking
                         // internally for file I/O, so no manual spawn_blocking needed.
                         let bus_clone = runtime.bus.clone();
