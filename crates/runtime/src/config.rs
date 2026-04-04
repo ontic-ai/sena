@@ -654,7 +654,7 @@ mod tests {
     async fn apply_config_set_modifies_and_saves_config() {
         // Create a temporary config with default values
         let config = default_config();
-        assert_eq!(config.speech_enabled, false);
+        assert!(!config.speech_enabled);
         assert_eq!(config.inference_max_tokens, 512);
 
         // Apply config changes in-memory (using the public API that supervisor calls)

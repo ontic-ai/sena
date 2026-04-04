@@ -68,10 +68,27 @@ impl IpcServer {
         }
     }
 
+    /// Start the IPC server on a custom path (for testing).
+    #[cfg(unix)]
+    pub async fn start_on(self: Arc<Self>, path: impl AsRef<str>) -> Result<(), IpcServerError> {
+        self.start_unix_on(path.as_ref().to_string()).await
+    }
+
+    /// Start the IPC server on a custom path (for testing).
+    #[cfg(windows)]
+    pub async fn start_on(self: Arc<Self>, path: impl AsRef<str>) -> Result<(), IpcServerError> {
+        self.start_windows_on(path.as_ref().to_string()).await
+    }
+
     #[cfg(unix)]
     async fn start_unix(self: Arc<Self>) -> Result<(), IpcServerError> {
         let socket_path = ipc_socket_path();
+        self.start_unix_on(socket_path.to_string_lossy().to_string())
+            .await
+    }
 
+    #[cfg(unix)]
+    async fn start_unix_on(self: Arc<Self>, socket_path: String) -> Result<(), IpcServerError> {
         // Remove stale socket file if it exists.
         let _ = std::fs::remove_file(&socket_path);
 
@@ -112,12 +129,22 @@ impl IpcServer {
     #[cfg(windows)]
     async fn start_windows(self: Arc<Self>) -> Result<(), IpcServerError> {
         let pipe_name = r"\\.\pipe\sena_ipc";
+        self.start_windows_on(pipe_name.to_string()).await
+    }
+
+    #[cfg(windows)]
+    async fn start_windows_on(self: Arc<Self>, pipe_name: String) -> Result<(), IpcServerError> {
         tracing::info!("IPC server listening on {}", pipe_name);
 
         loop {
             let pipe = ServerOptions::new()
                 .first_pipe_instance(false)
-                .create(pipe_name)
+                .create(&pipe_name)
+                .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
+
+            // Wait for a client to connect.
+            pipe.connect()
+                .await
                 .map_err(|e| IpcServerError::BindFailed(e.to_string()))?;
 
             let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -147,7 +174,10 @@ impl IpcServer {
 
         // Register session.
         {
-            let mut sessions = server.sessions.lock().unwrap();
+            let mut sessions = server
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             sessions.insert(session_id, SessionHandle { tx: tx.clone() });
         }
 
@@ -197,7 +227,10 @@ impl IpcServer {
 
         // Cleanup: remove session, cancel tasks.
         {
-            let mut sessions = server.sessions.lock().unwrap();
+            let mut sessions = server
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             sessions.remove(&session_id);
         }
         write_task.abort();
@@ -220,7 +253,10 @@ impl IpcServer {
 
         // Register session.
         {
-            let mut sessions = server.sessions.lock().unwrap();
+            let mut sessions = server
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             sessions.insert(session_id, SessionHandle { tx: tx.clone() });
         }
 
@@ -270,7 +306,10 @@ impl IpcServer {
 
         // Cleanup.
         {
-            let mut sessions = server.sessions.lock().unwrap();
+            let mut sessions = server
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             sessions.remove(&session_id);
         }
         write_task.abort();
@@ -789,11 +828,10 @@ fn format_explanation_response(
     )
 }
 
-fn format_model_list_response(
-    resp: &bus::events::transparency::ModelListResponse,
-) -> String {
+fn format_model_list_response(resp: &bus::events::transparency::ModelListResponse) -> String {
     if resp.models.is_empty() {
-        return "No models discovered. Add GGUF models to your configured model directory.".to_string();
+        return "No models discovered. Add GGUF models to your configured model directory."
+            .to_string();
     }
 
     let mut lines = vec![];
@@ -801,7 +839,11 @@ fn format_model_list_response(
 
     for model in &resp.models {
         let size_gb = model.size_bytes as f64 / 1_000_000_000.0;
-        let marker = if model.name == default { " (default)" } else { "" };
+        let marker = if model.name == default {
+            " (default)"
+        } else {
+            ""
+        };
         lines.push(format!(
             "  {} — {:.1} GB — {:?}{}",
             model.name, size_gb, model.quantization, marker

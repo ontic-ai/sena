@@ -9,7 +9,7 @@ pub mod boot;
 pub mod config;
 pub(crate) mod config_validation;
 pub(crate) mod hardware_profile;
-pub(crate) mod ipc_server;
+pub mod ipc_server;
 pub mod models;
 pub mod registry;
 pub mod shutdown;
