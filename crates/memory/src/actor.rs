@@ -343,7 +343,7 @@ impl Actor for MemoryActor {
         // Use working directory for ech0 Store paths
         let working_dir = encrypted_store.working_dir();
         let graph_path = working_dir.join("graph.redb");
-        let vector_path = working_dir.join("vector.usearch");
+        let vector_path = working_dir.join("vector.index");
 
         let config = StoreConfig {
             store: StorePathConfig {

@@ -87,7 +87,7 @@ Each subsystem has its own dedicated `docs/subsystems/` document. This section i
 | **Platform** | `crates/platform` | OS adapter trait + per-OS signal collection |
 | **CTP** | `crates/ctp` | Continuous Thought Processing — context assembly and thought triggering |
 | **Inference** | `crates/inference` | llama-cpp-rs wrapper, model manager, inference queue |
-| **Memory** | `crates/memory` | ech0 adapter — translates Sena events into ech0 ingestion/retrieval. ech0 owns graph (redb) + vector (usearch) storage. |
+| **Memory** | `crates/memory` | ech0 adapter — translates Sena events into ech0 ingestion/retrieval. ech0 owns graph (redb) + vector (hora) storage. |
 | **Prompt** | `crates/prompt` | Dynamic prompt composition — zero static strings |
 | **Soul** | `crates/soul` | SoulBox: identity schema, event log, personalization state |
 | **Speech** | `crates/speech` | Local STT (Whisper) and TTS (Piper/platform) — Sena's primary user-facing interaction surface |
@@ -167,7 +167,7 @@ These are unresolved and must be decided before the relevant phase begins. Do no
 | OQ-3 | What is the SoulBox deletion UX? Hard delete vs. export-then-delete? | Phase 3 | **Deferred to Phase 6.** No deletion path exists in current implementation. `SoulExportRequested` / `SoulExportCompleted` / `SoulExportFailed` bus events added as M6 stubs. Chosen approach: export-then-delete (user receives a JSON archive before any data is removed). Hard-delete-without-export is forbidden — data loss with no recovery is not permissible UX. |
 | OQ-4 | Multi-model strategy: one model always loaded, or hot-swap by task type? | Phase 2 | Resolved (M2.7): Phase 2 uses single model. Hot-swap deferred to Phase 3. |
 | OQ-5 | What is the minimum VRAM/RAM requirement for a supported experience? | Phase 2 | **Resolved (post-M5 audit):** CPU mode: 8 GB RAM minimum (7B model ~4 GB, Whisper STT ~2 GB, OS overhead ~2 GB). GPU mode: 4 GB VRAM minimum for a 7B GGUF at Q4 quantization; Metal and CUDA paths tested. Whisper STT adds ~1.5 GB additional in GPU mode or ~2 GB in CPU mode. Recommended: 16 GB RAM or 8 GB VRAM for full-quality experience (Q8 model + STT). Below minimum, Sena degrades gracefully: inference actor emits `ModelLoadFailed` and runs without inference. |
-| OQ-SEC | **Encryption:** Which files are encrypted — SoulBox (redb), ech0 graph (redb), ech0 vector index (usearch)? All three, or only SoulBox? What is the re-encryption migration path when a user changes their passphrase? | Phase 2 entry gate | **Resolved (M2.0):** All three stores encrypted. Re-encryption via new DEK, atomic re-encrypt of all files. |
+| OQ-SEC | **Encryption:** Which files are encrypted — SoulBox (redb), ech0 graph (redb), ech0 vector index (hora)? All three, or only SoulBox? What is the re-encryption migration path when a user changes their passphrase? | Phase 2 entry gate | **Resolved (M2.0):** All three stores encrypted. Re-encryption via new DEK, atomic re-encrypt of all files. |
 | OQ-6 | ech0 `Embedder` and `Extractor` trait implementations: does the `memory` crate own these, or does `inference` expose them and `memory` consumes them? (Dependency direction must not be violated.) | Phase 2 | Resolved: `memory` crate owns implementations. Calls `inference` via directed mpsc channel for actual embedding/extraction. Per architecture.md §8.3. |
 
 ---
@@ -183,7 +183,7 @@ These are unresolved and must be decided before the relevant phase begins. Do no
 | **GGUF** | The model file format used by llama.cpp and llama-cpp-rs. |
 | **Actor** | An isolated async Tokio task that owns its own state and communicates only via typed channels. |
 | **Bus** | The central event routing system. Actors subscribe to event types; the bus routes without knowing who's listening. |
-| **ech0** | The memory library powering Sena's episodic and semantic memory. Hybrid knowledge graph (redb) + vector index (usearch). Pure Rust, embedded, no network. |
+| **ech0** | The memory library powering Sena's episodic and semantic memory. Hybrid knowledge graph (redb) + vector index (hora, pure Rust). No C++ toolchain required, embedded, no network. |
 | **Working Memory** | In-context, in-RAM memory. Lives only for the duration of an inference cycle. Not owned by ech0. |
 | **Episodic Memory** | Timestamped, session-attributed memory nodes in ech0's graph store. Subject to A-MEM linking, contradiction detection, and importance decay. |
 | **Semantic Memory** | Long-term distilled knowledge in ech0's vector index. Retrieved via approximate nearest-neighbor search. |

@@ -186,7 +186,7 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 ### Milestones
 
 #### M3.1 — Semantic Memory and Vector Index
-- [x] Vector index via `usearch` (or FFI equivalent)
+- [x] Vector index via `hora` (pure-Rust, default) — `usearch` removed as dependency
 - [x] Embedding generation for memory chunks (local, via loaded model)
 - [x] Semantic memory write path: distilled facts/patterns from episodic
 - [x] Schema for semantic store: chunk, embedding, routing key, timestamp

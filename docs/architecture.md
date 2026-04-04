@@ -402,7 +402,7 @@ ech0 is never forked or vendored unless a breaking upstream change requires it. 
 |---|---|---|
 | **Working memory** | Not owned by ech0. In-RAM, scoped to inference cycle. | `Vec<MemoryChunk>` in the memory actor's state |
 | **Episodic memory** | ech0 graph nodes (`Node`) + edges (`Edge`) | `redb` embedded database on disk |
-| **Semantic memory** | ech0 vector index | `usearch` index file on disk |
+| **Semantic memory** | ech0 vector index | `hora` index file on disk |
 
 ### 8.3 ech0 Trait Implementations
 
@@ -462,7 +462,7 @@ ech0 returns a `ConflictReport` when a new ingest contradicts an existing node. 
 
 ### 8.7 Encryption at Rest
 
-Both ech0 storage files (`redb` graph, `usearch` index) are encrypted. See §15 for the full encryption architecture. The `memory` actor is responsible for providing ech0's `StorePathConfig` with paths that point to encrypted file handles — ech0 itself has no knowledge of encryption.
+Both ech0 storage files (`redb` graph, `hora` vector index) are encrypted. See §15 for the full encryption architecture. The `memory` actor is responsible for providing ech0's `StorePathConfig` with paths that point to encrypted file handles — ech0 itself has no knowledge of encryption.
 
 **Hard rules:**
 - Raw clipboard text is never passed to `store.ingest_text()`.
@@ -633,7 +633,7 @@ All sensitive persistent state is encrypted at rest. This is a **Phase 2 entry g
 |---|---|---|
 | Soul redb database | Yes | `crates/soul` |
 | ech0 graph (redb) | Yes | `crates/memory` |
-| ech0 vector index (usearch) | Yes | `crates/memory` |
+| ech0 vector index (hora) | Yes | `crates/memory` |
 | Config file (TOML) | No — contains no sensitive data by design | `crates/runtime` |
 | Logs | No — logs must never contain sensitive content (enforced, see §15.4) | `crates/runtime` |
 
