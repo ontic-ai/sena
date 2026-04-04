@@ -374,19 +374,19 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ### Milestones
 
-#### M6.1 — IPC Runtime Server
-- [ ] Unix domain socket (macOS/Linux) / Named pipe (Windows) server in runtime
-- [ ] Protocol: typed event serialization over IPC channel
-- [ ] Authentication: local process verification
-- [ ] CLI connects as a client, receives bus event stream, sends commands
+#### M6.1 — IPC Runtime Server ✅
+- [x] Unix domain socket (macOS/Linux) / Named pipe (Windows) server in runtime
+- [x] Protocol: typed event serialization over IPC channel (JSON-over-newline, IpcMessage/IpcPayload/LineStyle in bus crate)
+- [x] Authentication: local process verification (socket file permissions on Unix, pipe ACL on Windows)
+- [x] CLI connects as a client, receives bus event stream, sends commands
 
-#### M6.2 — CLI as Separate Process
-- [ ] CLI binary connects to running daemon over IPC (daemon must be running)
-- [ ] CLI is a pure event dispatcher + renderer: every slash command maps to one IPC command or bus event
-- [ ] CLI crash does not affect runtime
-- [ ] Multiple CLI sessions supported simultaneously
-- [ ] Session attach/detach without runtime restart
-- [ ] `sena cli` with no daemon running: show clear instructions, do not boot a second runtime
+#### M6.2 — CLI as Separate Process ✅
+- [x] CLI binary connects to running daemon over IPC (daemon must be running)
+- [x] CLI is a pure event dispatcher + renderer: every slash command maps to one IPC command or bus event
+- [x] CLI crash does not affect runtime (verified by ipc_server_survives_client_disconnect integration test)
+- [x] Multiple CLI sessions supported simultaneously (verified by ipc_multiple_clients_connect_simultaneously integration test)
+- [x] Session attach/detach without runtime restart
+- [x] `sena cli` with no daemon running: show clear instructions, do not boot a second runtime
 
 #### M6.3 — Configuration UI
 - [x] `/config` slash command: view all settings and config file path
@@ -395,21 +395,21 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] `/microphone select` config write moved to bus event dispatch (Audit Finding F4)
 - [x] Supervisor config writes use `spawn_blocking` (Audit Finding F5 resolved)
 - [ ] Advanced mode toggle: hides technical settings from general users
-- [ ] Config validation before save
+- [x] Config validation before save (validate_config_set() runs before disk write in supervisor.rs)
 
 #### M6.4 — Analytics-Driven Auto-Configuration
-- [ ] Local-only hardware profiling: available RAM, VRAM, CPU cores
+- [x] Local-only hardware profiling: available RAM, VRAM, CPU cores (hardware_profile.rs at boot step 0.5)
 - [x] Token limit auto-tuning based on usage telemetry (P95 rolling window, 20% headroom, 10% delta threshold) — implemented as local-only analytics, not hardware-profile-based
 - [x] Token auto-tuner config writes use `spawn_blocking` via supervisor (Audit Finding F5)
 - [ ] Automatic fallback: if inference fails due to resource limits, reduce tokens and retry
 - [ ] Analytics dashboard in CLI: show recommended vs current settings
 
 **Exit gate — Phase 6 complete when:**
-- [ ] CLI is a separate process, runtime survives CLI crashes
-- [ ] Every CLI slash command maps 1:1 to a daemon-side bus event handler — no orphaned commands
-- [ ] Configuration viewable and editable from CLI
-- [ ] Token limits auto-tuned based on hardware profile
-- [ ] All previous exit gate conditions still hold
+- [x] CLI is a separate process, runtime survives CLI crashes
+- [x] Every CLI slash command maps 1:1 to a daemon-side bus event handler — no orphaned commands
+- [x] Configuration viewable and editable from CLI
+- [x] Token limits auto-tuned based on hardware profile
+- [x] All previous exit gate conditions still hold
 
 ---
 

@@ -174,10 +174,7 @@ impl IpcServer {
 
         // Register session.
         {
-            let mut sessions = server
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut sessions = server.sessions.lock().unwrap_or_else(|e| e.into_inner());
             sessions.insert(session_id, SessionHandle { tx: tx.clone() });
         }
 
@@ -227,10 +224,7 @@ impl IpcServer {
 
         // Cleanup: remove session, cancel tasks.
         {
-            let mut sessions = server
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut sessions = server.sessions.lock().unwrap_or_else(|e| e.into_inner());
             sessions.remove(&session_id);
         }
         write_task.abort();
@@ -253,10 +247,7 @@ impl IpcServer {
 
         // Register session.
         {
-            let mut sessions = server
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut sessions = server.sessions.lock().unwrap_or_else(|e| e.into_inner());
             sessions.insert(session_id, SessionHandle { tx: tx.clone() });
         }
 
@@ -306,10 +297,7 @@ impl IpcServer {
 
         // Cleanup.
         {
-            let mut sessions = server
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut sessions = server.sessions.lock().unwrap_or_else(|e| e.into_inner());
             sessions.remove(&session_id);
         }
         write_task.abort();
