@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod bus;
 pub mod events;
+pub mod ipc;
 
 pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
@@ -10,6 +11,7 @@ pub use events::{
     CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, PlatformVisionEvent, Priority, SoulEvent,
     SpeechEvent, SystemEvent, TransparencyEvent, TrayMenuItem,
 };
+pub use ipc::{IpcMessage, IpcPayload, LineStyle};
 
 #[cfg(test)]
 mod integration_tests {
