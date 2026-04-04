@@ -2524,12 +2524,598 @@ fn verbose_format(ev: &Event) -> Option<String> {
     }
 }
 
+/// Run CLI in IPC mode — connect to running daemon and render TUI.
+///
+/// Phase 6: The CLI connects to the daemon over IPC (Unix socket / named pipe)
+/// instead of booting its own runtime. All bus events and commands flow through
+/// the IPC channel.
+pub async fn run_with_ipc() -> anyhow::Result<()> {
+    use crate::ipc_client::IpcClient;
+    use bus::{IpcPayload, LineStyle};
+
+    crate::display::banner();
+    crate::display::info("Connecting to Sena daemon...");
+
+    // Connect to daemon IPC endpoint.
+    let mut ipc_client = IpcClient::connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("IPC connection failed: {}", e))?;
+
+    // Send Subscribe to register for event stream.
+    ipc_client
+        .send(IpcPayload::Subscribe)
+        .await
+        .map_err(|e| anyhow::anyhow!("Subscribe failed: {}", e))?;
+
+    // Wait for SessionReady from daemon.
+    loop {
+        match ipc_client.recv().await {
+            Some(msg) if matches!(msg.payload, IpcPayload::SessionReady) => {
+                tracing::info!("IPC session established");
+                break;
+            }
+            Some(msg) => {
+                tracing::warn!("unexpected IPC message before SessionReady: {:?}", msg);
+            }
+            None => {
+                return Err(anyhow::anyhow!("daemon disconnected during handshake"));
+            }
+        }
+    }
+
+    crate::display::success("Connected to daemon.");
+
+    // ── Enter raw mode and alternate screen ───────────────────────────────────
+    terminal::enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let _guard = TerminalGuard; // Ensures cleanup on drop
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    // ── Initialize simplified IPC shell state ─────────────────────────────────
+    let mut messages: Vec<Message> = vec![
+        Message::new(
+            MessageRole::System,
+            "Connected to Sena daemon — local-first ambient AI".to_string(),
+        ),
+        Message::new(
+            MessageRole::System,
+            "Type /help for commands, or chat freely.".to_string(),
+        ),
+    ];
+    let mut editor = EditorState::new();
+    let mut stats = SessionStats::new();
+    let mut scroll_offset = 0usize;
+    let mut ctrl_c_first_press: Option<Instant> = None;
+    let mut slash_dropdown: Option<SlashDropdown> = None;
+
+    // ── Main event loop ───────────────────────────────────────────────────────
+    loop {
+        // Render the current state (simplified inline rendering).
+        if let Err(e) = terminal.draw(|f| {
+            render_ipc_tui(
+                f,
+                &messages,
+                &editor,
+                &stats,
+                scroll_offset,
+                ctrl_c_first_press,
+                slash_dropdown.as_ref(),
+            )
+        }) {
+            tracing::error!("TUI render error: {}", e);
+        }
+
+        // Check for Ctrl+C timeout (reset if 3 seconds passed).
+        if let Some(first_press) = ctrl_c_first_press {
+            if first_press.elapsed() > Duration::from_secs(3) {
+                ctrl_c_first_press = None;
+            }
+        }
+
+        tokio::select! {
+            biased;
+
+            // IPC messages from daemon
+            ipc_msg = ipc_client.recv() => {
+                match ipc_msg {
+                    Some(msg) => {
+                        match msg.payload {
+                            IpcPayload::DisplayLine { content, style } => {
+                                let role = match style {
+                                    LineStyle::Error | LineStyle::Dimmed => MessageRole::Warning,
+                                    LineStyle::Inference => MessageRole::Sena,
+                                    _ => MessageRole::System,
+                                };
+                                messages.push(Message::new(role, content));
+                            }
+                            IpcPayload::DaemonShutdown => {
+                                messages.push(Message::new(
+                                    MessageRole::Warning,
+                                    "Daemon is shutting down — CLI will exit.".to_string(),
+                                ));
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                break;
+                            }
+                            IpcPayload::Pong => {
+                                // Keepalive — ignore
+                            }
+                            IpcPayload::Ack { .. } => {
+                                // Command acknowledged — ignore
+                            }
+                            IpcPayload::Error { reason, .. } => {
+                                messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                            }
+                            _ => {
+                                tracing::warn!("unexpected IPC payload: {:?}", msg);
+                            }
+                        }
+                    }
+                    None => {
+                        messages.push(Message::new(
+                            MessageRole::Warning,
+                            "Daemon disconnected.".to_string(),
+                        ));
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        break;
+                    }
+                }
+            }
+
+            // Keyboard events (poll in a non-blocking way)
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // Poll for crossterm events
+                let poll_result = event::poll(Duration::from_millis(0));
+                match poll_result {
+                    Ok(true) => {},
+                    Ok(false) => continue,
+                    Err(e) => {
+                        tracing::error!("Poll error: {}", e);
+                        continue;
+                    }
+                }
+
+                match event::read() {
+                    Err(e) => {
+                        tracing::error!("Input error: {}", e);
+                        continue;
+                    }
+                    Ok(event::Event::Mouse(mouse)) => {
+                        match mouse.kind {
+                            event::MouseEventKind::ScrollUp => {
+                                scroll_offset = scroll_offset.saturating_add(3);
+                            }
+                            event::MouseEventKind::ScrollDown => {
+                                scroll_offset = scroll_offset.saturating_sub(3);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    Ok(event::Event::Key(key)) => {
+                        // Filter out key release events (Windows)
+                        if key.kind != KeyEventKind::Press {
+                            continue;
+                        }
+
+                        match (key.code, key.modifiers) {
+                            // Ctrl+C
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                if let Some(first_press) = ctrl_c_first_press {
+                                    if first_press.elapsed() < Duration::from_secs(3) {
+                                        break;
+                                    }
+                                } else {
+                                    ctrl_c_first_press = Some(Instant::now());
+                                }
+                            }
+
+                            // Ctrl+D
+                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                                break;
+                            }
+
+                            // ── Slash Dropdown Key Handlers ───────────────────────────
+                            (KeyCode::Up, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                if let Some(dd) = &mut slash_dropdown {
+                                    dd.prev();
+                                }
+                            }
+                            (KeyCode::Down, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                if let Some(dd) = &mut slash_dropdown {
+                                    dd.next();
+                                }
+                            }
+                            (KeyCode::Tab, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                // Complete the command into the input
+                                if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                    editor.input = cmd.to_string();
+                                    slash_dropdown = None;
+                                }
+                            }
+                            (KeyCode::Enter, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                // Complete and immediately submit
+                                if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                    let line = cmd.to_string();
+                                    editor.input.clear();
+                                    slash_dropdown = None;
+                                    editor.push_history(&line);
+
+                                    // Dispatch via IPC
+                                    if line.starts_with('/') {
+                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
+                                    } else {
+                                        messages.push(Message::new(MessageRole::User, line.clone()));
+                                        let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
+                                        stats.messages_sent += 1;
+                                    }
+                                }
+                            }
+                            (KeyCode::Esc, _) if slash_dropdown.is_some() => {
+                                slash_dropdown = None;
+                            }
+
+                            // ── Normal Key Handlers ───────────────────────────────────
+                            // Enter — submit line
+                            (KeyCode::Enter, _) => {
+                                let line = editor.input.trim().to_string();
+                                editor.input.clear();
+                                slash_dropdown = None;
+                                if !line.is_empty() {
+                                    editor.push_history(&line);
+
+                                    // Dispatch via IPC
+                                    if line.starts_with('/') {
+                                        // Slash command
+                                        if line == "/close" || line == "/quit" {
+                                            break;
+                                        }
+                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
+                                    } else {
+                                        // Chat message
+                                        messages.push(Message::new(MessageRole::User, line.clone()));
+                                        let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
+                                        stats.messages_sent += 1;
+                                    }
+                                }
+                            }
+
+                            // Backspace
+                            (KeyCode::Backspace, _) => {
+                                editor.input.pop();
+                                // Update slash dropdown after backspace
+                                if editor.input.starts_with('/') {
+                                    if let Some(dd) = &mut slash_dropdown {
+                                        dd.update(&editor.input);
+                                        if dd.is_empty() {
+                                            slash_dropdown = None;
+                                        }
+                                    } else {
+                                        let dd = SlashDropdown::from_prefix(&editor.input);
+                                        if !dd.is_empty() {
+                                            slash_dropdown = Some(dd);
+                                        }
+                                    }
+                                } else {
+                                    slash_dropdown = None;
+                                }
+                            }
+
+                            // Arrow Up — history prev
+                            (KeyCode::Up, _) if slash_dropdown.is_none() => {
+                                editor.history_prev();
+                            }
+
+                            // Arrow Down — history next
+                            (KeyCode::Down, _) if slash_dropdown.is_none() => {
+                                editor.history_next();
+                            }
+
+                            // Page Up — scroll up
+                            (KeyCode::PageUp, _) => {
+                                scroll_offset = scroll_offset.saturating_add(10);
+                            }
+
+                            // Page Down — scroll down
+                            (KeyCode::PageDown, _) => {
+                                scroll_offset = scroll_offset.saturating_sub(10);
+                            }
+
+                            // Escape — clear input and close dropdown
+                            (KeyCode::Esc, _) => {
+                                editor.input.clear();
+                                slash_dropdown = None;
+                            }
+
+                            // Regular character
+                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                                editor.input.push(c);
+                                // Reset Ctrl+C first press if user is typing
+                                ctrl_c_first_press = None;
+                                // Update slash dropdown on every character typed
+                                if editor.input.starts_with('/') {
+                                    if let Some(dd) = &mut slash_dropdown {
+                                        dd.update(&editor.input);
+                                        if dd.is_empty() {
+                                            slash_dropdown = None;
+                                        }
+                                    } else {
+                                        let dd = SlashDropdown::from_prefix(&editor.input);
+                                        if !dd.is_empty() {
+                                            slash_dropdown = Some(dd);
+                                        }
+                                    }
+                                } else {
+                                    slash_dropdown = None;
+                                }
+                            }
+
+                            _ => {}
+                        }
+                    } // end event::Event::Key
+
+                    _ => {} // resize, focus, paste — ignore
+                }
+            }
+        }
+    }
+
+    // ── Graceful shutdown ─────────────────────────────────────────────────────
+    drop(_guard); // Restore terminal
+    drop(terminal); // Drop terminal before printing to stdout
+
+    display::print_session_summary(&stats);
+
+    Ok(())
+}
+
+/// Simplified TUI rendering for IPC mode.
+fn render_ipc_tui(
+    frame: &mut ratatui::Frame,
+    messages: &[Message],
+    editor: &EditorState,
+    stats: &SessionStats,
+    scroll_offset: usize,
+    ctrl_c_first_press: Option<Instant>,
+    slash_dropdown: Option<&SlashDropdown>,
+) {
+    // ── Vertical layout: header / body / input ────────────────────────────────
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header bar
+            Constraint::Min(1),    // Body area (conversation only in IPC mode)
+            Constraint::Length(5), // Input area
+        ])
+        .split(frame.area());
+
+    // Header
+    let elapsed = stats.elapsed_formatted();
+    let header_line = Line::from(vec![
+        Span::styled(
+            " \u{25c6} SENA",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  \u{2014}  IPC mode  \u{2014}  daemon-connected",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("    "),
+        Span::styled("\u{25b8} ", Style::default().fg(Color::DarkGray)),
+        Span::styled(elapsed, Style::default().fg(Color::White)),
+    ]);
+    let header = Paragraph::new(header_line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
+    frame.render_widget(header, main_chunks[0]);
+
+    // Conversation
+    let mut lines = Vec::new();
+    for msg in messages {
+        match msg.role {
+            MessageRole::User => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "\u{25b8} ",
+                        Style::default()
+                            .fg(Color::LightMagenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(&msg.text, Style::default().fg(Color::White)),
+                ]));
+                lines.push(Line::from("")); // spacing
+            }
+            MessageRole::Sena => {
+                for line in msg.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default().fg(Color::Green),
+                    )));
+                }
+                lines.push(Line::from("")); // spacing
+            }
+            MessageRole::System => {
+                lines.push(Line::from(Span::styled(
+                    &msg.text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+            MessageRole::Warning => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "\u{26a0} ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(&msg.text, Style::default().fg(Color::Yellow)),
+                ]));
+            }
+        }
+    }
+
+    let total_lines = lines.len();
+    let inner_height = main_chunks[1].height.saturating_sub(2) as usize; // subtract borders
+    let scroll = if scroll_offset == 0 {
+        total_lines.saturating_sub(inner_height)
+    } else {
+        total_lines.saturating_sub(inner_height + scroll_offset)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Span::styled(
+            " Conversation ",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
+    frame.render_widget(paragraph, main_chunks[1]);
+
+    // Input area
+    let prompt_line = Line::from(vec![
+        Span::styled(
+            " sena ",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{203a} ", Style::default().fg(Color::DarkGray)),
+        Span::raw(&editor.input),
+        Span::styled("\u{258c}", Style::default().fg(Color::LightMagenta)),
+    ]);
+
+    let status_line = if let Some(first_press) = ctrl_c_first_press {
+        if first_press.elapsed() < Duration::from_secs(3) {
+            Line::from(Span::styled(
+                " Press Ctrl+C again to exit",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(
+                " Ready (IPC)",
+                Style::default().fg(Color::DarkGray),
+            ))
+        }
+    } else {
+        Line::from(Span::styled(
+            " Ready (IPC)",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+
+    let hints_line = Line::from(Span::styled(
+        " Tab:\u{2508}complete   \u{2191}\u{2193}:\u{2508}history   /help:\u{2508}commands",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    ));
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Span::styled(
+            " Input ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let input_widget =
+        Paragraph::new(vec![prompt_line, status_line, hints_line]).block(input_block);
+    frame.render_widget(input_widget, main_chunks[2]);
+
+    // Slash dropdown overlay
+    if let Some(dd) = slash_dropdown {
+        if !dd.is_empty() {
+            render_slash_dropdown_overlay(frame, dd, main_chunks[2]);
+        }
+    }
+}
+
+/// Render the slash command autocomplete dropdown for IPC mode.
+fn render_slash_dropdown_overlay(
+    frame: &mut ratatui::Frame,
+    dd: &SlashDropdown,
+    input_area: ratatui::layout::Rect,
+) {
+    use ratatui::widgets::Clear;
+
+    let count = dd.filtered.len() as u16;
+    let popup_height = count.min(8) + 2; // +2 for border
+    let popup_width = 62u16.min(frame.area().width.saturating_sub(4));
+
+    // Position immediately above the input area
+    let y = input_area.y.saturating_sub(popup_height);
+    let popup_area = ratatui::layout::Rect {
+        x: input_area.x + 2,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = dd
+        .filtered
+        .iter()
+        .map(|&i| {
+            let cmd = &SLASH_COMMANDS[i];
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    cmd.command,
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::LightMagenta))
+                .title("  Tab \u{2508} complete  \u{2191}\u{2193} \u{2508} navigate  Esc \u{2508} close  "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ListState::default();
+    state.select(Some(dd.selected));
+    frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
 /// Boot the runtime and run the application. This is the main entry point
 /// for both CLI and headless (tray) modes.
 /// Open a CLI TUI session with an already-booted runtime.
 ///
 /// Handles onboarding if needed, then runs the TUI. After the user exits,
 /// triggers graceful shutdown of all actors.
+///
+/// NOTE: In Phase 6+, this function is not actively used by `sena cli` (which uses IPC mode instead).
+/// It is kept for future testing or fallback scenarios.
+#[allow(dead_code)]
 pub async fn run_with_runtime(
     runtime: runtime::Runtime,
     needs_onboarding_flag: bool,
