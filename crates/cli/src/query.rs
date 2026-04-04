@@ -309,6 +309,9 @@ fn fallback_query_output(query: &TransparencyQuery, reason: &str) -> String {
         TransparencyQuery::InferenceExplanation => format!(
             "{BOLD}{CYAN}Last Inference{RESET}\n{DIM}Explanation is temporarily unavailable right now. {reason}{RESET}"
         ),
+        TransparencyQuery::ModelList => format!(
+            "{BOLD}{CYAN}Models{RESET}\n{DIM}Model list is temporarily unavailable. {reason}{RESET}"
+        ),
     }
 }
 

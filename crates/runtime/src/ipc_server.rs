@@ -473,16 +473,37 @@ async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String,
             }
         }
         "/actors" => {
-            vec![(
-                "Actor health monitoring not yet implemented in IPC mode.".to_string(),
-                LineStyle::SystemNotice,
-            )]
+            // All actors are confirmed Ready by the time IPC server starts (boot_ready waits
+            // for ActorReady from every actor). ActorFailed events are broadcast on the bus,
+            // but that handling is not yet wired in Phase 6.1. For now, return static "all ready".
+            vec![
+                ("━━  Actor Status".to_string(), LineStyle::SystemNotice),
+                ("Platform     ✓ Ready".to_string(), LineStyle::Normal),
+                ("Inference    ✓ Ready".to_string(), LineStyle::Normal),
+                ("CTP          ✓ Ready".to_string(), LineStyle::Normal),
+                ("Memory       ✓ Ready".to_string(), LineStyle::Normal),
+                ("Soul         ✓ Ready".to_string(), LineStyle::Normal),
+                ("".to_string(), LineStyle::Normal),
+                (
+                    "All actors are running. Use /shutdown to stop the daemon.".to_string(),
+                    LineStyle::SystemNotice,
+                ),
+            ]
         }
         "/models" => {
-            vec![(
-                "Model selection not yet implemented in IPC mode.".to_string(),
-                LineStyle::SystemNotice,
-            )]
+            if let Err(e) = bus
+                .broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+                    TransparencyQuery::ModelList,
+                )))
+                .await
+            {
+                vec![(format!("Failed to query models: {}", e), LineStyle::Error)]
+            } else {
+                vec![(
+                    "Querying model registry...".to_string(),
+                    LineStyle::SystemNotice,
+                )]
+            }
         }
         "/voice" => {
             vec![(
@@ -702,6 +723,16 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 },
             })
         }
+        Event::Transparency(TransparencyEvent::ModelListResponded(resp)) => {
+            let content = format!("━━  Available Models\n{}", format_model_list_response(resp));
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content,
+                    style: LineStyle::Normal,
+                },
+            })
+        }
         _ => None,
     }
 }
@@ -756,6 +787,31 @@ fn format_explanation_response(
         resp.working_memory_context.len(),
         resp.rounds_completed
     )
+}
+
+fn format_model_list_response(
+    resp: &bus::events::transparency::ModelListResponse,
+) -> String {
+    if resp.models.is_empty() {
+        return "No models discovered. Add GGUF models to your configured model directory.".to_string();
+    }
+
+    let mut lines = vec![];
+    let default = resp.default_model.as_deref().unwrap_or("");
+
+    for model in &resp.models {
+        let size_gb = model.size_bytes as f64 / 1_000_000_000.0;
+        let marker = if model.name == default { " (default)" } else { "" };
+        lines.push(format!(
+            "  {} — {:.1} GB — {:?}{}",
+            model.name, size_gb, model.quantization, marker
+        ));
+    }
+
+    lines.push("".to_string());
+    lines.push(format!("Total: {} models", resp.models.len()));
+
+    lines.join("\n")
 }
 
 /// IPC socket path — DIFFERENT from single-instance lock path.

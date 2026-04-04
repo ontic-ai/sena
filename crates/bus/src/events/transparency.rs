@@ -19,6 +19,8 @@ pub enum TransparencyQuery {
     UserMemory,
     /// "Why did you say that?"
     InferenceExplanation,
+    /// "What models are available?"
+    ModelList,
 }
 
 /// Response to CurrentObservation query: current context snapshot.
@@ -65,6 +67,15 @@ pub struct InferenceExplanationResponse {
     pub rounds_completed: usize,
 }
 
+/// Response to ModelList query: all discovered models.
+#[derive(Debug, Clone)]
+pub struct ModelListResponse {
+    /// All discovered GGUF models.
+    pub models: Vec<crate::events::ModelInfo>,
+    /// Name of the currently selected default model, if any.
+    pub default_model: Option<String>,
+}
+
 /// Top-level transparency event enum.
 #[derive(Debug, Clone)]
 pub enum TransparencyEvent {
@@ -72,6 +83,7 @@ pub enum TransparencyEvent {
     ObservationResponded(ObservationResponse),
     MemoryResponded(MemoryResponse),
     InferenceExplanationResponded(InferenceExplanationResponse),
+    ModelListResponded(ModelListResponse),
 }
 
 #[cfg(test)]

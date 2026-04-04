@@ -1239,6 +1239,30 @@ impl Actor for InferenceActor {
                                     .await;
                             });
                         }
+                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(
+                            TransparencyQuery::ModelList,
+                        ))) => {
+                            let (models, default_model) = match &self.registry {
+                                Some(reg) => {
+                                    let models = reg.models().to_vec();
+                                    let default_model = reg.default_model().map(|s| s.to_string());
+                                    (models, default_model)
+                                }
+                                None => (vec![], None),
+                            };
+                            let b = bus.clone();
+                            tokio::spawn(async move {
+                                let response = bus::events::transparency::ModelListResponse {
+                                    models,
+                                    default_model,
+                                };
+                                let _ = b
+                                    .broadcast(Event::Transparency(
+                                        TransparencyEvent::ModelListResponded(response),
+                                    ))
+                                    .await;
+                            });
+                        }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(ActorError::ChannelClosed("bus channel closed".to_string()));
                         }

@@ -2502,6 +2502,9 @@ fn transparency_timeout_message(query: &TransparencyQuery) -> String {
         TransparencyQuery::InferenceExplanation => {
             "Explanation is taking too long to respond. Try /explanation again after the next completed inference cycle.".to_string()
         }
+        TransparencyQuery::ModelList => {
+            "Model list query timed out. This should not happen; check the inference actor.".to_string()
+        }
     }
 }
 
@@ -2625,9 +2628,13 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                         match msg.payload {
                             IpcPayload::DisplayLine { content, style } => {
                                 let role = match style {
-                                    LineStyle::Error | LineStyle::Dimmed => MessageRole::Warning,
+                                    LineStyle::Error => MessageRole::Warning,
+                                    LineStyle::CtpThought => MessageRole::Warning,
                                     LineStyle::Inference => MessageRole::Sena,
-                                    _ => MessageRole::System,
+                                    LineStyle::Success => MessageRole::Sena,
+                                    LineStyle::Normal => MessageRole::System,
+                                    LineStyle::Dimmed => MessageRole::System,
+                                    LineStyle::SystemNotice => MessageRole::System,
                                 };
                                 messages.push(Message::new(role, content));
                             }
