@@ -13,7 +13,8 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-// TODO M5: pin real SHA-256 checksums from HuggingFace
+// TODO: pin real SHA-256 checksums from HuggingFace before release.
+// ggml-base.en.bin: verify against https://huggingface.co/ggerganov/whisper.cpp
 /// Placeholder checksum for models without verified hashes.
 const CHECKSUM_UNKNOWN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -49,17 +50,22 @@ pub struct ModelInfo {
 pub struct ModelManifest;
 
 impl ModelManifest {
-    /// Returns the Whisper small GGUF model for STT (~150MB).
-    pub fn whisper_small_gguf() -> ModelInfo {
+    /// Returns the Whisper base (English-only) model for STT (~141MB).
+    ///
+    /// `ggml-base.en` is the recommended model for general use:
+    /// - ~141MB on disk, ~300MB RAM
+    /// - English-only, ~16x realtime on average CPU
+    /// - Excellent accuracy for clear speech; acceptable for light accents
+    /// - Smallest model that reliably handles real-world speech input
+    pub fn whisper_base_en_gguf() -> ModelInfo {
         ModelInfo {
-            name: "whisper-small-gguf".to_string(),
-            filename: "ggml-small.bin".to_string(),
-            // Placeholder URL — will be updated to actual HF URL
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+            name: "whisper-base-en".to_string(),
+            filename: "ggml-base.en.bin".to_string(),
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
                 .to_string(),
-            // Placeholder checksum — will be updated to actual SHA-256
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 150_000_000, // ~150MB
+            // TODO: pin real SHA-256 before release
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 141_216_069, // 141MB actual
             model_type: ModelType::WhisperStt,
         }
     }
@@ -96,7 +102,7 @@ impl ModelManifest {
     /// Returns all known models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
-            Self::whisper_small_gguf(),
+            Self::whisper_base_en_gguf(),
             Self::piper_voice(),
             Self::open_wakeword(),
         ]

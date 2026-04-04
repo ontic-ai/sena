@@ -556,7 +556,7 @@ fn resolve_model_path(
 ) -> Result<String, SpeechError> {
     // Priority 1: Check model_dir (where downloaded models live)
     if let Some(dir) = model_dir {
-        let candidate = dir.join("ggml-small.bin");
+        let candidate = dir.join("ggml-base.en.bin");
         if candidate.exists() {
             return candidate
                 .to_str()
@@ -577,7 +577,7 @@ fn resolve_model_path(
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| SpeechError::SttInitFailed("cannot determine home directory".to_string()))?;
 
-    Ok(format!("{}/.sena/models/whisper/ggml-small.bin", home))
+    Ok(format!("{}/.sena/models/whisper/ggml-base.en.bin", home))
 }
 
 #[cfg(feature = "whisper")]

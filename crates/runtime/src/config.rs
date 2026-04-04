@@ -114,7 +114,7 @@ pub struct SenaConfig {
     pub voice_always_listening: bool,
 
     /// Custom Whisper model path for STT.
-    /// If None, uses default: ~/.sena/models/whisper/ggml-small.bin
+    /// If None, uses default: ~/.sena/models/whisper/ggml-base.en.bin
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whisper_model_path: Option<String>,
 

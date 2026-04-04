@@ -81,7 +81,7 @@ pub async fn run_speech_onboarding(
 
     // After download loop, verify required models are cached
     let whisper_cached =
-        ModelCache::is_cached(model_dir, &ModelManifest::whisper_small_gguf()).await;
+        ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en_gguf()).await;
     let piper_cached = ModelCache::is_cached(model_dir, &ModelManifest::piper_voice()).await;
 
     // At minimum, TTS (Piper) is required. STT (Whisper) is required if voice input is desired.
@@ -89,7 +89,7 @@ pub async fn run_speech_onboarding(
     if !whisper_cached || !piper_cached {
         let mut missing = Vec::new();
         if !whisper_cached {
-            missing.push("whisper-small-gguf");
+            missing.push("whisper-base-en");
         }
         if !piper_cached {
             missing.push("piper-en-us-lessac-medium");
