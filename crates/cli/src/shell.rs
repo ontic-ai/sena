@@ -896,6 +896,13 @@ impl Shell {
                     ),
                 );
             }
+            // ── Memory subsystem notices ─────────────────────────────────────
+            Event::Memory(bus::MemoryEvent::ConflictDetected(conflict)) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!("Memory conflict detected: {}", conflict.description),
+                );
+            }
             // ── Transparency query responses (async, non-blocking) ─────────────
             Event::Transparency(TransparencyEvent::ObservationResponded(resp)) => {
                 self.pending_transparency = None;
@@ -2554,7 +2561,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     // Wait for SessionReady from daemon.
     loop {
         match ipc_client.recv().await {
-            Some(msg) if matches!(msg.payload, IpcPayload::SessionReady) => {
+            Some(msg) if matches!(msg.payload, IpcPayload::SessionReady { .. }) => {
                 tracing::info!("IPC session established");
                 break;
             }
