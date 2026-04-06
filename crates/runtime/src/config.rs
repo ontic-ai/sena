@@ -205,6 +205,36 @@ pub struct SenaConfig {
     /// Default: 5
     #[serde(default = "default_tts_queue_depth")]
     pub tts_queue_depth: usize,
+
+    /// Maximum number of conversation history (user, assistant) pairs retained
+    /// in the inference actor's context window. Oldest pairs are evicted first.
+    /// Default: 5
+    #[serde(default = "default_conversation_history_max_pairs")]
+    pub conversation_history_max_pairs: usize,
+
+    /// Minimum transcription confidence for STT output to be accepted.
+    /// Transcriptions below this threshold are discarded as low-confidence.
+    /// Range: [0.0, 1.0]. Default: 0.5
+    #[serde(default = "default_stt_confidence_threshold")]
+    pub stt_confidence_threshold: f32,
+
+    /// Keystroke events-per-minute rate above which `burst_detected` is set.
+    /// Default: 200.0
+    #[serde(default = "default_keystroke_burst_threshold_epm")]
+    pub keystroke_burst_threshold_epm: f64,
+
+    /// Maximum age in seconds before a cached vision frame is cleared from memory.
+    /// Prevents stale visual context from persisting across context switches.
+    /// Default: 30
+    #[serde(default = "default_vision_frame_max_age_secs")]
+    pub vision_frame_max_age_secs: u64,
+
+    /// Path fragments to exclude from file watch events.
+    /// Events whose path contains any of these strings are silently dropped.
+    /// Default: ["AppData", "Temp", ".git", "node_modules"] on Windows,
+    ///          [".git", "node_modules"] elsewhere.
+    #[serde(default = "default_file_watch_exclude_patterns")]
+    pub file_watch_exclude_patterns: Vec<String>,
 }
 
 /// Configuration for the streaming inference pipeline.
@@ -268,6 +298,11 @@ impl Default for SenaConfig {
             auto_tune_max_tokens: default_auto_tune_max_tokens(),
             inference_streaming: InferenceStreamingConfig::default(),
             tts_queue_depth: default_tts_queue_depth(),
+            conversation_history_max_pairs: default_conversation_history_max_pairs(),
+            stt_confidence_threshold: default_stt_confidence_threshold(),
+            keystroke_burst_threshold_epm: default_keystroke_burst_threshold_epm(),
+            vision_frame_max_age_secs: default_vision_frame_max_age_secs(),
+            file_watch_exclude_patterns: default_file_watch_exclude_patterns(),
         }
     }
 }
@@ -364,6 +399,33 @@ fn default_streaming_max_sentence_chars() -> usize {
 }
 fn default_tts_queue_depth() -> usize {
     5
+}
+fn default_conversation_history_max_pairs() -> usize {
+    5
+}
+fn default_stt_confidence_threshold() -> f32 {
+    0.5
+}
+fn default_keystroke_burst_threshold_epm() -> f64 {
+    200.0
+}
+fn default_vision_frame_max_age_secs() -> u64 {
+    30
+}
+fn default_file_watch_exclude_patterns() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            "AppData".to_string(),
+            "Temp".to_string(),
+            ".git".to_string(),
+            "node_modules".to_string(),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![".git".to_string(), "node_modules".to_string()]
+    }
 }
 
 /// Configuration-related errors.
