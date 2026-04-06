@@ -1,5 +1,5 @@
 # Sena — Architecture
-**Version:** 0.4.0  
+**Version:** 0.5.0  
 **Status:** Governing Document — no implementation decision may contradict this file without a formal revision  
 **Reconcile against:** `docs/PRD.md` first, this document second
 
@@ -36,6 +36,7 @@ sena/
 │   ├── inference/          ← llama-cpp-rs wrapper, model manager, queue
 │   ├── memory/             ← tiered memory, dual-routing, consolidation
 │   ├── prompt/             ← dynamic prompt composition engine
+│   ├── text/               ← sentence boundary detection and text utilities
 │   ├── soul/               ← SoulBox: identity, schema, event log
 │   ├── speech/             ← STT, TTS, wakeword — primary interaction surface
 │   └── cli/                ← binary entrypoint — thin shell only
@@ -84,7 +85,8 @@ crypto
  (no Sena crate dependencies — leaf node)
 
 inference
- └── bus
+ ├── bus
+ └── text
 
 memory
  ├── bus
@@ -94,11 +96,15 @@ memory
 prompt
  ├── memory
  ├── ctp
- └── inference
+ ├── inference
+ └── text
 
 soul
  ├── bus
  └── crypto
+
+text
+ (no Sena crate dependencies — leaf node — sentence boundary detection)
 
 platform
  └── bus
@@ -145,10 +151,12 @@ Events are organized into modules by domain:
 pub mod system { ... }     // ShutdownSignal, BootComplete, ActorFailed
 pub mod platform { ... }   // WindowChanged, ClipboardChanged, FileEvent, KeystrokePattern
 pub mod ctp { ... }        // ContextSnapshotReady, ThoughtEventTriggered
-pub mod inference { ... }  // InferenceRequest, InferenceResponse
+pub mod inference { ... }  // InferenceRequested, InferenceCompleted, InferenceSource, streaming events
 pub mod memory { ... }     // MemoryWriteRequest, MemoryQueryRequest, MemoryQueryResponse
 pub mod soul { ... }       // SoulEventLogged, IdentitySignalEmitted
 ```
+
+`InferenceSource` (in `bus::events::inference`) replaces the `request_id < 1000` detection convention for proactive requests. All inference routing decisions must use `InferenceSource` variants (`UserVoice`, `UserText`, `ProactiveCTP`, `Iterative`) rather than inferring intent from numeric IDs.
 
 **Hard rules:**
 - No string-typed events. Ever. Every event is a typed Rust struct or enum.
@@ -345,7 +353,7 @@ When multiple speech actors require microphone access (wakeword detection, STT a
 
 ## 7. Inference
 
-Lives in `crates/inference`. Wraps llama-cpp-rs.
+Lives in `crates/inference`. Adapts the external `ontic/infer` crate (https://github.com/ontic-ai/infer, tag v0.1.0) to Sena's bus architecture. The `infer` crate provides the `InferenceBackend` trait, `LlamaBackend`, `MockBackend`, model discovery, and streaming via `std::sync::mpsc::Receiver<String>`. Sena's inference crate re-exports `infer`'s types for backward compatibility.
 
 ### 7.1 Model Discovery
 
@@ -621,6 +629,23 @@ This is the **only** network exception in Sena's local-first architecture. Downl
 - Speech actors failing does not affect core CTP/inference/memory loop.
 - All speech functionality degrades gracefully: if no model available, speech is disabled and CLI/tray remain functional.
 
+### 14.6 Sequenced TTS Streaming Queue
+
+When the inference actor operates in streaming mode (user voice or text input), it emits `InferenceSentenceReady` events as sentence boundaries are detected. The TTS actor handles these with an ordered synthesis and playback queue:
+
+1. **Synthesis**: Each `InferenceSentenceReady` spawns a `spawn_blocking` synthesis task. Tasks run in parallel.
+2. **Ordered playback**: Synthesized sentences accumulate in a `BTreeMap<sentence_index, SynthResult>`. The actor plays from `next_play_index` upward, ensuring correct order even if synthesis tasks complete out of order.
+3. **Queue depth**: Bounded by `speech.tts_queue_depth` (default 5). When full, the oldest pending entry is dropped.
+4. **Stream completion**: On `InferenceStreamCompleted`, the actor drains pending synthesis results (up to 30s) and plays all remaining entries in order.
+5. **Interruption**: On `TranscriptionCompleted` (new voice input while stream active), the queue is cleared immediately and in-flight synthesis results are discarded (stale request_id check).
+
+The existing `SpeakRequested` path (for proactive/system messages) continues to work independently via the separate FIFO queue.
+
+**Hard rules:**
+- Never write partial sentence audio or text to Soul or memory — only the full response (emitted via `InferenceStreamCompleted`) is persisted by the inference actor.
+- Proactive (CTP-triggered) inference uses the batch `SpeakRequested` path, not the streaming queue.
+- TTS actor still depends only on `bus`. No direct imports of `inference` or any other Sena crate.
+
 ---
 
 ## 15. Encryption Architecture
@@ -709,3 +734,106 @@ This document is changed by pull request only. Changes require:
 3. Reconciliation note if PRD.md is also affected
 
 Any implementation that contradicts this document without a corresponding approved revision to this document is considered a defect.
+
+---
+
+## 17. Inference Architecture Extension: Streaming Pipeline
+
+This section governs Sena's streaming inference pipeline. It specifies the data flow from token emission to ordered TTS playback and defines the hard rules for each component.
+
+### 17.1 What is this?
+
+Sena's inference pipeline has two modes:
+
+| Mode | Source | Path | Output |
+|---|---|---|---|
+| **Streaming** | `UserVoice`, `UserText` | `process_streaming_inference_with_context` | `InferenceTokenGenerated` + `InferenceSentenceReady` + `InferenceStreamCompleted` |
+| **Batch** | `ProactiveCTP`, `Iterative` | `process_single_inference_with_context` | `InferenceCompleted` (single event) |
+
+The streaming path uses `InferenceBackend::stream()` from the `infer` crate, which returns a `std::sync::mpsc::Receiver<String>`. Tokens are bridged from the sync mpsc channel to a tokio channel via `spawn_blocking`.
+
+### 17.2 Streaming pipeline
+
+```
+User input (voice or text)
+  │
+  ├─ InferenceRequested { source: UserVoice | UserText }
+  │
+  └─ InferenceActor: process_streaming_inference_with_context()
+       ├─ Query memory (SINGLE_ROUND_MEMORY_TIMEOUT)
+       ├─ Query soul (SINGLE_ROUND_MEMORY_TIMEOUT)
+       ├─ Acquire vision frame (if model is vision-capable)
+       ├─ Build enriched prompt
+       ├─ Wrap with ChatTemplate
+       ├─ backend.stream(params) → std::sync::mpsc::Receiver<String>
+       │   (in spawn_blocking, bridged to tokio::sync::mpsc)
+       │
+       ├─ Per-token loop:
+       │   ├─ Emit InferenceTokenGenerated
+       │   ├─ Append to buffer + full_text
+       │   └─ text::detect_sentence_boundary(buffer, max_buffer, max_sentence)
+       │       ├─ Some(sentence, remainder) → Emit InferenceSentenceReady
+       │       │                               Reset buffer to remainder
+       │       └─ None → continue
+       │
+       ├─ Stream closed: flush non-empty buffer → final InferenceSentenceReady
+       ├─ Emit InferenceStreamCompleted (full text, total tokens, total sentences)
+       ├─ Write full_text to memory (NEVER partial)
+       └─ Emit InferenceCompleted (backward compat for IPC/CLI)
+```
+
+### 17.3 Sentence boundary detection
+
+Lives in `crates/text/src/sentence.rs`. Exported as `text::detect_sentence_boundary`.
+
+**Function signature:**
+```rust
+pub fn detect_sentence_boundary(
+    buffer: &str,
+    max_buffer_chars: usize,
+    max_sentence_chars: usize,
+) -> Option<(String, String)>
+```
+
+**Boundary rules in priority order:**
+1. **Hard boundary**: `.`, `?`, or `!` followed by whitespace or end-of-string
+2. **Soft boundary**: `;` followed by whitespace
+3. **Comma threshold**: `,` followed by whitespace, only when `buffer.len() > max_buffer_chars`
+4. **Hard cap**: when `buffer.len() > max_sentence_chars`, split at nearest whitespace before threshold
+
+**Hard rules:**
+- Pure function: no state, no side effects, deterministic.
+- Thresholds come from config: `inference.streaming.max_buffer_chars` (default 150), `inference.streaming.max_sentence_chars` (default 400).
+
+### 17.4 InferenceSource
+
+`InferenceSource` is the authoritative source-of-origin field on every `InferenceRequested` event. It replaces the fragile `request_id < 1000` convention.
+
+| Variant | Meaning | Inference path |
+|---|---|---|
+| `UserVoice` | STT transcription triggered | Streaming |
+| `UserText` | CLI text input | Streaming |
+| `ProactiveCTP` | CTP-triggered proactive thought | Batch |
+| `Iterative` | Multi-round reasoning chain | Batch |
+
+**Hard rule:** No code path may infer whether an inference is proactive from `request_id` values. All proactive detection must use `InferenceSource::ProactiveCTP`.
+
+### 17.5 Hard rules
+
+- Streaming inference writes `full_text` to memory ONLY after `InferenceStreamCompleted` — never partial sentences.
+- Batch inference continues to use `InferenceCompleted` as its sole response event.
+- `InferenceSentenceReady` events are consumed only by the TTS actor (and optionally by the CLI for display — display-only, not persisted).
+- `InferenceTokenGenerated` events are for display/debugging only. No actor persists tokens.
+- Proactive (CTP) responses always use `SpeakRequested` for TTS — never the streaming `InferenceSentenceReady` path.
+- The `infer` crate's `stream()` method is always called inside `spawn_blocking`. Never called in async context directly (it blocks).
+
+### 17.6 Connections
+
+| This subsystem | Connects to |
+|---|---|
+| Streaming inference output | TTS actor (via `InferenceSentenceReady`) |
+| Stream completion | Memory actor (via `MemoryWriteRequest` — full text only) |
+| Sentence boundary detection | `crates/text` (leaf node, no Sena deps) |
+| Source routing | `InferenceSource` enum in `bus::events::inference` |
+| Backend | `infer` crate (external, tag v0.1.0) |
+

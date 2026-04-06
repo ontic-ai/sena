@@ -364,6 +364,70 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ---
 
+## Phase 5.5 — Streaming Inference and Ordered TTS
+
+**Goal:** Sena's responses stream token-by-token to the TTS actor, producing natural speech with minimal latency. Sentence boundaries are detected in real-time and each complete sentence is synthesized and played in order as inference continues.
+
+**Entry gate:** Phase 5 exit gate fully satisfied. `infer` crate (ontic-ai/infer v0.1.0) integrated as workspace dependency.
+
+### Milestones
+
+#### M5.5.1 — ontic/infer Backend Integration ✅
+- [x] `infer = { git = "https://github.com/ontic-ai/infer", tag = "v0.1.0", features = ["llama"] }` added as workspace dependency
+- [x] `llama-cpp-2` direct dependency removed from `crates/inference` (now transitive through infer)
+- [x] `crates/inference/src/backend.rs`, `llama_backend.rs`, `mock_backend.rs`, `chat_template.rs`, `manifest.rs` deleted
+- [x] `crates/inference/src/lib.rs` updated to re-export from infer crate
+- [x] `InferenceBackend` (formerly `LlmBackend`) re-exported as `LlmBackend` for backward compat
+- [x] `crates/bus` depends on `infer` for `ModelInfo` and `Quantization` re-exports
+- [x] All existing tests pass after migration
+
+#### M5.5.2 — InferenceSource and Streaming Events ✅
+- [x] `InferenceSource` enum: `UserVoice`, `UserText`, `ProactiveCTP`, `Iterative`
+- [x] `InferenceRequested` event carries `source: InferenceSource` field
+- [x] All `InferenceRequested` construction sites updated with appropriate source variant
+- [x] `request_id < 1000` proactive detection convention removed; replaced by `InferenceSource::ProactiveCTP`
+- [x] `InferenceTokenGenerated`, `InferenceSentenceReady`, `InferenceStreamCompleted` variants added to `bus::events::inference`
+
+#### M5.5.3 — Text Utility Crate ✅
+- [x] `crates/text` created as leaf node (no Sena crate dependencies)
+- [x] `detect_sentence_boundary(buffer, max_buffer_chars, max_sentence_chars)` implemented
+- [x] Boundary rules: hard (`.?!`), soft (`;`), comma threshold, hard cap
+- [x] 22+ exhaustive unit tests covering all boundary conditions
+- [x] `crates/inference` and `crates/prompt` depend on `text`
+
+#### M5.5.4 — Streaming Inference Actor Path ✅
+- [x] `process_streaming_inference_with_context()` added to `InferenceActor`
+- [x] `backend.stream()` called inside `spawn_blocking` with std/tokio mpsc bridge
+- [x] Per-token: `InferenceTokenGenerated` emitted on broadcast bus
+- [x] Per sentence: `InferenceSentenceReady` emitted with sentence index
+- [x] Stream closed: buffer flushed, `InferenceStreamCompleted` emitted
+- [x] Full text written to memory ONLY after stream completion
+- [x] Routing: `UserVoice` + `UserText` → streaming, `ProactiveCTP` + `Iterative` → batch
+- [x] Streaming thresholds configurable: `inference.streaming.max_buffer_chars` (default 150), `inference.streaming.max_sentence_chars` (default 400)
+- [x] `InferenceCompleted` emitted for backward compat after streaming completes
+
+#### M5.5.5 — Ordered TTS Streaming Queue ✅
+- [x] TTS actor handles `InferenceSentenceReady` events
+- [x] Per sentence: synthesis task spawned in `spawn_blocking`; result bridges back to async via mpsc
+- [x] Synthesis results accumulated in `BTreeMap<sentence_index, SynthResult>`
+- [x] Consecutive ready entries played in order starting from `next_play_index`
+- [x] Queue depth bounded by `speech.tts_queue_depth` (default 5); oldest entry dropped on overflow
+- [x] `InferenceStreamCompleted` drains remaining synthesis tasks (30s timeout) and plays all
+- [x] `TranscriptionCompleted` clears streaming queue entirely (interruption path)
+- [x] `SpeakRequested` FIFO path preserved for proactive/system messages
+
+**Exit gate — Phase 5.5 complete when:**
+- [x] All milestones M5.5.1–M5.5.5 checked off
+- [x] User speech input produces streaming response: tokens arrive in real-time, first sentence speaks before inference completes
+- [x] Sentences are always played in sentence_index order regardless of synthesis timing
+- [x] Full response text is persisted to memory after stream completion; no partial writes
+- [x] grep "request_id < 1000" crates/inference/src/actor.rs returns nothing
+- [x] grep "use llama_cpp" crates/inference/src/ returns nothing
+- [x] All previous exit gate conditions still hold
+- [x] `cargo clippy --workspace -- -D warnings` clean
+
+---
+
 ## Phase 6 — CLI Decoupling and Configuration
 
 **Goal:** CLI becomes a fully separated thin wrapper process communicating over IPC. Every CLI command dispatches a typed bus event to the daemon; the daemon owns all actors and business logic. Configuration is accessible through CLI menu and auto-tuned based on local analytics.
