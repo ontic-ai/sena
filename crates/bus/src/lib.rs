@@ -11,7 +11,7 @@ pub use events::{
     CTPEvent, InferenceEvent, InferenceSource, MemoryEvent, PlatformEvent, PlatformVisionEvent,
     Priority, SoulEvent, SpeechEvent, SystemEvent, TransparencyEvent, TrayMenuItem,
 };
-pub use ipc::{IpcMessage, IpcPayload, LineStyle};
+pub use ipc::{IpcMessage, IpcPayload, LineStyle, IPC_SCHEMA_VERSION};
 
 #[cfg(test)]
 mod integration_tests {

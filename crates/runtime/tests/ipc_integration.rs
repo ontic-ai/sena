@@ -12,6 +12,7 @@
 
 use bus::ipc::{IpcMessage, IpcPayload};
 use bus::EventBus;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{timeout, Duration};
@@ -22,30 +23,22 @@ use tokio::net::UnixStream;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
 
+/// Monotonic counter for unique test endpoint names.
+/// Avoids Windows clock-resolution collisions when tests run concurrently.
+static TEST_PIPE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// Generate a unique test socket path for Unix.
 #[cfg(unix)]
 fn test_socket_path() -> String {
-    format!(
-        "/tmp/sena-test-ipc-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )
+    let id = TEST_PIPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("/tmp/sena-test-ipc-{}-{}.sock", std::process::id(), id)
 }
 
 /// Generate a unique test pipe name for Windows.
 #[cfg(windows)]
 fn test_pipe_name() -> String {
-    format!(
-        r"\\.\pipe\sena_test_ipc_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )
+    let id = TEST_PIPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(r"\\.\pipe\sena_test_ipc_{}_{}", std::process::id(), id)
 }
 
 /// Start the IPC server on a test path and return the path.
@@ -163,7 +156,7 @@ impl TestClient {
         }
 
         match self.recv_msg().await {
-            Some(msg) => matches!(msg.payload, IpcPayload::SessionReady),
+            Some(msg) => matches!(msg.payload, IpcPayload::SessionReady { .. }),
             None => false,
         }
     }
@@ -206,7 +199,7 @@ async fn ipc_client_receives_session_ready_on_connect() {
 
     assert_eq!(msg.id, subscribe_id);
     assert!(
-        matches!(msg.payload, IpcPayload::SessionReady),
+        matches!(msg.payload, IpcPayload::SessionReady { .. }),
         "Expected SessionReady, got {:?}",
         msg.payload
     );

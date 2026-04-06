@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// IPC protocol schema version. Increment on breaking payload changes.
+pub const IPC_SCHEMA_VERSION: u8 = 1;
+
 /// Top-level envelope for all IPC messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcMessage {
@@ -46,7 +49,8 @@ pub enum IpcPayload {
     Pong,
 
     /// Daemon is ready and the session is established.
-    SessionReady,
+    /// Carries the schema version so the CLI can detect protocol mismatches.
+    SessionReady { schema_version: u8 },
 
     /// Daemon is shutting down — CLI should disconnect cleanly.
     DaemonShutdown,
@@ -238,13 +242,29 @@ mod tests {
     fn ipc_session_ready_serializes() {
         let msg = IpcMessage {
             id: 0,
-            payload: IpcPayload::SessionReady,
+            payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
         };
 
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
 
-        assert!(matches!(parsed.payload, IpcPayload::SessionReady));
+        assert!(matches!(parsed.payload, IpcPayload::SessionReady { .. }));
+    }
+
+    #[test]
+    fn ipc_session_ready_carries_schema_version() {
+        let msg = IpcMessage {
+            id: 0,
+            payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
+        match parsed.payload {
+            IpcPayload::SessionReady { schema_version } => {
+                assert_eq!(schema_version, IPC_SCHEMA_VERSION);
+            }
+            _ => panic!("expected SessionReady"),
+        }
     }
 
     #[test]

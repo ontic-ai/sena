@@ -13,7 +13,7 @@
 use bus::events::inference::{InferenceEvent, Priority};
 use bus::events::system::SystemEvent;
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
-use bus::ipc::{IpcMessage, IpcPayload, LineStyle};
+use bus::ipc::{IpcMessage, IpcPayload, LineStyle, IPC_SCHEMA_VERSION};
 use bus::{Event, EventBus};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -313,7 +313,7 @@ impl IpcServer {
                 tracing::info!("IPC client subscribed");
                 let _ = tx.send(IpcMessage {
                     id: msg.id,
-                    payload: IpcPayload::SessionReady,
+                    payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
                 });
             }
             IpcPayload::Chat { text } => {
