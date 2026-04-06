@@ -450,7 +450,19 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] CLI crash does not affect runtime (verified by ipc_server_survives_client_disconnect integration test)
 - [x] Multiple CLI sessions supported simultaneously (verified by ipc_multiple_clients_connect_simultaneously integration test)
 - [x] Session attach/detach without runtime restart
-- [x] `sena cli` with no daemon running: show clear instructions, do not boot a second runtime
+- [x] `sena cli` with daemon already running: connect and attach, do not start a second runtime
+- [x] `sena cli` with daemon not running: auto-start daemon, connect IPC, shut daemon down on CLI exit
+
+#### M6.2.1 — Loop Registry and Visibility ✅
+- [x] `SystemEvent::LoopControlRequested { loop_name, enabled }` and `SystemEvent::LoopStatusChanged { loop_name, enabled }` defined in bus
+- [x] `IpcPayload::LoopStatusUpdate { loop_name, enabled }` and `IpcPayload::ShutdownRequested` defined in bus
+- [x] IPC server maintains loop registry (`loop_states` HashMap); sends 5 `LoopStatusUpdate` on Subscribe
+- [x] `LoopStatusChanged` bus events propagate to IPC clients in real-time
+- [x] `/loops`, `/loops <name>`, `/loops <name> on|off` commands handled server-side
+- [x] CTP, Memory, Platform (polling + screen_capture), Speech actors respond to `LoopControlRequested`
+- [x] CLI sidebar: logo removed, Loops section with ● green/red dots for all 5 loops
+- [x] Loop states update in real-time via `IpcPayload::LoopStatusUpdate`
+- [x] `IpcPayload::ShutdownRequested` wired to `SystemEvent::ShutdownSignal` broadcast
 
 #### M6.3 — Configuration UI
 - [x] `/config` slash command: view all settings and config file path
