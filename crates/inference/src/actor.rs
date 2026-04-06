@@ -57,6 +57,10 @@ pub struct InferenceActor {
     last_snapshot: Option<ContextSnapshot>,
     /// Recent conversation history (user, assistant pairs), capped at 5.
     conversation_history: Vec<(String, String)>,
+    /// Maximum number of conversation history pairs to retain.
+    conversation_history_cap: usize,
+    /// Maximum reflection rounds for iterative inference mode.
+    max_reflection_rounds: usize,
     /// Shared in-memory vision frame store from platform actor.
     /// Holds latest PNG bytes for vision-capable model prompting.
     /// In-memory only: NEVER written to bus, Soul, ech0, or disk.
@@ -104,6 +108,8 @@ impl InferenceActor {
             last_inference_state: None,
             last_snapshot: None,
             conversation_history: Vec::new(),
+            conversation_history_cap: 5,
+            max_reflection_rounds: 2,
             latest_vision_frame: None,
             tts_enabled: false,
             inference_max_tokens: 512,
@@ -170,6 +176,18 @@ impl InferenceActor {
     ) -> Self {
         self.streaming_max_buffer_chars = max_buffer_chars;
         self.streaming_max_sentence_chars = max_sentence_chars;
+        self
+    }
+
+    /// Configure the maximum number of conversation history pairs to retain.
+    pub fn with_conversation_history_cap(mut self, cap: usize) -> Self {
+        self.conversation_history_cap = cap.max(1);
+        self
+    }
+
+    /// Configure the maximum reflection rounds for iterative inference.
+    pub fn with_max_reflection_rounds(mut self, rounds: usize) -> Self {
+        self.max_reflection_rounds = rounds.clamp(1, ITERATIVE_MAX_HARD_CAP);
         self
     }
 
@@ -664,7 +682,7 @@ impl InferenceActor {
         // Update conversation history
         self.conversation_history
             .push((prompt.clone(), result.clone()));
-        if self.conversation_history.len() > 5 {
+        if self.conversation_history.len() > self.conversation_history_cap {
             self.conversation_history.remove(0);
         }
 
@@ -897,7 +915,7 @@ impl InferenceActor {
         // Update conversation history
         self.conversation_history
             .push((prompt.clone(), full_text.clone()));
-        if self.conversation_history.len() > 5 {
+        if self.conversation_history.len() > self.conversation_history_cap {
             self.conversation_history.remove(0);
         }
 
@@ -1022,6 +1040,7 @@ impl InferenceActor {
             Event::Soul(SoulEvent::SummaryRequested(SoulSummaryRequested {
                 max_events: 20,
                 request_id,
+                max_chars: None,
             })),
         )
         .await
@@ -1404,36 +1423,72 @@ impl Actor for InferenceActor {
                             confidence: _,
                             request_id,
                         })) => {
-                            // Voice input: use streaming inference for real-time TTS synthesis.
-                            match self
-                                .process_streaming_inference_with_context(
-                                    &bus,
-                                    text,
-                                    request_id,
-                                )
-                                .await
-                            {
-                                Ok((text, token_count)) => {
-                                    // Emit InferenceCompleted for backward compat
-                                    let _ = bus
-                                        .broadcast(Event::Inference(
-                                            InferenceEvent::InferenceCompleted {
-                                                text,
-                                                request_id,
-                                                token_count,
-                                            },
-                                        ))
-                                        .await;
+                            // Auto-trigger iterative reasoning for long queries with conversation context.
+                            // Heuristic: text > 200 chars AND >= 2 prior exchanges suggests a complex,
+                            // multi-turn discussion that benefits from iterative memory retrieval.
+                            let use_iterative = text.len() > 200
+                                && self.conversation_history.len() >= 2;
+
+                            if use_iterative {
+                                let rounds = self.max_reflection_rounds;
+                                match self
+                                    .process_iterative_request(&bus, text, request_id, rounds)
+                                    .await
+                                {
+                                    Ok((text, token_count)) => {
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceCompleted {
+                                                    text,
+                                                    request_id,
+                                                    token_count,
+                                                },
+                                            ))
+                                            .await;
+                                    }
+                                    Err(reason) => {
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceFailed {
+                                                    request_id,
+                                                    reason,
+                                                },
+                                            ))
+                                            .await;
+                                    }
                                 }
-                                Err(reason) => {
-                                    let _ = bus
-                                        .broadcast(Event::Inference(
-                                            InferenceEvent::InferenceFailed {
-                                                request_id,
-                                                reason,
-                                            },
-                                        ))
-                                        .await;
+                            } else {
+                                // Voice input: use streaming inference for real-time TTS synthesis.
+                                match self
+                                    .process_streaming_inference_with_context(
+                                        &bus,
+                                        text,
+                                        request_id,
+                                    )
+                                    .await
+                                {
+                                    Ok((text, token_count)) => {
+                                        // Emit InferenceCompleted for backward compat
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceCompleted {
+                                                    text,
+                                                    request_id,
+                                                    token_count,
+                                                },
+                                            ))
+                                            .await;
+                                    }
+                                    Err(reason) => {
+                                        let _ = bus
+                                            .broadcast(Event::Inference(
+                                                InferenceEvent::InferenceFailed {
+                                                    request_id,
+                                                    reason,
+                                                },
+                                            ))
+                                            .await;
+                                    }
                                 }
                             }
                         }
