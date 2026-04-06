@@ -221,7 +221,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_inference_max_tokens(config.inference_max_tokens)
         .with_inference_ctx_size(config.inference_ctx_size)
         .with_proactive_speech(config.proactive_speech_enabled)
-        .with_speech_rate_limit(config.speech_rate_limit_secs);
+        .with_speech_rate_limit(config.speech_rate_limit_secs)
+        .with_streaming_thresholds(
+            config.inference_streaming.max_buffer_chars,
+            config.inference_streaming.max_sentence_chars,
+        );
     spawn_actor(&bus, &mut registry, inference_actor);
     expected_actors.push("Inference");
 

@@ -196,6 +196,32 @@ pub struct SenaConfig {
     /// Default: 4096
     #[serde(default = "default_auto_tune_max_tokens")]
     pub auto_tune_max_tokens: usize,
+
+    /// Streaming inference config.
+    #[serde(default)]
+    pub inference_streaming: InferenceStreamingConfig,
+}
+
+/// Configuration for the streaming inference pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InferenceStreamingConfig {
+    /// Comma boundary fires when buffer exceeds this length.
+    /// Default: 150
+    #[serde(default = "default_streaming_max_buffer_chars")]
+    pub max_buffer_chars: usize,
+    /// Hard-cap: forces a split when buffer exceeds this length.
+    /// Default: 400
+    #[serde(default = "default_streaming_max_sentence_chars")]
+    pub max_sentence_chars: usize,
+}
+
+impl Default for InferenceStreamingConfig {
+    fn default() -> Self {
+        Self {
+            max_buffer_chars: default_streaming_max_buffer_chars(),
+            max_sentence_chars: default_streaming_max_sentence_chars(),
+        }
+    }
 }
 
 impl Default for SenaConfig {
@@ -235,6 +261,7 @@ impl Default for SenaConfig {
             auto_tune_tokens: default_auto_tune_tokens(),
             auto_tune_min_tokens: default_auto_tune_min_tokens(),
             auto_tune_max_tokens: default_auto_tune_max_tokens(),
+            inference_streaming: InferenceStreamingConfig::default(),
         }
     }
 }
@@ -322,6 +349,12 @@ fn default_auto_tune_min_tokens() -> usize {
 }
 fn default_auto_tune_max_tokens() -> usize {
     4096
+}
+fn default_streaming_max_buffer_chars() -> usize {
+    150
+}
+fn default_streaming_max_sentence_chars() -> usize {
+    400
 }
 
 /// Configuration-related errors.
