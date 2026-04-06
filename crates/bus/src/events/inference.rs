@@ -1,32 +1,7 @@
 //! Inference-layer events: model discovery, requests, responses.
 
-use std::path::PathBuf;
-
-/// Quantization level of a GGUF model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Quantization {
-    Q4_0,
-    Q4_1,
-    Q5_0,
-    Q5_1,
-    Q8_0,
-    F16,
-    F32,
-    Unknown(String),
-}
-
-/// Information about a discovered GGUF model.
-#[derive(Debug, Clone)]
-pub struct ModelInfo {
-    /// Human-readable model name (e.g., "llama2:7b").
-    pub name: String,
-    /// Absolute path to the GGUF file.
-    pub path: PathBuf,
-    /// File size in bytes.
-    pub size_bytes: u64,
-    /// Quantization level parsed from model metadata or filename.
-    pub quantization: Quantization,
-}
+// Re-export ModelInfo and Quantization from the infer crate
+pub use infer::{ModelInfo, Quantization};
 
 /// Priority level for inference requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,6 +71,7 @@ pub enum InferenceEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn model_discovered_constructs_and_clones() {

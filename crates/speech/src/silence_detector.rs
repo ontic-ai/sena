@@ -48,8 +48,7 @@ impl SilenceDetector {
         let rms = calculate_rms(samples);
         let is_voice = rms > self.energy_threshold;
         let now = Instant::now();
-        let chunk_duration =
-            samples.len() as f32 / (sample_rate as f32 * channels as f32);
+        let chunk_duration = samples.len() as f32 / (sample_rate as f32 * channels as f32);
 
         if is_voice {
             if !self.speech_started {
@@ -122,7 +121,7 @@ mod tests {
     #[test]
     fn silence_detector_speech_then_silence_returns_buffer() {
         let mut det = SilenceDetector::new(0.01, 0.0); // 0s silence threshold for instant trigger
-        // Feed 1 second of speech at 16kHz (16000 samples) — satisfies 0.5s min_speech_duration.
+                                                       // Feed 1 second of speech at 16kHz (16000 samples) — satisfies 0.5s min_speech_duration.
         let speech = vec![0.5_f32; 16_000];
         assert!(det.feed(&speech, 16_000, 1).is_none());
         // Feed silence — should trigger because silence_duration_secs = 0.0 and we have 1s of speech.

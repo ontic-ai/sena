@@ -212,8 +212,10 @@ pub async fn boot() -> Result<Runtime, BootError> {
     } else {
         platform::ollama_models_dir().map_err(|e| BootError::InferenceInitFailed(e.to_string()))?
     };
+    let llama_backend = inference::LlamaBackend::new()
+        .map_err(|e| BootError::InferenceInitFailed(format!("LlamaBackend init failed: {}", e)))?;
     let inference_actor =
-        inference::InferenceActor::new(models_dir, Box::new(inference::LlamaBackend::new()))
+        inference::InferenceActor::new(models_dir, Box::new(llama_backend))
             .with_preferred_model(config.preferred_model.clone())
             .with_vision_frame_store(Arc::clone(&vision_frame_store))
             .with_tts_enabled(config.speech_enabled)

@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use crate::error::InferenceError;
-use crate::manifest;
 use crate::registry::ModelRegistry;
 
 /// Discover all available GGUF models in the given Ollama models directory.
@@ -19,7 +18,7 @@ use crate::registry::ModelRegistry;
 /// Returns an error if:
 /// - The models directory does not exist
 /// - No models are found (Ollama installed but no models pulled)
-/// - Manifest parsing fails critically
+/// - Model discovery fails critically
 pub fn discover_models(models_dir: &Path) -> Result<ModelRegistry, InferenceError> {
     if !models_dir.exists() {
         return Err(InferenceError::OllamaNotInstalled(format!(
@@ -28,12 +27,27 @@ pub fn discover_models(models_dir: &Path) -> Result<ModelRegistry, InferenceErro
         )));
     }
 
-    let models = manifest::parse_ollama_manifests(models_dir)?;
+    // Use infer's discover_models to get a ModelRegistry
+    // The infer crate returns Result<ModelRegistry, InferError>
+    let infer_registry = match ::infer::discover_models(models_dir) {
+        Ok(registry) => registry,
+        Err(e) => {
+            // Check if the error message indicates no models found
+            let err_msg = e.to_string();
+            if err_msg.contains("no-models-found") || err_msg.contains("no models") {
+                return Err(InferenceError::NoModelsFound);
+            }
+            return Err(InferenceError::BackendFailed(err_msg));
+        }
+    };
 
-    if models.is_empty() {
+    if infer_registry.is_empty() {
         return Err(InferenceError::NoModelsFound);
     }
 
+    // Convert infer's ModelRegistry to our local ModelRegistry wrapper
+    // Extract the models and rebuild with our wrapper
+    let models: Vec<_> = infer_registry.models().to_vec();
     Ok(ModelRegistry::from_models(models))
 }
 

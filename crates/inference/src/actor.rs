@@ -13,8 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::backend::{BackendType, InferenceParams, LlmBackend};
-use crate::chat_template::ChatTemplate;
+use infer::{BackendType, InferenceBackend as LlmBackend, InferenceParams, ChatTemplate};
 use crate::discovery;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
@@ -279,16 +278,19 @@ impl InferenceActor {
                 let backend_clone = backend;
                 let prompt_len = prompt.len();
                 let params = InferenceParams {
+                    request_id: uuid::Uuid::new_v4(),
+                    prompt: wrapped_prompt,
+                    temperature: 0.7,
+                    top_p: 0.9,
                     max_tokens: self.inference_max_tokens,
                     ctx_size: self.inference_ctx_size,
-                    ..InferenceParams::default()
                 };
                 let result = tokio::task::spawn_blocking(move || {
                     let guard = backend_clone
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
                     guard
-                        .infer(&wrapped_prompt, &params)
+                        .complete(&params)
                         .map_err(|e| format!("{}", e))
                 })
                 .await;
@@ -389,7 +391,8 @@ impl InferenceActor {
                 .await;
 
                 match result {
-                    Ok(Ok(facts)) => {
+                    Ok(Ok(extraction_result)) => {
+                        let facts = extraction_result.facts;
                         let _ = response_tx.send(Ok(facts.clone()));
                         let _ = bus
                             .broadcast(Event::Inference(InferenceEvent::ExtractionCompleted {
@@ -422,16 +425,19 @@ impl InferenceActor {
 
         let backend_clone = self.backend.clone();
         let params = InferenceParams {
+            request_id: uuid::Uuid::new_v4(),
+            prompt: wrapped_prompt,
+            temperature: 0.7,
+            top_p: 0.9,
             max_tokens: self.inference_max_tokens,
             ctx_size: self.inference_ctx_size,
-            ..InferenceParams::default()
         };
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
             guard
-                .infer(&wrapped_prompt, &params)
+                .complete(&params)
                 .map_err(|e| format!("{}", e))
         })
         .await
@@ -618,9 +624,12 @@ impl InferenceActor {
         let backend_clone = self.backend.clone();
         let prompt_len = enriched_prompt.len();
         let params = InferenceParams {
+            request_id: uuid::Uuid::new_v4(),
+            prompt: wrapped_prompt,
+            temperature: 0.7,
+            top_p: 0.9,
             max_tokens: self.inference_max_tokens,
             ctx_size: self.inference_ctx_size,
-            ..InferenceParams::default()
         };
         tracing::info!(
             "inference: calling infer request_id={} prompt_len={} max_tokens={}",
@@ -633,7 +642,7 @@ impl InferenceActor {
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
             guard
-                .infer(&wrapped_prompt, &params)
+                .complete(&params)
                 .map_err(|e| format!("{}", e))
         })
         .await
@@ -1385,7 +1394,7 @@ impl Actor for InferenceActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock_backend::MockBackend;
+    use infer::MockBackend;
     use std::fs;
     use std::time::{Duration, Instant, SystemTime};
     use tempfile::tempdir;

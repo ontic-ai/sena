@@ -19,6 +19,15 @@ pub enum InferenceError {
 
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("backend failed: {0}")]
+    BackendFailed(String),
+}
+
+impl From<infer::InferError> for InferenceError {
+    fn from(e: infer::InferError) -> Self {
+        InferenceError::BackendFailed(e.to_string())
+    }
 }
 
 #[cfg(test)]

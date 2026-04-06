@@ -439,6 +439,7 @@ name = "bus"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "infer",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2264,18 +2265,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.1.0"
+source = "git+https://github.com/ontic-ai/infer?tag=v0.1.0#c879cedcf93edd799ca6d1bba74f576527a237d0"
+dependencies = [
+ "encoding_rs",
+ "llama-cpp-2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "inference"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bus",
- "llama-cpp-2",
+ "infer",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

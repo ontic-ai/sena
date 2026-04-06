@@ -1,6 +1,6 @@
 ---
 description: 'Sena master conductor. Orchestrates the full Planning → Implementation → Guard → Security → Review → Commit lifecycle for each milestone. The only agent you invoke directly.'
-tools: ['vscode/getProjectSetupInfo', 'vscode/runCommand', 'vscode/askQuestions', 'vscode/switchAgent', 'execute/runInTerminal', 'execute/runTests', 'execute/getTerminalOutput', 'execute/awaitTerminal', 'execute/killTerminal', 'execute/runTask', 'execute/createAndRunTask', 'read/problems', 'read/readFile', 'read/terminalLastCommand', 'read/getTaskOutput', 'edit/createDirectory', 'edit/createFile', 'edit/editFiles', 'search/codebase', 'search/fileSearch', 'search/listDirectory', 'search/textSearch', 'search/searchSubagent', 'agent', 'todo']
+tools: ['vscode/getProjectSetupInfo', 'vscode/runCommand', 'vscode/askQuestions', 'vscode/switchAgent', 'execute/runInTerminal', 'execute/runTests', 'execute/getTerminalOutput', 'execute/awaitTerminal', 'execute/killTerminal', 'execute/runTask', 'execute/createAndRunTask', 'read/problems', 'read/readFile', 'read/terminalLastCommand', 'read/getTaskOutput', 'edit/createDirectory', 'edit/createFile', 'edit/editFiles', 'search/codebase', 'search/fileSearch', 'search/listDirectory', 'search/textSearch', 'search/searchSubagent', 'agent', 'todo', 'web']
 agents: ["planner", "builder", "arch-guard", "sec-auditor", "reviewer"]
 model: Claude Sonnet 4.5 (copilot)
 ---
