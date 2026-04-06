@@ -361,7 +361,7 @@ mod tests {
 
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
-        assert_eq!(whisper.filename, "ggml-small.bin");
+        assert_eq!(whisper.filename, "ggml-base.en.bin");
 
         let piper = &models[1];
         assert_eq!(piper.model_type, ModelType::PiperTts);
@@ -374,17 +374,17 @@ mod tests {
 
     #[test]
     fn cached_path_returns_correct_path() {
-        let model = ModelManifest::whisper_small_gguf();
+        let model = ModelManifest::whisper_base_en_gguf();
         let model_dir = Path::new("/tmp/models");
         let path = ModelCache::cached_path(model_dir, &model);
 
-        assert_eq!(path, model_dir.join("ggml-small.bin"));
+        assert_eq!(path, model_dir.join(&model.filename));
     }
 
     #[tokio::test]
     async fn is_cached_returns_false_for_nonexistent_file() {
         let temp_dir = tempdir().unwrap();
-        let model = ModelManifest::whisper_small_gguf();
+        let model = ModelManifest::whisper_base_en_gguf();
 
         let cached = ModelCache::is_cached(temp_dir.path(), &model).await;
         assert!(!cached);

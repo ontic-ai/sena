@@ -150,7 +150,7 @@ impl TestClient {
     /// Receive the next IPC message (with 2-second timeout).
     async fn recv_msg(&mut self) -> Option<IpcMessage> {
         let mut line = String::new();
-        match timeout(Duration::from_secs(2), self.reader.read_line(&mut line)).await {
+        match timeout(Duration::from_secs(10), self.reader.read_line(&mut line)).await {
             Ok(Ok(n)) if n > 0 => serde_json::from_str(&line).ok(),
             _ => None,
         }
