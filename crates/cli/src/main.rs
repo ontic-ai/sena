@@ -126,13 +126,33 @@ async fn main() -> Result<()> {
         Some("models") => model_selector::run().await,
         Some("cli") | Some("interactive") => {
             // Phase 6: CLI connects to running daemon over IPC.
-            // Does NOT boot a runtime — daemon must be running.
-            if !runtime::is_daemon_running() {
-                eprintln!("Sena daemon is not running.");
-                eprintln!("Start it first: sena");
-                pause_before_exit();
-                std::process::exit(1);
-            }
+            // If daemon is not running, auto-start it and shut it down on exit.
+            let cli_started_daemon = if !runtime::is_daemon_running() {
+                tracing::info!("Daemon not running — auto-starting...");
+                tokio::spawn(async {
+                    if let Err(e) = runtime::run_background().await {
+                        tracing::error!("auto-started daemon exited with error: {}", e);
+                    }
+                });
+                // Poll until the daemon is ready (max 5 seconds).
+                let mut ready = false;
+                for _ in 0..50 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    if runtime::is_daemon_running() {
+                        ready = true;
+                        break;
+                    }
+                }
+                if !ready {
+                    eprintln!("Sena daemon failed to start within 5 seconds.");
+                    pause_before_exit();
+                    std::process::exit(1);
+                }
+                true
+            } else {
+                false
+            };
+
             // Connect to daemon IPC and run TUI in IPC mode.
             let result = shell::run_with_ipc().await;
             if let Err(e) = result {
@@ -140,6 +160,17 @@ async fn main() -> Result<()> {
                 pause_before_exit();
                 std::process::exit(1);
             }
+
+            // If we auto-started the daemon, shut it down now.
+            if cli_started_daemon {
+                tracing::info!("CLI exited — shutting down auto-started daemon");
+                if let Ok(mut client) = ipc_client::IpcClient::connect().await {
+                    let _ = client.send(bus::IpcPayload::ShutdownRequested).await;
+                    // Give daemon a moment to process the shutdown.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            }
+
             Ok(())
         }
         None => runtime::run_background().await.map_err(anyhow::Error::from),
