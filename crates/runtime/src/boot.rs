@@ -85,6 +85,8 @@ pub enum BootError {
 /// Full boot sequence per architecture §4.1 (all 13 steps).
 /// Runtime is the composition root — all actors are constructed here.
 pub async fn boot() -> Result<Runtime, BootError> {
+    let boot_start = std::time::Instant::now();
+
     // Step 0: Single-instance enforcement — must be first so we fail fast if another instance is running.
     let single_instance_guard = crate::single_instance::try_acquire_lock()
         .map_err(|e| BootError::SingleInstanceCheckFailed(e.to_string()))?;
@@ -172,7 +174,10 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_clipboard_enabled(config.clipboard_observation_enabled)
         .with_file_watch_paths(config.file_watch_paths.clone())
         .with_idle_threshold(config.platform_idle_cpu_threshold_percent)
-        .with_screen_capture_enabled(config.screen_capture_enabled);
+        .with_screen_capture_enabled(config.screen_capture_enabled)
+        .with_burst_threshold_epm(config.keystroke_burst_threshold_epm)
+        .with_file_watch_exclude_patterns(config.file_watch_exclude_patterns.clone())
+        .with_vision_frame_max_age(Duration::from_secs(config.vision_frame_max_age_secs));
     // Shared between platform actor (writer) and inference actor (reader).
     let vision_frame_store = platform_actor.latest_frame_store();
     spawn_actor(&bus, &mut registry, platform_actor);
@@ -225,7 +230,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_streaming_thresholds(
             config.inference_streaming.max_buffer_chars,
             config.inference_streaming.max_sentence_chars,
-        );
+        )
+        .with_conversation_history_cap(config.conversation_history_max_pairs)
+        .with_max_reflection_rounds(config.max_reflection_rounds);
     spawn_actor(&bus, &mut registry, inference_actor);
     expected_actors.push("Inference");
 
@@ -264,7 +271,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
             config.whisper_model_path.clone(),
         )
         .with_model_dir(Some(speech_model_dir.clone()))
-        .with_microphone_device(config.microphone_device.clone());
+        .with_microphone_device(config.microphone_device.clone())
+        .with_confidence_threshold(config.stt_confidence_threshold);
         spawn_actor(&bus, &mut registry, stt_actor);
         expected_actors.push("stt");
 
@@ -307,6 +315,11 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 14: BootComplete is broadcast by `lib::boot_ready_impl()` after the
     // supervisor readiness gate confirms all actors are up.
+
+    tracing::info!(
+        "boot() complete in {}ms — awaiting actor readiness before BootComplete",
+        boot_start.elapsed().as_millis()
+    );
 
     Ok(Runtime {
         bus,
