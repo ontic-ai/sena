@@ -149,16 +149,46 @@ impl TestClient {
         }
     }
 
-    /// Send Subscribe and wait for SessionReady.
+    /// Send Subscribe and wait for SessionReady, then drain the LoopStatusUpdate burst.
+    ///
+    /// After the IPC server sends SessionReady it immediately sends one LoopStatusUpdate per
+    /// registered loop (5 total). Tests that call this helper then work with a clean pipe.
     async fn subscribe_and_wait_ready(&mut self) -> bool {
         if self.send_msg(IpcPayload::Subscribe).await.is_err() {
             return false;
         }
 
         match self.recv_msg().await {
-            Some(msg) => matches!(msg.payload, IpcPayload::SessionReady { .. }),
-            None => false,
+            Some(msg) => {
+                if !matches!(msg.payload, IpcPayload::SessionReady { .. }) {
+                    return false;
+                }
+            }
+            None => return false,
         }
+
+        // Drain the LoopStatusUpdate initial-sync burst (one per registered loop).
+        // Each message arrives buffered immediately after SessionReady.
+        for _ in 0..10 {
+            match timeout(Duration::from_millis(500), async {
+                let mut line = String::new();
+                let n = self.reader.read_line(&mut line).await.unwrap_or(0);
+                if n > 0 {
+                    serde_json::from_str::<IpcMessage>(&line).ok()
+                } else {
+                    None
+                }
+            })
+            .await
+            {
+                Ok(Some(msg)) if matches!(msg.payload, IpcPayload::LoopStatusUpdate { .. }) => {
+                    // Expected — consume and continue.
+                }
+                _ => break,
+            }
+        }
+
+        true
     }
 }
 

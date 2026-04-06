@@ -37,6 +37,11 @@ pub struct IpcServer {
     bus: Arc<EventBus>,
     sessions: Arc<Mutex<HashMap<u64, SessionHandle>>>,
     next_session_id: AtomicU64,
+    /// Tracks the current enabled state for every registered background loop.
+    /// Initialized to `true` for all 5 canonical loops ({\S}17.2).
+    /// Updated whenever `SystemEvent::LoopStatusChanged` fires on the bus.
+    /// New clients receive the full current state as `LoopStatusUpdate` bursts on subscribe.
+    loop_states: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 /// Per-session handle for cleanup.
@@ -48,10 +53,15 @@ struct SessionHandle {
 
 impl IpcServer {
     pub fn new(bus: Arc<EventBus>) -> Self {
+        let mut default_states = HashMap::new();
+        for name in &["ctp", "memory_consolidation", "platform_polling", "screen_capture", "speech"] {
+            default_states.insert((*name).to_string(), true);
+        }
         Self {
             bus,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_session_id: AtomicU64::new(1),
+            loop_states: Arc::new(Mutex::new(default_states)),
         }
     }
 
@@ -193,9 +203,29 @@ impl IpcServer {
         // Spawn bus event push task (subscribes to broadcast).
         let bus_tx = tx.clone();
         let bus = Arc::clone(&server.bus);
+        let loop_states_bus = Arc::clone(&server.loop_states);
         let bus_task = tokio::spawn(async move {
             let mut bus_rx = bus.subscribe_broadcast();
             while let Ok(event) = bus_rx.recv().await {
+                // Forward loop state changes to this client and update server-side registry.
+                if let Event::System(SystemEvent::LoopStatusChanged {
+                    ref loop_name,
+                    enabled,
+                }) = event
+                {
+                    {
+                        let mut states =
+                            loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
+                        states.insert(loop_name.clone(), enabled);
+                    }
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::LoopStatusUpdate {
+                            loop_name: loop_name.clone(),
+                            enabled,
+                        },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -266,9 +296,29 @@ impl IpcServer {
         // Spawn bus event push task.
         let bus_tx = tx.clone();
         let bus = Arc::clone(&server.bus);
+        let loop_states_bus = Arc::clone(&server.loop_states);
         let bus_task = tokio::spawn(async move {
             let mut bus_rx = bus.subscribe_broadcast();
             while let Ok(event) = bus_rx.recv().await {
+                // Forward loop state changes to this client and update server-side registry.
+                if let Event::System(SystemEvent::LoopStatusChanged {
+                    ref loop_name,
+                    enabled,
+                }) = event
+                {
+                    {
+                        let mut states =
+                            loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
+                        states.insert(loop_name.clone(), enabled);
+                    }
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::LoopStatusUpdate {
+                            loop_name: loop_name.clone(),
+                            enabled,
+                        },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -313,8 +363,23 @@ impl IpcServer {
                 tracing::info!("IPC client subscribed");
                 let _ = tx.send(IpcMessage {
                     id: msg.id,
-                    payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
+                    payload: IpcPayload::SessionReady {
+                        schema_version: IPC_SCHEMA_VERSION,
+                    },
                 });
+                // Send initial loop state burst — one LoopStatusUpdate per registered loop.
+                // This ensures the CLI sidebar is correct immediately on connection.
+                let states = self
+                    .loop_states
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                for (loop_name, enabled) in states {
+                    let _ = tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::LoopStatusUpdate { loop_name, enabled },
+                    });
+                }
             }
             IpcPayload::Chat { text } => {
                 let request_id = SystemTime::now()
@@ -350,7 +415,8 @@ impl IpcServer {
                 }
             }
             IpcPayload::SlashCommand { line } => {
-                let outputs = dispatch_slash_command(&line, &self.bus).await;
+                let outputs =
+                    dispatch_slash_command(&line, &self.bus, &self.loop_states).await;
                 for (content, style) in outputs {
                     let _ = tx.send(IpcMessage {
                         id: 0,
@@ -368,6 +434,22 @@ impl IpcServer {
                     payload: IpcPayload::Pong,
                 });
             }
+            IpcPayload::ShutdownRequested => {
+                // Only a CLI that auto-started the daemon sends this.
+                // Broadcast ShutdownSignal so the runtime shuts down cleanly.
+                if let Err(e) = self
+                    .bus
+                    .broadcast(Event::System(SystemEvent::ShutdownSignal))
+                    .await
+                {
+                    tracing::error!(
+                        "IPC ShutdownRequested: failed to broadcast shutdown signal: {}",
+                        e
+                    );
+                } else {
+                    tracing::info!("IPC ShutdownRequested: shutdown signal dispatched");
+                }
+            }
             _ => {
                 let _ = tx.send(IpcMessage {
                     id: msg.id,
@@ -384,7 +466,11 @@ impl IpcServer {
 /// Dispatch a slash command line to the appropriate handler.
 ///
 /// Returns a list of (content, style) tuples to display to the client.
-async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String, LineStyle)> {
+async fn dispatch_slash_command(
+    line: &str,
+    bus: &Arc<EventBus>,
+    loop_states: &Arc<Mutex<HashMap<String, bool>>>,
+) -> Vec<(String, LineStyle)> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     let cmd = parts.first().copied().unwrap_or("");
 
@@ -627,6 +713,10 @@ async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String,
                     LineStyle::Normal,
                 ),
                 (
+                    "/loops                 — Show and toggle background loops".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
                     "/speech                — View speech configuration".to_string(),
                     LineStyle::Normal,
                 ),
@@ -662,6 +752,117 @@ async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String,
                 )]
             }
         }
+        "/loops" => {
+            let args: Vec<&str> = parts.iter().skip(1).copied().collect();
+            match args.as_slice() {
+                [] => {
+                    // List all loops with current state.
+                    let states = loop_states
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let loop_order: &[(&str, &str)] = &[
+                        ("ctp", "CTP"),
+                        ("memory_consolidation", "Memory Consolidation"),
+                        ("platform_polling", "Platform Polling"),
+                        ("screen_capture", "Screen Capture"),
+                        ("speech", "Speech"),
+                    ];
+                    let mut lines =
+                        vec![("\u{2501}\u{2501}  Background Loops".to_string(), LineStyle::SystemNotice)];
+                    for (name, label) in loop_order {
+                        let enabled = states.get(*name).copied().unwrap_or(true);
+                        // The dot color is rendered by the CLI sidebar; here we use text status.
+                        let status = if enabled { "enabled" } else { "disabled" };
+                        lines.push((format!("  {} — {}", label, status), LineStyle::Normal));
+                    }
+                    lines.push(("".to_string(), LineStyle::Normal));
+                    lines.push((
+                        "Use /loops <name> to toggle. /loops <name> on|off to set.".to_string(),
+                        LineStyle::SystemNotice,
+                    ));
+                    lines
+                }
+                [name] => {
+                    let name = name.to_lowercase();
+                    if !is_valid_loop_name(&name) {
+                        return vec![(
+                            format!(
+                                "Unknown loop '{name}'. Valid: ctp, memory_consolidation, platform_polling, screen_capture, speech"
+                            ),
+                            LineStyle::Error,
+                        )];
+                    }
+                    let current = loop_states
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or(true);
+                    let new_state = !current;
+                    if let Err(e) = bus
+                        .broadcast(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name: name.clone(),
+                            enabled: new_state,
+                        }))
+                        .await
+                    {
+                        return vec![(
+                            format!("Failed to send loop control: {e}"),
+                            LineStyle::Error,
+                        )];
+                    }
+                    let action = if new_state { "Enabling" } else { "Disabling" };
+                    vec![(
+                        format!("{action} loop '{name}'..."),
+                        LineStyle::SystemNotice,
+                    )]
+                }
+                [name, state] => {
+                    let name = name.to_lowercase();
+                    let state = state.to_lowercase();
+                    if !is_valid_loop_name(&name) {
+                        return vec![(
+                            format!(
+                                "Unknown loop '{name}'. Valid: ctp, memory_consolidation, platform_polling, screen_capture, speech"
+                            ),
+                            LineStyle::Error,
+                        )];
+                    }
+                    let enabled = match state.as_str() {
+                        "on" | "enable" | "true" => true,
+                        "off" | "disable" | "false" => false,
+                        _ => {
+                            return vec![(
+                                format!("Invalid state '{state}'. Use on or off."),
+                                LineStyle::Error,
+                            )]
+                        }
+                    };
+                    if let Err(e) = bus
+                        .broadcast(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name: name.clone(),
+                            enabled,
+                        }))
+                        .await
+                    {
+                        return vec![(
+                            format!("Failed to send loop control: {e}"),
+                            LineStyle::Error,
+                        )];
+                    }
+                    let action = if enabled { "Enabling" } else { "Disabling" };
+                    vec![(
+                        format!("{action} loop '{name}'..."),
+                        LineStyle::SystemNotice,
+                    )]
+                }
+                _ => vec![(
+                    "Usage: /loops | /loops <name> | /loops <name> on|off".to_string(),
+                    LineStyle::Error,
+                )],
+            }
+        }
         _ if line.starts_with('/') => {
             vec![(
                 format!("Unknown command '{}'. Type /help for commands.", cmd),
@@ -675,6 +876,14 @@ async fn dispatch_slash_command(line: &str, bus: &Arc<EventBus>) -> Vec<(String,
             )]
         }
     }
+}
+
+/// Returns true if `name` is a canonical registered loop name (§17.2 of copilot-instructions).
+fn is_valid_loop_name(name: &str) -> bool {
+    matches!(
+        name,
+        "ctp" | "memory_consolidation" | "platform_polling" | "screen_capture" | "speech"
+    )
 }
 
 /// Convert a bus event to a DisplayLine message for subscribed clients.
