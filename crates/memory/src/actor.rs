@@ -49,6 +49,8 @@ pub struct MemoryActor {
     broadcast_rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
     task_set: JoinSet<()>,
+    /// Whether memory consolidation loop is enabled (pause/resume via LoopControlRequested).
+    consolidation_enabled: bool,
 }
 
 impl MemoryActor {
@@ -78,6 +80,7 @@ impl MemoryActor {
             broadcast_rx: None,
             directed_rx: None,
             task_set: JoinSet::new(),
+            consolidation_enabled: true,
         }
     }
 
@@ -490,6 +493,15 @@ impl Actor for MemoryActor {
 
                 bcast = broadcast_rx.recv() => {
                     match bcast {
+                        Ok(Event::System(SystemEvent::LoopControlRequested { loop_name, enabled })) => {
+                            if loop_name == "memory_consolidation" {
+                                self.consolidation_enabled = enabled;
+                                let _ = bus.broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                    loop_name: "memory_consolidation".to_string(),
+                                    enabled,
+                                })).await;
+                            }
+                        }
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
                         Ok(Event::Transparency(TransparencyEvent::QueryRequested(query))) => {
                             // Handle transparency queries on broadcast
@@ -519,6 +531,11 @@ impl Actor for MemoryActor {
                     // Periodic wakeup for shutdown responsiveness
                 }
                 _ = consolidation_ticker.tick() => {
+                    // Skip consolidation if loop is disabled
+                    if !self.consolidation_enabled {
+                        continue;
+                    }
+
                     if last_activity.elapsed() >= self.consolidation_idle_threshold {
                         let s = Arc::clone(&store);
                         let b = Arc::clone(&bus);

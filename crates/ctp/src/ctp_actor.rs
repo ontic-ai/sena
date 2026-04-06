@@ -34,6 +34,8 @@ pub struct CTPActor {
     /// True after BootComplete has been received. ThoughtEventTriggered is only
     /// emitted once boot is confirmed so inference backend is ready.
     boot_complete: bool,
+    /// Whether the CTP loop is enabled (pause/resume via LoopControlRequested).
+    loop_enabled: bool,
 }
 
 impl CTPActor {
@@ -59,6 +61,7 @@ impl CTPActor {
             bus_rx: None,
             poll_interval,
             boot_complete: false,
+            loop_enabled: true,
         }
     }
 
@@ -139,6 +142,18 @@ impl Actor for CTPActor {
                                         eprintln!("CTP actor failed to handle observation query: {}", e);
                                     }
                                 }
+                                // Handle loop control
+                                Event::System(SystemEvent::LoopControlRequested { loop_name, enabled })
+                                    if loop_name == "ctp" =>
+                                {
+                                    self.loop_enabled = enabled;
+                                    let _ = bus
+                                        .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                            loop_name: "ctp".to_string(),
+                                            enabled,
+                                        }))
+                                        .await;
+                                }
                                 // Handle shutdown signal
                                 Event::System(SystemEvent::ShutdownSignal) => {
                                     break;
@@ -160,6 +175,11 @@ impl Actor for CTPActor {
 
                 // Periodic trigger check
                 _ = ticker.tick() => {
+                    // Skip all CTP processing if loop is disabled
+                    if !self.loop_enabled {
+                        continue;
+                    }
+
                     let snapshot = self.refresh_snapshot();
 
                     // Emit ContextSnapshotReady event on each tick so downstream
@@ -476,6 +496,54 @@ mod tests {
         );
         assert_eq!(response.snapshot.keystroke_cadence.events_per_minute, 144.0);
         assert!(response.snapshot.keystroke_cadence.burst_detected);
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown signal broadcast should succeed in test");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ctp_loop_control_disables_and_reenables_thought_triggering() {
+        let mut actor = CTPActor::new(
+            Duration::from_millis(1), // very short trigger interval
+            Duration::from_secs(300),
+            Duration::from_millis(50),
+        );
+
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.expect("actor start should succeed in test");
+        let run_handle = tokio::spawn(async move { actor.run().await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Disable the CTP loop
+        bus.broadcast(Event::System(SystemEvent::LoopControlRequested {
+            loop_name: "ctp".to_string(),
+            enabled: false,
+        }))
+        .await
+        .expect("loop control broadcast should succeed in test");
+
+        // Should receive LoopStatusChanged { enabled: false }
+        let mut found_disabled = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(200), bus_rx.recv()).await {
+                Ok(Ok(Event::System(SystemEvent::LoopStatusChanged { loop_name, enabled })))
+                    if loop_name == "ctp" && !enabled =>
+                {
+                    found_disabled = true;
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(found_disabled, "expected LoopStatusChanged {{ ctp, false }}");
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await

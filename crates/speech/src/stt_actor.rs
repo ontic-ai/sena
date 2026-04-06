@@ -55,6 +55,8 @@ pub struct SttActor {
     listen_mode_active: bool,
     /// Preferred microphone device name (None = system default).
     microphone_device: Option<String>,
+    /// Whether the speech loop is enabled (pause/resume via LoopControlRequested).
+    speech_loop_enabled: bool,
 }
 
 impl SttActor {
@@ -92,6 +94,7 @@ impl SttActor {
             listen_audio_stream: None,
             listen_mode_active: false,
             microphone_device: None,
+            speech_loop_enabled: true,
         }
     }
 
@@ -387,6 +390,27 @@ impl Actor for SttActor {
             tokio::select! {
                 bus_event = bus_rx.recv() => {
                     match bus_event {
+                        Ok(Event::System(SystemEvent::LoopControlRequested { loop_name, enabled })) => {
+                            if loop_name == "speech" {
+                                self.speech_loop_enabled = enabled;
+                                // When disabling, stop audio capture
+                                if !enabled {
+                                    self.audio_rx = None;
+                                    self.audio_stream = None;
+                                } else {
+                                    // Re-enable: restart audio capture if always-listening is configured
+                                    if self.voice_always_listening {
+                                        if let Err(e) = self.maybe_start_audio_capture() {
+                                            tracing::warn!("speech: failed to restart audio capture: {}", e);
+                                        }
+                                    }
+                                }
+                                let _ = bus.broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                    loop_name: "speech".to_string(),
+                                    enabled,
+                                })).await;
+                            }
+                        }
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => break,
                         Ok(Event::Speech(SpeechEvent::VoiceInputDetected { audio_bytes, duration_ms: _ })) => {
                             if let Ok(samples) = decode_audio_samples(&audio_bytes) {
@@ -481,10 +505,10 @@ impl Actor for SttActor {
                         std::future::pending().await
                     }
                 } => {
-                    // Skip always-on processing while listen mode is active.
+                    // Skip always-on processing while listen mode is active or speech loop is disabled.
                     // Listen mode dispatches its own audio via listen_audio_rx.
                     if let Some(buffer) = audio_buffer {
-                        if !self.listen_mode_active {
+                        if !self.listen_mode_active && self.speech_loop_enabled {
                             self.handle_audio_buffer(buffer, &bus).await;
                         }
                     }
@@ -496,6 +520,7 @@ impl Actor for SttActor {
                         std::future::pending::<Option<AudioBuffer>>().await
                     }
                 } => {
+                    // Listen mode is independent of speech_loop_enabled (explicit user request)
                     if let (Some(buffer), Some(session_id)) = (listen_buffer, self.listen_session_id) {
                         self.handle_listen_audio_buffer(buffer, session_id, &bus).await;
                     }

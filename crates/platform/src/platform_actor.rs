@@ -35,6 +35,10 @@ pub struct PlatformActor {
     file_watch_paths: Vec<PathBuf>,
     /// Whether screen capture is enabled (from config).
     screen_capture_enabled: bool,
+    /// Whether the platform polling loop is enabled (pause/resume via LoopControlRequested).
+    platform_polling_enabled: bool,
+    /// Whether the screen capture loop specifically is enabled (in addition to screen_capture_enabled).
+    screen_capture_loop_enabled: bool,
     /// Shared storage for the latest in-memory PNG frame.
     /// This is NEVER broadcast on the bus — inference actor pulls from it directly.
     latest_jpeg_frame: Arc<Mutex<Option<Vec<u8>>>>,
@@ -77,6 +81,8 @@ impl PlatformActor {
             file_watch_exclude_patterns: Vec::new(),
             last_capture_time: None,
             vision_frame_max_age: Duration::from_secs(30),
+            platform_polling_enabled: true,
+            screen_capture_loop_enabled: true,
         }
     }
 
@@ -286,6 +292,11 @@ impl Actor for PlatformActor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Skip all platform polling if disabled
+                    if !self.platform_polling_enabled {
+                        continue;
+                    }
+
                     // Dynamic polling based on CPU usage
                     self.system_info.refresh_cpu_all();
 
@@ -311,7 +322,8 @@ impl Actor for PlatformActor {
                         self.check_clipboard_change().await?;
                     }
 
-                    if self.screen_capture_enabled {
+                    // Screen capture requires both config flag AND loop flag to be enabled
+                    if self.screen_capture_enabled && self.screen_capture_loop_enabled {
                         if let Some(bus) = self.bus.as_ref().cloned() {
                             self.poll_screen_capture(&bus).await;
                         }
@@ -334,6 +346,25 @@ impl Actor for PlatformActor {
                     }
                 } => {
                     match event {
+                        Ok(Event::System(SystemEvent::LoopControlRequested { loop_name, enabled })) => {
+                            if loop_name == "platform_polling" {
+                                self.platform_polling_enabled = enabled;
+                                if let Some(bus) = self.bus.as_ref() {
+                                    let _ = bus.broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                        loop_name: "platform_polling".to_string(),
+                                        enabled,
+                                    })).await;
+                                }
+                            } else if loop_name == "screen_capture" {
+                                self.screen_capture_loop_enabled = enabled;
+                                if let Some(bus) = self.bus.as_ref() {
+                                    let _ = bus.broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                        loop_name: "screen_capture".to_string(),
+                                        enabled,
+                                    })).await;
+                                }
+                            }
+                        }
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             return Ok(());
                         }
