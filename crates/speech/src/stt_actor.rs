@@ -37,6 +37,9 @@ pub struct SttActor {
     request_id_counter: u64,
     voice_always_listening: bool,
     stt_energy_threshold: f32,
+    /// Minimum confidence score for transcription output to be accepted.
+    /// Range [0.0, 1.0]. Default: 0.5.
+    confidence_threshold: f32,
     whisper_model_path: Option<String>,
     model_dir: Option<PathBuf>,
     silence_duration_secs: f32,
@@ -72,6 +75,7 @@ impl SttActor {
             request_id_counter: 0,
             voice_always_listening,
             stt_energy_threshold,
+            confidence_threshold: 0.5,
             whisper_model_path,
             model_dir: None,
             silence_duration_secs: 1.5,
@@ -112,6 +116,13 @@ impl SttActor {
     /// A case-insensitive substring match is used so partial names work.
     pub fn with_microphone_device(mut self, device: Option<String>) -> Self {
         self.microphone_device = device;
+        self
+    }
+
+    /// Set the minimum confidence threshold for accepted transcriptions.
+    /// Transcriptions below this threshold are treated as low-confidence failures.
+    pub fn with_confidence_threshold(mut self, threshold: f32) -> Self {
+        self.confidence_threshold = threshold.clamp(0.0, 1.0);
         self
     }
 
@@ -231,7 +242,7 @@ impl SttActor {
     ) {
         match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(buffer)).await {
             Ok(Ok(result)) => {
-                if result.confidence >= 0.5 {
+                if result.confidence >= self.confidence_threshold {
                     let _ = bus
                         .broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
                             text: result.text,
