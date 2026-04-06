@@ -111,6 +111,7 @@ async fn stability_run_30_seconds_no_leak_no_panic() {
                     prompt,
                     priority: bus::events::inference::Priority::Normal,
                     request_id,
+                    source: bus::InferenceSource::UserText,
                 }),
             )
             .await
@@ -293,6 +294,7 @@ async fn longevity_72h_no_leak_no_panic() {
                     prompt,
                     priority: bus::events::inference::Priority::Normal,
                     request_id,
+                    source: bus::InferenceSource::UserText,
                 }),
             )
             .await

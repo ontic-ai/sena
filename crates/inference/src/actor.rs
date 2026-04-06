@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
-use infer::{BackendType, InferenceBackend as LlmBackend, InferenceParams, ChatTemplate};
 use crate::discovery;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
 use crate::transparency_query::{handle_transparency_query, InferenceState};
+use infer::{BackendType, ChatTemplate, InferenceBackend as LlmBackend, InferenceParams};
 
 /// Default inference queue capacity.
 const DEFAULT_QUEUE_CAPACITY: usize = 128;
@@ -289,9 +289,7 @@ impl InferenceActor {
                     let guard = backend_clone
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
-                    guard
-                        .complete(&params)
-                        .map_err(|e| format!("{}", e))
+                    guard.complete(&params).map_err(|e| format!("{}", e))
                 })
                 .await;
 
@@ -436,9 +434,7 @@ impl InferenceActor {
             let guard = backend_clone
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
-            guard
-                .complete(&params)
-                .map_err(|e| format!("{}", e))
+            guard.complete(&params).map_err(|e| format!("{}", e))
         })
         .await
         .map_err(|e| format!("task panicked: {}", e))?;
@@ -641,9 +637,7 @@ impl InferenceActor {
             let guard = backend_clone
                 .lock()
                 .map_err(|e| format!("lock poisoned: {}", e))?;
-            guard
-                .complete(&params)
-                .map_err(|e| format!("{}", e))
+            guard.complete(&params).map_err(|e| format!("{}", e))
         })
         .await
         .map_err(|e| format!("task panicked: {}", e))??;
@@ -1286,13 +1280,12 @@ impl Actor for InferenceActor {
                 } => {
                     if let Some(event) = directed {
                         match event {
-                            Event::Inference(InferenceEvent::InferenceRequested { prompt, priority: _, request_id }) => {
-                                // Detect if this is a proactive (CTP-triggered) request.
-                                // Convention: request_id < 1000 is proactive, >= 1000 is user-initiated.
-                                let is_proactive = request_id < 1000;
+                            Event::Inference(InferenceEvent::InferenceRequested { prompt, priority: _, request_id, source }) => {
+                                // Determine if this is a proactive request using the explicit source field.
+                                let is_proactive = matches!(source, bus::InferenceSource::ProactiveCTP);
                                 tracing::info!(
-                                    "inference: received InferenceRequested request_id={} is_proactive={} prompt_len={}",
-                                    request_id, is_proactive, prompt.len()
+                                    "inference: received InferenceRequested request_id={} source={:?} is_proactive={} prompt_len={}",
+                                    request_id, source, is_proactive, prompt.len()
                                 );
 
                                 // Process with memory context directly in event handler with short timeout
@@ -1565,6 +1558,7 @@ mod tests {
                 prompt: "test prompt".to_string(),
                 priority: Priority::Normal,
                 request_id: 42,
+                source: bus::InferenceSource::UserText,
             }),
         )
         .await
@@ -1717,6 +1711,7 @@ mod tests {
                 prompt: "test prompt".to_string(),
                 priority: Priority::Normal,
                 request_id: 123,
+                source: bus::InferenceSource::UserText,
             }),
         )
         .await
@@ -1775,6 +1770,7 @@ mod tests {
                 prompt: "what is rust?".to_string(),
                 priority: Priority::Normal,
                 request_id: 456,
+                source: bus::InferenceSource::UserText,
             }),
         )
         .await

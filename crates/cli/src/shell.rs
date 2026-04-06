@@ -1573,6 +1573,7 @@ impl Shell {
                     prompt,
                     priority,
                     request_id,
+                    source: bus::InferenceSource::UserText,
                 }),
             )
             .await

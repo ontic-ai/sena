@@ -14,6 +14,7 @@ metal = ["infer/metal"]
 
 [dependencies]
 bus = { path = "../bus" }
+text = { path = "../text" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"

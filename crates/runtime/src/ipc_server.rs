@@ -330,6 +330,7 @@ impl IpcServer {
                             prompt: text,
                             priority: Priority::High,
                             request_id,
+                            source: bus::InferenceSource::UserText,
                         }),
                     )
                     .await

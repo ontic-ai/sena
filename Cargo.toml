@@ -11,6 +11,7 @@ members = [
     "crates/prompt",
     "crates/soul",
     "crates/speech",
+    "crates/text",
     "crates/cli",
 ]
 

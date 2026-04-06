@@ -106,6 +106,7 @@ async fn end_to_end_thought_triggers_inference_cycle() {
             prompt,
             priority: bus::events::inference::Priority::Normal,
             request_id: 1,
+            source: bus::InferenceSource::UserText,
         }),
     )
     .await

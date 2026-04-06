@@ -214,15 +214,14 @@ pub async fn boot() -> Result<Runtime, BootError> {
     };
     let llama_backend = inference::LlamaBackend::new()
         .map_err(|e| BootError::InferenceInitFailed(format!("LlamaBackend init failed: {}", e)))?;
-    let inference_actor =
-        inference::InferenceActor::new(models_dir, Box::new(llama_backend))
-            .with_preferred_model(config.preferred_model.clone())
-            .with_vision_frame_store(Arc::clone(&vision_frame_store))
-            .with_tts_enabled(config.speech_enabled)
-            .with_inference_max_tokens(config.inference_max_tokens)
-            .with_inference_ctx_size(config.inference_ctx_size)
-            .with_proactive_speech(config.proactive_speech_enabled)
-            .with_speech_rate_limit(config.speech_rate_limit_secs);
+    let inference_actor = inference::InferenceActor::new(models_dir, Box::new(llama_backend))
+        .with_preferred_model(config.preferred_model.clone())
+        .with_vision_frame_store(Arc::clone(&vision_frame_store))
+        .with_tts_enabled(config.speech_enabled)
+        .with_inference_max_tokens(config.inference_max_tokens)
+        .with_inference_ctx_size(config.inference_ctx_size)
+        .with_proactive_speech(config.proactive_speech_enabled)
+        .with_speech_rate_limit(config.speech_rate_limit_secs);
     spawn_actor(&bus, &mut registry, inference_actor);
     expected_actors.push("Inference");
 

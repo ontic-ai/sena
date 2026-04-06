@@ -14,6 +14,22 @@ pub enum Priority {
     Low = 0,
 }
 
+/// Source of an inference request — where it originated.
+///
+/// Replaces the fragile `request_id < 1000` convention previously used to detect
+/// proactive requests. Every `InferenceRequested` event now carries an explicit source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceSource {
+    /// User spoke — transcription completed and triggered inference.
+    UserVoice,
+    /// User typed — text input from CLI or shell.
+    UserText,
+    /// Proactive CTP trigger — Sena initiated the thought autonomously.
+    ProactiveCTP,
+    /// Iterative reasoning — a subsequent round in a multi-round inference chain.
+    Iterative,
+}
+
 /// Inference-layer events.
 #[derive(Debug, Clone)]
 pub enum InferenceEvent {
@@ -31,6 +47,8 @@ pub enum InferenceEvent {
         prompt: String,
         priority: Priority,
         request_id: u64,
+        /// Where this inference request originated.
+        source: InferenceSource,
     },
     /// Multi-round inference request with memory interleave.
     InferenceRequestedIterative {
@@ -54,6 +72,41 @@ pub enum InferenceEvent {
     },
     /// Inference request failed.
     InferenceFailed { request_id: u64, reason: String },
+    /// A single token produced during streaming inference.
+    InferenceTokenGenerated {
+        /// The decoded token string.
+        token: String,
+        /// The request this token belongs to.
+        request_id: u64,
+        /// Zero-based position of this token in the stream.
+        sequence_number: u64,
+    },
+    /// A complete sentence boundary detected during streaming inference.
+    ///
+    /// Emitted when `detect_sentence_boundary` finds a hard or soft boundary
+    /// in the accumulation buffer. Ready for TTS synthesis.
+    InferenceSentenceReady {
+        /// The complete sentence text (trimmed, boundary character included).
+        sentence: String,
+        /// The request this sentence belongs to.
+        request_id: u64,
+        /// Zero-based index of this sentence in the response stream.
+        sentence_index: u64,
+    },
+    /// Streaming inference for a request has fully completed.
+    ///
+    /// The full response text is the concatenation of all emitted sentences plus
+    /// any trailing content flushed at stream close.
+    InferenceStreamCompleted {
+        /// Full concatenated response text.
+        text: String,
+        /// The request this completion belongs to.
+        request_id: u64,
+        /// Total number of tokens generated.
+        total_token_count: u64,
+        /// Total number of sentences emitted (including final flush).
+        total_sentence_count: u64,
+    },
     /// Embedding request submitted.
     EmbedRequested { text: String, request_id: u64 },
     /// Embedding response produced.
@@ -191,17 +244,20 @@ mod tests {
             prompt: "test prompt".to_string(),
             priority: Priority::High,
             request_id: 42,
+            source: InferenceSource::UserText,
         };
         let cloned = event.clone();
         if let InferenceEvent::InferenceRequested {
             prompt,
             priority,
             request_id,
+            source,
         } = cloned
         {
             assert_eq!(prompt, "test prompt");
             assert_eq!(priority, Priority::High);
             assert_eq!(request_id, 42);
+            assert_eq!(source, InferenceSource::UserText);
         } else {
             panic!("Expected InferenceRequested");
         }

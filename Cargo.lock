@@ -2289,6 +2289,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "text",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3605,6 +3606,7 @@ dependencies = [
  "ctp",
  "inference",
  "memory",
+ "text",
  "thiserror 2.0.18",
 ]
 
@@ -4648,6 +4650,10 @@ dependencies = [
  "wezterm-input-types",
  "winapi",
 ]
+
+[[package]]
+name = "text"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
