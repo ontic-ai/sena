@@ -125,7 +125,21 @@ impl SoulActor {
         }
 
         let event_count = entries.len();
-        let content = entries.join("\n");
+        let mut content = entries.join("\n");
+
+        // Apply optional character budget from the request.
+        if let Some(max_chars) = req.max_chars {
+            if content.len() > max_chars {
+                let truncate_at = content
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .nth(max_chars.saturating_sub(13))  // reserve space for suffix
+                    .unwrap_or(0);
+                content.truncate(truncate_at);
+                content.push_str("...[truncated]");
+            }
+        }
+
         let request_id = req.request_id;
         let bus_clone = Arc::clone(bus);
         self.task_set.spawn(async move {
@@ -774,6 +788,7 @@ mod tests {
         let summary_req = SoulSummaryRequested {
             max_events: 10,
             request_id: 2,
+            max_chars: None,
         };
         actor
             .handle_summary(summary_req, &bus)

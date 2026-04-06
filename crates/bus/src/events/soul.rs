@@ -30,6 +30,9 @@ pub struct SoulEventLogged {
 pub struct SoulSummaryRequested {
     pub max_events: usize,
     pub request_id: u64,
+    /// Optional maximum character count for the summary content.
+    /// When set, content is truncated with a `...[truncated]` suffix.
+    pub max_chars: Option<usize>,
 }
 
 /// Summary of recent Soul events, passed to PromptComposer.
@@ -176,6 +179,7 @@ mod tests {
             SoulEvent::SummaryRequested(SoulSummaryRequested {
                 max_events: 5,
                 request_id: 2,
+                max_chars: None,
             }),
             SoulEvent::SummaryReady(SoulSummary {
                 content: "c".into(),
