@@ -31,6 +31,9 @@ pub struct CTPActor {
     bus: Option<Arc<EventBus>>,
     bus_rx: Option<broadcast::Receiver<Event>>,
     poll_interval: Duration,
+    /// True after BootComplete has been received. ThoughtEventTriggered is only
+    /// emitted once boot is confirmed so inference backend is ready.
+    boot_complete: bool,
 }
 
 impl CTPActor {
@@ -55,6 +58,7 @@ impl CTPActor {
             bus: None,
             bus_rx: None,
             poll_interval,
+            boot_complete: false,
         }
     }
 
@@ -120,6 +124,11 @@ impl Actor for CTPActor {
                                 Event::PlatformVision(vision_event) if self.screen_capture_enabled => {
                                     self.handle_platform_vision_event(vision_event);
                                 }
+                                // Boot complete: allow proactive thought emission.
+                                Event::System(SystemEvent::BootComplete) => {
+                                    self.boot_complete = true;
+                                    tracing::info!("CTP: boot complete — thought triggering enabled");
+                                }
                                 // Handle transparency queries
                                 Event::Transparency(TransparencyEvent::QueryRequested(
                                     TransparencyQuery::CurrentObservation,
@@ -139,9 +148,9 @@ impl Actor for CTPActor {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // Log lag but continue
-                            // In production this would go to a logger
+                            // Log lag and resubscribe so we don't permanently miss events.
                             eprintln!("CTP actor lagged behind by {} events", n);
+                            bus_rx = bus.subscribe_broadcast();
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(ActorError::ChannelClosed("broadcast channel closed".to_string()));
@@ -160,7 +169,7 @@ impl Actor for CTPActor {
                         .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ContextSnapshotReady: {}", e)))?;
 
                     // Check if we should trigger
-                    if self.gate.should_trigger(&snapshot) {
+                    if self.boot_complete && self.gate.should_trigger(&snapshot) {
                         // Emit ThoughtEventTriggered event
                         bus.broadcast(Event::CTP(CTPEvent::ThoughtEventTriggered(snapshot)))
                             .await
