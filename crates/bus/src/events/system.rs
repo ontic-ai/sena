@@ -87,6 +87,24 @@ pub enum SystemEvent {
         /// P95 token count from the observation window that drove this decision.
         p95_tokens: usize,
     },
+    /// Request to pause or resume a named background loop.
+    /// Dispatched by the IPC server when the CLI sends `/loops <name>` or `/loops <name> on|off`.
+    /// The actor owning the named loop must handle this event and broadcast `LoopStatusChanged`.
+    LoopControlRequested {
+        /// Canonical loop name (lowercase, underscore-separated). See §17.2 in copilot-instructions.
+        loop_name: String,
+        /// `true` = enable the loop, `false` = disable/pause it.
+        enabled: bool,
+    },
+    /// Broadcast by an actor when its loop's enabled state changes.
+    /// The IPC server listens for this and forwards `IpcPayload::LoopStatusUpdate` to all
+    /// connected CLI clients so the sidebar updates in real time.
+    LoopStatusChanged {
+        /// Canonical loop name. Same namespace as `LoopControlRequested`.
+        loop_name: String,
+        /// Current state after the change.
+        enabled: bool,
+    },
 }
 
 #[cfg(test)]
@@ -175,5 +193,35 @@ mod tests {
     fn types_are_send() {
         assert_send::<SystemEvent>();
         assert_send::<ActorFailureInfo>();
+    }
+
+    #[test]
+    fn loop_control_requested_constructs_and_clones() {
+        let event = SystemEvent::LoopControlRequested {
+            loop_name: "ctp".to_string(),
+            enabled: false,
+        };
+        let cloned = event.clone();
+        if let SystemEvent::LoopControlRequested { loop_name, enabled } = cloned {
+            assert_eq!(loop_name, "ctp");
+            assert!(!enabled);
+        } else {
+            panic!("expected LoopControlRequested");
+        }
+    }
+
+    #[test]
+    fn loop_status_changed_constructs_and_clones() {
+        let event = SystemEvent::LoopStatusChanged {
+            loop_name: "memory_consolidation".to_string(),
+            enabled: true,
+        };
+        let cloned = event.clone();
+        if let SystemEvent::LoopStatusChanged { loop_name, enabled } = cloned {
+            assert_eq!(loop_name, "memory_consolidation");
+            assert!(enabled);
+        } else {
+            panic!("expected LoopStatusChanged");
+        }
     }
 }

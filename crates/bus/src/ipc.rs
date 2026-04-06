@@ -54,6 +54,21 @@ pub enum IpcPayload {
 
     /// Daemon is shutting down — CLI should disconnect cleanly.
     DaemonShutdown,
+
+    /// Daemon → CLI: a background loop's enabled state has changed.
+    /// Sent to all connected clients immediately when loop state changes and as an
+    /// initial sync burst (one message per loop) when a client subscribes.
+    LoopStatusUpdate {
+        /// Canonical loop name matching §17.2 of copilot-instructions (e.g. `"ctp"`).
+        loop_name: String,
+        /// `true` = loop is running, `false` = paused/disabled.
+        enabled: bool,
+    },
+
+    /// CLI → Daemon: request graceful shutdown.
+    /// Only sent by a CLI instance that auto-started the daemon (tracked by `cli_started_daemon`).
+    /// Must NOT be sent when connecting to a pre-existing daemon.
+    ShutdownRequested,
 }
 
 /// Display hint for CLI rendering.
@@ -242,7 +257,9 @@ mod tests {
     fn ipc_session_ready_serializes() {
         let msg = IpcMessage {
             id: 0,
-            payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
+            payload: IpcPayload::SessionReady {
+                schema_version: IPC_SCHEMA_VERSION,
+            },
         };
 
         let json = serde_json::to_string(&msg).expect("serialize");
@@ -255,7 +272,9 @@ mod tests {
     fn ipc_session_ready_carries_schema_version() {
         let msg = IpcMessage {
             id: 0,
-            payload: IpcPayload::SessionReady { schema_version: IPC_SCHEMA_VERSION },
+            payload: IpcPayload::SessionReady {
+                schema_version: IPC_SCHEMA_VERSION,
+            },
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
@@ -297,5 +316,36 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn ipc_loop_status_update_serializes() {
+        let msg = IpcMessage {
+            id: 0,
+            payload: IpcPayload::LoopStatusUpdate {
+                loop_name: "ctp".to_string(),
+                enabled: true,
+            },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
+        match parsed.payload {
+            IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
+                assert_eq!(loop_name, "ctp");
+                assert!(enabled);
+            }
+            _ => panic!("expected LoopStatusUpdate"),
+        }
+    }
+
+    #[test]
+    fn ipc_shutdown_requested_serializes() {
+        let msg = IpcMessage {
+            id: 0,
+            payload: IpcPayload::ShutdownRequested,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(parsed.payload, IpcPayload::ShutdownRequested));
     }
 }
