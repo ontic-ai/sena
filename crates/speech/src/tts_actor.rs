@@ -1,5 +1,6 @@
 //! TTS Actor - text-to-speech generation and playback.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -10,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 
+use bus::events::inference::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent, SpeechEvent, SystemEvent};
 
 use crate::audio_output::AudioOutput;
@@ -32,12 +34,33 @@ pub struct TtsActor {
     tts_rate: f32,
     model_dir: Option<PathBuf>,
     interrupt: Arc<AtomicBool>,
+    /// Synthesized audio indexed by sentence_index, awaiting ordered playback.
+    streaming_pending: BTreeMap<u64, SynthResult>,
+    /// Next sentence_index to play in the streaming queue.
+    streaming_next_play: u64,
+    /// Request ID of the active streaming session (None when idle).
+    streaming_request_id: Option<u64>,
+    /// Channel for synthesis tasks to send completed audio back to the main loop.
+    synth_tx: mpsc::Sender<SynthResult>,
+    synth_rx: Option<mpsc::Receiver<SynthResult>>,
+    /// Maximum streaming queue depth.
+    tts_queue_depth: usize,
 }
 
 #[derive(Debug)]
 struct SpeakRequest {
     text: String,
     request_id: u64,
+}
+
+/// Result of a background synthesis task for a streaming sentence.
+struct SynthResult {
+    request_id: u64,
+    sentence_index: u64,
+    /// Synthesized PCM audio. None for SystemPlatform (uses direct TTS speak).
+    audio: Option<Vec<i16>>,
+    /// Original sentence text (for SystemPlatform fallback).
+    sentence: String,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +74,7 @@ impl TtsActor {
     /// Create a new TTS actor with the specified backend preference.
     pub fn new(backend: TtsBackend) -> Self {
         let (request_tx, request_rx) = mpsc::channel(MAX_QUEUE_SIZE);
+        let (synth_tx, synth_rx) = mpsc::channel(32);
 
         Self {
             backend_preference: backend,
@@ -63,6 +87,12 @@ impl TtsActor {
             tts_rate: 1.0,
             model_dir: None,
             interrupt: Arc::new(AtomicBool::new(false)),
+            streaming_pending: BTreeMap::new(),
+            streaming_next_play: 0,
+            streaming_request_id: None,
+            synth_tx,
+            synth_rx: Some(synth_rx),
+            tts_queue_depth: 5,
         }
     }
 
@@ -81,6 +111,12 @@ impl TtsActor {
     /// Set model directory for resolving voice model paths.
     pub fn with_model_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.model_dir = dir;
+        self
+    }
+
+    /// Configure the maximum streaming synthesis queue depth.
+    pub fn with_queue_depth(mut self, depth: usize) -> Self {
+        self.tts_queue_depth = depth.max(1);
         self
     }
 
@@ -234,6 +270,90 @@ impl TtsActor {
         // Reset interrupt flag for next request.
         self.interrupt.store(false, Ordering::SeqCst);
     }
+
+    /// Play a synthesized result (PCM for Piper/Mock, or direct TTS for SystemPlatform).
+    /// Runs in spawn_blocking. Returns error string on failure.
+    async fn play_synth_result(&self, result: &SynthResult) -> Result<(), SpeechError> {
+        let backend = self.active_backend.clone();
+        let sentence = result.sentence.clone();
+        let rate = self.tts_rate;
+        let audio = result.audio.clone();
+
+        tokio::task::spawn_blocking(move || {
+            match (&backend, &audio) {
+                (_, Some(samples)) if !samples.is_empty() => {
+                    // Piper PCM
+                    let output = AudioOutput::new()?;
+                    output.play_pcm16_mono_22050(samples)
+                }
+                (_, Some(_)) => {
+                    // Mock backend — empty audio, no-op
+                    Ok(())
+                }
+                (Some(ActiveTtsBackend::SystemPlatform), None) => {
+                    // System TTS: speak sentence directly
+                    let mut tts = tts::Tts::default().map_err(|e| {
+                        SpeechError::SpeechGenerationFailed(format!("Tts::default: {e}"))
+                    })?;
+                    tts.set_rate(rate).map_err(|e| {
+                        SpeechError::SpeechGenerationFailed(format!("set_rate: {e}"))
+                    })?;
+                    tts.speak(&sentence, false)
+                        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("speak: {e}")))?;
+                    Ok(())
+                }
+                _ => Ok(()), // backend not set or no audio and not system TTS
+            }
+        })
+        .await
+        .map_err(|e| SpeechError::SpeechGenerationFailed(format!("task join: {e}")))?
+    }
+
+    /// Spawn a background synthesis task for a streaming sentence.
+    /// The result is sent to `synth_tx` when complete.
+    fn spawn_sentence_synthesis(&self, sentence: String, request_id: u64, sentence_index: u64) {
+        let backend = self.active_backend.clone();
+        let rate = self.tts_rate;
+        let synth_tx = self.synth_tx.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let audio = match &backend {
+                Some(ActiveTtsBackend::Piper { model }) => {
+                    match synthesize_with_piper(&sentence, model.as_ref(), rate) {
+                        Ok(samples) => Some(samples),
+                        Err(e) => {
+                            tracing::warn!(
+                                "tts: synthesis failed for sentence_index={}: {}",
+                                sentence_index,
+                                e
+                            );
+                            Some(vec![]) // empty = no-op on playback
+                        }
+                    }
+                }
+                Some(ActiveTtsBackend::Mock) => {
+                    // Mock: deterministic short delay, no real audio
+                    std::thread::sleep(Duration::from_millis(20));
+                    Some(vec![]) // empty PCM for mock
+                }
+                Some(ActiveTtsBackend::SystemPlatform) => {
+                    None // SystemPlatform speaks in the playback step
+                }
+                None => Some(vec![]), // no backend
+            };
+
+            let result = SynthResult {
+                request_id,
+                sentence_index,
+                audio,
+                sentence,
+            };
+
+            if let Err(e) = synth_tx.blocking_send(result) {
+                tracing::warn!("tts: failed to send synth result: {}", e);
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -279,6 +399,11 @@ impl Actor for TtsActor {
             .take()
             .ok_or_else(|| ActorError::RuntimeError("request_rx not initialized".to_string()))?;
 
+        let mut synth_rx = self
+            .synth_rx
+            .take()
+            .ok_or_else(|| ActorError::RuntimeError("synth_rx not initialized".to_string()))?;
+
         let request_tx = self
             .request_tx
             .as_ref()
@@ -297,6 +422,100 @@ impl Actor for TtsActor {
                             // Apply rate immediately; warmth and verbosity are noted here for
                             // future Piper SSML integration (TODO M6: pass to synthesis pipeline).
                             self.tts_rate = update.rate.clamp(0.5, 2.0);
+                        }
+                        Ok(Event::Inference(InferenceEvent::InferenceSentenceReady {
+                            sentence,
+                            request_id,
+                            sentence_index,
+                        })) => {
+                            // Ignore if backend not initialized
+                            if self.active_backend.is_none() {
+                                continue;
+                            }
+
+                            // Check if this is a new stream (reset queue if different request)
+                            if self.streaming_request_id.is_some()
+                                && self.streaming_request_id != Some(request_id)
+                            {
+                                // Different stream: clear old queue
+                                self.streaming_pending.clear();
+                                self.streaming_next_play = 0;
+                            }
+                            self.streaming_request_id = Some(request_id);
+
+                            // Enforce queue depth: drop oldest unstartable entry if at cap
+                            if self.streaming_pending.len() >= self.tts_queue_depth {
+                                tracing::warn!(
+                                    "tts: streaming queue full (depth={}), dropping oldest pending sentence",
+                                    self.tts_queue_depth
+                                );
+                                if let Some(oldest_key) = self.streaming_pending.keys().next().copied() {
+                                    self.streaming_pending.remove(&oldest_key);
+                                }
+                            }
+
+                            // Spawn synthesis in background
+                            self.spawn_sentence_synthesis(sentence, request_id, sentence_index);
+                        }
+                        Ok(Event::Inference(InferenceEvent::InferenceStreamCompleted {
+                            request_id,
+                            total_sentence_count,
+                            ..
+                        })) => {
+                            if self.streaming_request_id != Some(request_id) {
+                                continue;
+                            }
+
+                            tracing::info!(
+                                "tts: stream completed for request_id={}, expected {} sentences",
+                                request_id,
+                                total_sentence_count,
+                            );
+
+                            // Drain synth results for a bounded time, then play all ready entries in order.
+                            // Wait up to 30s total for pending synthesis tasks.
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                            let expected_count = total_sentence_count;
+
+                            // Drain remaining synth results until we have all sentences or timeout
+                            while self.streaming_pending.len() < expected_count as usize {
+                                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                                if remaining.is_zero() {
+                                    tracing::warn!("tts: timeout waiting for synthesis tasks to complete");
+                                    break;
+                                }
+
+                                match tokio::time::timeout(remaining, synth_rx.recv()).await {
+                                    Ok(Some(result)) if result.request_id == request_id => {
+                                        self.streaming_pending.insert(result.sentence_index, result);
+                                    }
+                                    Ok(Some(_)) => {} // stale result from previous stream
+                                    Ok(None) | Err(_) => break, // channel closed or timeout
+                                }
+                            }
+
+                            // Play all ready entries in order
+                            while let Some(result) = self.streaming_pending.remove(&self.streaming_next_play) {
+                                if let Err(e) = self.play_synth_result(&result).await {
+                                    tracing::warn!("tts: playback error for sentence_index={}: {}", self.streaming_next_play, e);
+                                }
+                                self.streaming_next_play += 1;
+                            }
+
+                            // Reset streaming state
+                            self.streaming_pending.clear();
+                            self.streaming_next_play = 0;
+                            self.streaming_request_id = None;
+                        }
+                        Ok(Event::Speech(SpeechEvent::TranscriptionCompleted { .. })) => {
+                            if self.streaming_request_id.is_some() {
+                                tracing::info!("tts: new transcription received - clearing streaming queue");
+                                self.streaming_pending.clear();
+                                self.streaming_next_play = 0;
+                                self.streaming_request_id = None;
+                                // Drain synth_rx to discard stale in-flight results
+                                while synth_rx.try_recv().is_ok() {}
+                            }
                         }
                         Ok(Event::Speech(SpeechEvent::SpeakRequested { text, request_id })) => {
                             tracing::info!("tts: SpeakRequested request_id={} text_len={}", request_id, text.len());
@@ -325,6 +544,27 @@ impl Actor for TtsActor {
                 }
                 Some(request) = request_rx.recv() => {
                     self.process_request(request).await;
+                }
+                Some(synth_result) = synth_rx.recv() => {
+                    // Ignore stale results from previous streams
+                    if Some(synth_result.request_id) != self.streaming_request_id {
+                        continue;
+                    }
+
+                    let sentence_index = synth_result.sentence_index;
+                    self.streaming_pending.insert(sentence_index, synth_result);
+
+                    // Play consecutive ready entries starting from next_play
+                    while let Some(result) = self.streaming_pending.remove(&self.streaming_next_play) {
+                        if let Err(e) = self.play_synth_result(&result).await {
+                            tracing::warn!(
+                                "tts: playback error sentence_index={}: {}",
+                                self.streaming_next_play,
+                                e
+                            );
+                        }
+                        self.streaming_next_play += 1;
+                    }
                 }
             }
         }

@@ -271,7 +271,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
-            .with_model_dir(Some(speech_model_dir.clone()));
+            .with_model_dir(Some(speech_model_dir.clone()))
+            .with_queue_depth(config.tts_queue_depth);
         spawn_actor(&bus, &mut registry, tts_actor);
         expected_actors.push("tts");
 

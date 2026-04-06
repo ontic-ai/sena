@@ -200,6 +200,11 @@ pub struct SenaConfig {
     /// Streaming inference config.
     #[serde(default)]
     pub inference_streaming: InferenceStreamingConfig,
+
+    /// Bounded depth of the streaming TTS sentence queue.
+    /// Default: 5
+    #[serde(default = "default_tts_queue_depth")]
+    pub tts_queue_depth: usize,
 }
 
 /// Configuration for the streaming inference pipeline.
@@ -262,6 +267,7 @@ impl Default for SenaConfig {
             auto_tune_min_tokens: default_auto_tune_min_tokens(),
             auto_tune_max_tokens: default_auto_tune_max_tokens(),
             inference_streaming: InferenceStreamingConfig::default(),
+            tts_queue_depth: default_tts_queue_depth(),
         }
     }
 }
@@ -355,6 +361,9 @@ fn default_streaming_max_buffer_chars() -> usize {
 }
 fn default_streaming_max_sentence_chars() -> usize {
     400
+}
+fn default_tts_queue_depth() -> usize {
+    5
 }
 
 /// Configuration-related errors.
