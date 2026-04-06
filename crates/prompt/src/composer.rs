@@ -32,6 +32,59 @@ impl PromptComposer {
 
         Ok(parts.join("\n\n"))
     }
+
+    /// Assemble segments within a word-count budget.
+    ///
+    /// Segments are processed in priority order (highest-value first):
+    /// `SoulContext` > `CurrentContext` > `LongTermMemory` > `WorkingMemorySnippets` > `ReflectionDirective`
+    ///
+    /// Lower-priority segments are dropped when adding them would exceed `max_words`.
+    /// Word count is approximated via `split_whitespace().count()`.
+    ///
+    /// Returns [`PromptError::NoSegments`] if no segment fits within the budget.
+    pub fn assemble_with_budget(
+        &self,
+        segments: &[PromptSegment],
+        max_words: usize,
+    ) -> Result<String, PromptError> {
+        // Priority function — lower number = included first.
+        fn priority(seg: &PromptSegment) -> u8 {
+            match seg {
+                PromptSegment::SoulContext(_) => 0,
+                PromptSegment::CurrentContext(_) => 1,
+                PromptSegment::LongTermMemory(_) => 2,
+                PromptSegment::WorkingMemorySnippets(_) => 3,
+                PromptSegment::ReflectionDirective(_) => 4,
+            }
+        }
+
+        // Collect (priority, text) pairs, skipping empty segments.
+        let mut rendered: Vec<(u8, String)> = segments
+            .iter()
+            .filter_map(|s| s.to_text().map(|t| (priority(s), t)))
+            .collect();
+
+        // Sort ascending by priority so highest-value segments are considered first.
+        rendered.sort_by_key(|(p, _)| *p);
+
+        let mut parts: Vec<String> = Vec::new();
+        let mut word_budget = max_words;
+
+        for (_, text) in rendered {
+            let word_count = text.split_whitespace().count();
+            if word_count <= word_budget {
+                word_budget = word_budget.saturating_sub(word_count);
+                parts.push(text);
+            }
+            // Segment doesn't fit — skip it; lower-priority segments may still fit.
+        }
+
+        if parts.is_empty() {
+            return Err(PromptError::NoSegments);
+        }
+
+        Ok(parts.join("\n\n"))
+    }
 }
 
 impl Default for PromptComposer {
