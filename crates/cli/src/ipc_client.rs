@@ -38,17 +38,17 @@ impl IpcClient {
     /// Connect to the running daemon IPC endpoint.
     /// Returns Err if daemon is not running or connection fails.
     pub async fn connect() -> Result<Self, IpcClientError> {
-        // Check for daemon presence first.
-        if !runtime::is_daemon_running() {
-            return Err(IpcClientError::DaemonNotRunning);
-        }
-
         #[cfg(unix)]
         {
             let socket_path = ipc_endpoint();
-            let stream = UnixStream::connect(&socket_path)
-                .await
-                .map_err(|e| IpcClientError::ConnectionFailed(e.to_string()))?;
+            let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+                // If the socket file doesn't exist, the daemon is not running.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    IpcClientError::DaemonNotRunning
+                } else {
+                    IpcClientError::ConnectionFailed(e.to_string())
+                }
+            })?;
             let (read_half, write_half) = tokio::io::split(stream);
             let read_half = BufReader::new(read_half);
 
@@ -64,9 +64,14 @@ impl IpcClient {
         #[cfg(windows)]
         {
             let pipe_name = ipc_endpoint();
-            let client = ClientOptions::new()
-                .open(pipe_name)
-                .map_err(|e| IpcClientError::ConnectionFailed(e.to_string()))?;
+            let client = ClientOptions::new().open(pipe_name).map_err(|e| {
+                // ERROR_FILE_NOT_FOUND (2) means the pipe doesn't exist → daemon not running.
+                if e.raw_os_error() == Some(2) {
+                    IpcClientError::DaemonNotRunning
+                } else {
+                    IpcClientError::ConnectionFailed(e.to_string())
+                }
+            })?;
             let (read_half, write_half) = tokio::io::split(client);
             let read_half = BufReader::new(read_half);
 
