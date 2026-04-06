@@ -42,10 +42,6 @@ use std::path::PathBuf;
 
 const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// ASCII logo art embedded at compile time.
-/// Displayed in the sidebar when vertical space allows.
-const LOGO_ART: &str = include_str!("../../../assets/logo.txt");
-
 // ── Slash-command autocomplete ────────────────────────────────────────────────
 
 struct SlashCommand {
@@ -105,6 +101,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/config",
         description: "Show settings (/config set <key> <value> to edit)",
+    },
+    SlashCommand {
+        command: "/loops",
+        description: "List/toggle background loops",
     },
     SlashCommand {
         command: "/help",
@@ -251,6 +251,8 @@ struct Shell {
     listen_mode_active: bool,
     /// Session ID of the currently active listen session (0 when inactive).
     listen_session_id: u64,
+    /// Loop states: loop_name → enabled
+    loop_states: HashMap<String, bool>,
 }
 
 impl Shell {
@@ -276,6 +278,14 @@ impl Shell {
         actor_health.insert("Inference", ActorStatus::Ready);
         actor_health.insert("CTP", ActorStatus::Ready);
         actor_health.insert("Memory", ActorStatus::Ready);
+        // Initialize loop states - all loops enabled by default
+        let mut loop_states = HashMap::new();
+        loop_states.insert("ctp".to_string(), true);
+        loop_states.insert("memory_consolidation".to_string(), true);
+        loop_states.insert("platform_polling".to_string(), true);
+        loop_states.insert("screen_capture".to_string(), true);
+        loop_states.insert("speech".to_string(), true);
+
         actor_health.insert("Soul", ActorStatus::Ready);
 
         Self {
@@ -293,6 +303,7 @@ impl Shell {
             actor_health,
             actors_popup_visible: false,
             slash_dropdown: None,
+            loop_states,
             transparency_loading: false,
             pending_transparency: None,
             pending_model_dir_input: false,
@@ -640,20 +651,33 @@ impl Shell {
             )));
         }
 
-        // ── Logo (compact ASCII art from assets/logo.txt) ─────────────────────
-        // The logo canvas is ~100 chars wide; we display a centre slice that
-        // captures the S-curve body (roughly columns 30-70).
-        let inner_w = area.width.saturating_sub(4) as usize;
-        if inner_w >= 10 {
-            lines.push(Line::from(""));
-            for raw in LOGO_ART.lines().filter(|l| !l.trim().is_empty()) {
-                let content: String = raw.chars().take(inner_w).collect();
-                lines.push(Line::from(Span::styled(
-                    content,
-                    Style::default().fg(Color::Magenta),
-                )));
-            }
+        // ── Loops ─────────────────────────────────────────────────────────────
+        lines.push(Line::from(Span::styled(
+            " Loops",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let loop_order = [
+            ("ctp", "CTP"),
+            ("memory_consolidation", "Memory Consolidation"),
+            ("platform_polling", "Platform Polling"),
+            ("screen_capture", "Screen Capture"),
+            ("speech", "Speech"),
+        ];
+        for (loop_name, display_name) in &loop_order {
+            let enabled = self.loop_states.get(*loop_name).copied().unwrap_or(true);
+            let (dot, color) = if enabled {
+                ("\u{25cf}", Color::Green)
+            } else {
+                ("\u{25cf}", Color::Red)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", dot), Style::default().fg(color)),
+                Span::styled(*display_name, Style::default().fg(Color::White)),
+            ]));
         }
+        lines.push(Line::from(""));
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1151,6 +1175,16 @@ impl Shell {
                     self.add_message(MessageRole::System, format!("[\u{2026}] {}", text));
                 }
             }
+            Event::System(bus::events::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
+                self.loop_states.insert(loop_name.clone(), enabled);
+                if self.verbose {
+                    let status = if enabled { "enabled" } else { "disabled" };
+                    self.add_message(
+                        MessageRole::System,
+                        format!("[verbose] Loop {}: {}", loop_name, status),
+                    );
+                }
+            }
             Event::Speech(SpeechEvent::ListenModeStopped { session_id })
                 if session_id == self.listen_session_id =>
             {
@@ -1638,19 +1672,15 @@ impl Shell {
         );
         self.add_message(
             MessageRole::System,
-            "/screenshot            Show screenshot capture + vision model status".to_string(),
+            "/loops                 List all background loops and their status".to_string(),
         );
         self.add_message(
             MessageRole::System,
-            "/config                Show and edit settings (/config set <key> <value>)".to_string(),
+            "/loops <name>          Toggle a loop on/off".to_string(),
         );
         self.add_message(
             MessageRole::System,
-            "/verbose               Toggle verbose actor-event logging".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/actors                Show actor health status".to_string(),
+            "/loops <name> on|off   Explicitly enable or disable a loop".to_string(),
         );
         self.add_message(
             MessageRole::System,
@@ -2602,6 +2632,14 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     let mut ctrl_c_first_press: Option<Instant> = None;
     let mut slash_dropdown: Option<SlashDropdown> = None;
 
+    // Initialize loop states - all loops enabled by default
+    let mut loop_states: HashMap<String, bool> = HashMap::new();
+    loop_states.insert("ctp".to_string(), true);
+    loop_states.insert("memory_consolidation".to_string(), true);
+    loop_states.insert("platform_polling".to_string(), true);
+    loop_states.insert("screen_capture".to_string(), true);
+    loop_states.insert("speech".to_string(), true);
+
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
         // Render the current state (simplified inline rendering).
@@ -2662,6 +2700,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             }
                             IpcPayload::Error { reason, .. } => {
                                 messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                            }
+                            IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
+                                loop_states.insert(loop_name, enabled);
+                                // Trigger redraw - handled automatically by next render cycle
                             }
                             _ => {
                                 tracing::warn!("unexpected IPC payload: {:?}", msg);
