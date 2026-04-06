@@ -9,7 +9,7 @@ use bus::{
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use sysinfo::System;
 use tokio::sync::{broadcast, mpsc};
 
@@ -40,6 +40,14 @@ pub struct PlatformActor {
     latest_jpeg_frame: Arc<Mutex<Option<Vec<u8>>>>,
     /// Track last screenshot digest for change detection.
     last_screenshot_digest: Option<[u8; 32]>,
+    /// Keystroke events-per-minute threshold for burst detection.
+    burst_threshold_epm: f64,
+    /// Path fragments whose presence in a file event path causes the event to be dropped.
+    file_watch_exclude_patterns: Vec<String>,
+    /// Tracks when the latest vision frame was written.
+    last_capture_time: Option<Instant>,
+    /// Maximum age a vision frame is kept before being cleared.
+    vision_frame_max_age: Duration,
 }
 
 impl PlatformActor {
@@ -65,6 +73,10 @@ impl PlatformActor {
             screen_capture_enabled: false,
             latest_jpeg_frame: Arc::new(Mutex::new(None)),
             last_screenshot_digest: None,
+            burst_threshold_epm: 200.0,
+            file_watch_exclude_patterns: Vec::new(),
+            last_capture_time: None,
+            vision_frame_max_age: Duration::from_secs(30),
         }
     }
 
@@ -101,6 +113,24 @@ impl PlatformActor {
     /// Enable or disable periodic screen capture polling.
     pub fn with_screen_capture_enabled(mut self, enabled: bool) -> Self {
         self.screen_capture_enabled = enabled;
+        self
+    }
+
+    /// Set the keystroke events-per-minute rate above which burst is flagged.
+    pub fn with_burst_threshold_epm(mut self, threshold: f64) -> Self {
+        self.burst_threshold_epm = threshold;
+        self
+    }
+
+    /// Set path fragment patterns that cause file events to be dropped.
+    pub fn with_file_watch_exclude_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.file_watch_exclude_patterns = patterns;
+        self
+    }
+
+    /// Set the maximum age of a cached vision frame before it is cleared.
+    pub fn with_vision_frame_max_age(mut self, max_age: Duration) -> Self {
+        self.vision_frame_max_age = max_age;
         self
     }
 
@@ -190,6 +220,7 @@ impl PlatformActor {
                             if let Ok(mut frame) = self.latest_jpeg_frame.lock() {
                                 *frame = Some(png_bytes);
                             }
+                            self.last_capture_time = Some(Instant::now());
                         }
                         Err(_) => {
                             // Non-fatal: PNG capture unavailable on this platform.
@@ -285,6 +316,16 @@ impl Actor for PlatformActor {
                             self.poll_screen_capture(&bus).await;
                         }
                     }
+
+                    // Clear stale vision frame regardless of capture state.
+                    if let Some(last) = self.last_capture_time {
+                        if last.elapsed() > self.vision_frame_max_age {
+                            if let Ok(mut frame) = self.latest_jpeg_frame.lock() {
+                                *frame = None;
+                            }
+                            self.last_capture_time = None;
+                        }
+                    }
                 }
                 event = async {
                     match &mut self.bus_rx {
@@ -310,7 +351,12 @@ impl Actor for PlatformActor {
                 } => {
                     if let Some(cadence) = cadence {
                         if let Some(bus) = &self.bus {
-                            bus.broadcast(Event::Platform(PlatformEvent::KeystrokePattern(cadence)))
+                            // Override burst_detected based on the configurable threshold.
+                            let adjusted = bus::events::platform::KeystrokeCadence {
+                                burst_detected: cadence.events_per_minute > self.burst_threshold_epm,
+                                ..cadence
+                            };
+                            bus.broadcast(Event::Platform(PlatformEvent::KeystrokePattern(adjusted)))
                                 .await
                                 .map_err(|e| {
                                     ActorError::RuntimeError(format!(
@@ -328,15 +374,23 @@ impl Actor for PlatformActor {
                     }
                 }, if self.file_rx.is_some() => {
                     if let Some(file_event) = file_event {
-                        if let Some(bus) = &self.bus {
-                            bus.broadcast(Event::Platform(PlatformEvent::FileEvent(file_event)))
-                                .await
-                                .map_err(|e| {
-                                    ActorError::RuntimeError(format!(
-                                        "broadcast file event failed: {}",
-                                        e
-                                    ))
-                                })?;
+                        // Apply exclusion patterns — drop events whose path contains any pattern.
+                        let path_str = file_event.path.to_string_lossy();
+                        let excluded = self
+                            .file_watch_exclude_patterns
+                            .iter()
+                            .any(|pat| path_str.contains(pat.as_str()));
+                        if !excluded {
+                            if let Some(bus) = &self.bus {
+                                bus.broadcast(Event::Platform(PlatformEvent::FileEvent(file_event)))
+                                    .await
+                                    .map_err(|e| {
+                                        ActorError::RuntimeError(format!(
+                                            "broadcast file event failed: {}",
+                                            e
+                                        ))
+                                    })?;
+                            }
                         }
                     }
                 }
