@@ -111,6 +111,11 @@ pub enum InferenceEvent {
     EmbedRequested { text: String, request_id: u64 },
     /// Embedding response produced.
     EmbedCompleted { vector: Vec<f32>, request_id: u64 },
+    /// Embedding request failed (internal subsystem error — not user-visible).
+    ///
+    /// Distinct from `InferenceFailed` which is reserved for user-initiated chat requests.
+    /// The IPC server and CLI never surface `EmbedFailed` as an error to the user.
+    EmbedFailed { request_id: u64, reason: String },
     /// Extraction request submitted.
     ExtractionRequested { text: String, request_id: u64 },
     /// Extraction response produced.

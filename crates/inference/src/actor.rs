@@ -392,10 +392,12 @@ impl InferenceActor {
                     }
                     Ok(Err(e)) => {
                         let _ = response_tx.send(Err(e.clone()));
-                        // Broadcast InferenceFailed so SenaEmbedder fails fast
+                        // Broadcast EmbedFailed so SenaEmbedder fails fast
                         // rather than waiting for the 30-second timeout.
+                        // EmbedFailed is NOT the same as InferenceFailed — it is an
+                        // internal subsystem failure and must never appear in the CLI.
                         let _ = bus
-                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
+                            .broadcast(Event::Inference(InferenceEvent::EmbedFailed {
                                 request_id,
                                 reason: e,
                             }))
@@ -405,7 +407,7 @@ impl InferenceActor {
                         let err = format!("task panicked: {}", e);
                         let _ = response_tx.send(Err(err.clone()));
                         let _ = bus
-                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
+                            .broadcast(Event::Inference(InferenceEvent::EmbedFailed {
                                 request_id,
                                 reason: err,
                             }))
@@ -2394,9 +2396,9 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
 
         // Check for streaming events: InferenceTokenGenerated, InferenceSentenceReady, InferenceStreamCompleted
-        let mut found_token = false;
-        let mut found_sentence = false;
-        let mut found_stream_completed = false;
+        let mut _found_token = false;
+        let mut _found_sentence = false;
+        let mut _found_stream_completed = false;
         let mut found_completed = false;
 
         while let Ok(event) = rx.try_recv() {
@@ -2405,17 +2407,17 @@ mod tests {
                     request_id, ..
                 }) => {
                     assert_eq!(request_id, 999);
-                    found_token = true;
+                    _found_token = true;
                 }
                 Event::Inference(InferenceEvent::InferenceSentenceReady { request_id, .. }) => {
                     assert_eq!(request_id, 999);
-                    found_sentence = true;
+                    _found_sentence = true;
                 }
                 Event::Inference(InferenceEvent::InferenceStreamCompleted {
                     request_id, ..
                 }) => {
                     assert_eq!(request_id, 999);
-                    found_stream_completed = true;
+                    _found_stream_completed = true;
                 }
                 Event::Inference(InferenceEvent::InferenceCompleted { request_id, .. }) => {
                     assert_eq!(request_id, 999);

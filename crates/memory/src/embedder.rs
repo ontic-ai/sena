@@ -85,12 +85,12 @@ impl ech0::Embedder for SenaEmbedder {
                 }))) if rid == request_id => {
                     return Ok(vector);
                 }
-                Ok(Ok(Event::Inference(InferenceEvent::InferenceFailed {
+                Ok(Ok(Event::Inference(InferenceEvent::EmbedFailed {
                     request_id: rid,
                     reason,
                 }))) if rid == request_id => {
                     return Err(EchoError::embedder_failure(format!(
-                        "inference actor failed: {reason}"
+                        "embedding failed: {reason}"
                     )));
                 }
                 Ok(Ok(_)) => continue,
