@@ -262,13 +262,20 @@ fn open_cli_impl(exe_path: std::path::PathBuf) {
     // "Windows cannot find '\\'" errors when the exe path contains spaces.
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
+    tracing::info!("spawning CLI in new console: {} cli", exe_path.display());
+
     let result = std::process::Command::new(&exe_path)
         .arg("cli")
         .creation_flags(CREATE_NEW_CONSOLE)
         .spawn();
 
-    if let Err(e) = result {
-        tracing::error!("failed to open CLI terminal: {}", e);
+    match result {
+        Ok(child) => {
+            tracing::info!("CLI spawned successfully (PID: {})", child.id());
+        }
+        Err(e) => {
+            tracing::error!("failed to open CLI terminal: {}", e);
+        }
     }
 }
 

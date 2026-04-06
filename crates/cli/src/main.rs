@@ -94,6 +94,21 @@ fn sena_log_dir() -> PathBuf {
     }
 }
 
+/// Pause before exit on Windows when spawned from a GUI/tray menu.
+/// This prevents the console window from closing before the user sees error messages.
+/// On Windows CREATE_NEW_CONSOLE spawn, the window would close immediately on exit(1).
+#[cfg(target_os = "windows")]
+fn pause_before_exit() {
+    eprintln!("\nPress Enter to close...");
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pause_before_exit() {
+    // macOS/Linux: if launched from Terminal.app or an existing terminal, no pause needed.
+    // The terminal remains open after process exits.
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -115,12 +130,14 @@ async fn main() -> Result<()> {
             if !runtime::is_daemon_running() {
                 eprintln!("Sena daemon is not running.");
                 eprintln!("Start it first: sena");
+                pause_before_exit();
                 std::process::exit(1);
             }
             // Connect to daemon IPC and run TUI in IPC mode.
             let result = shell::run_with_ipc().await;
             if let Err(e) = result {
                 eprintln!("CLI error: {}", e);
+                pause_before_exit();
                 std::process::exit(1);
             }
             Ok(())

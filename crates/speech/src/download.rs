@@ -63,9 +63,8 @@ impl ModelManifest {
             filename: "ggml-base.en.bin".to_string(),
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
                 .to_string(),
-            // TODO: pin real SHA-256 before release
-            sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 141_216_069, // 141MB actual
+            sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002".to_string(),
+            size_bytes: 147_964_211, // 141MB actual
             model_type: ModelType::WhisperStt,
         }
     }
@@ -153,9 +152,11 @@ impl ModelCache {
     async fn verify_checksum(path: &Path, expected_sha256: &str) -> Result<bool, SpeechError> {
         // Skip verification if checksum is unknown
         if expected_sha256 == CHECKSUM_UNKNOWN {
+            tracing::info!("skipping checksum verification (CHECKSUM_UNKNOWN)");
             return Ok(true);
         }
 
+        tracing::info!("verifying checksum for {}", path.display());
         let bytes = fs::read(path)
             .await
             .map_err(|e| SpeechError::ChecksumVerificationFailed(e.to_string()))?;
@@ -164,6 +165,14 @@ impl ModelCache {
         hasher.update(&bytes);
         let result = hasher.finalize();
         let actual_sha256 = hex::encode(result);
+
+        tracing::debug!(
+            "checksum verify: expected={} (len={}), actual={} (len={})",
+            expected_sha256,
+            expected_sha256.len(),
+            actual_sha256,
+            actual_sha256.len()
+        );
 
         Ok(actual_sha256.eq_ignore_ascii_case(expected_sha256))
     }
@@ -209,6 +218,14 @@ impl DownloadClient {
 
         let path = ModelCache::cached_path(model_dir, model);
         let temp_path = path.with_extension("tmp");
+
+        tracing::info!(
+            "downloading {} from {} → {} (size: {} bytes)",
+            model.name,
+            model.url,
+            path.display(),
+            model.size_bytes
+        );
 
         // Clean up any partial downloads
         if temp_path.exists() {
@@ -295,6 +312,14 @@ impl DownloadClient {
                 })
                 .unwrap_or_else(|_| "unknown".to_string());
 
+            tracing::error!(
+                "checksum mismatch for {}: expected={}, actual={} (temp_file_size={})",
+                model.name,
+                model.sha256,
+                actual_bytes,
+                fs::metadata(&temp_path).await.map(|m| m.len()).unwrap_or(0)
+            );
+
             // Clean up corrupted file
             let _ = fs::remove_file(&temp_path).await;
 
@@ -308,6 +333,8 @@ impl DownloadClient {
         fs::rename(&temp_path, &path)
             .await
             .map_err(|e| SpeechError::DownloadFailed(format!("rename failed: {}", e)))?;
+
+        tracing::info!("model downloaded and verified: {}", path.display());
 
         // Emit download completed event
         let _ = bus
