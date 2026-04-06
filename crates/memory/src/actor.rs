@@ -16,7 +16,8 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use bus::events::memory::{
     MemoryChunk, MemoryConflictDetected, MemoryConsolidationCompleted, MemoryQueryRequest,
-    MemoryQueryResponse, MemoryWriteRequest, SemanticIngestComplete, SemanticIngestRequest,
+    MemoryQueryResponse, MemoryWriteCompleted, MemoryWriteRequest, SemanticIngestComplete,
+    SemanticIngestRequest,
 };
 use bus::events::transparency::TransparencyQuery;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent, TransparencyEvent};
@@ -113,6 +114,15 @@ impl MemoryActor {
 
         // Drop the linking_task — ech0 runs it in the background automatically.
         drop(result.linking_task);
+
+        // Notify subscribers that the write completed successfully.
+        let _ = bus
+            .broadcast(Event::Memory(MemoryEvent::WriteCompleted(
+                MemoryWriteCompleted {
+                    request_id: req.request_id,
+                },
+            )))
+            .await;
 
         Ok(())
     }

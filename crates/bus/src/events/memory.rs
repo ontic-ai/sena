@@ -54,6 +54,12 @@ impl std::fmt::Debug for MemoryQueryResponse {
     }
 }
 
+/// Emitted after a write to long-term memory completes successfully.
+#[derive(Debug, Clone)]
+pub struct MemoryWriteCompleted {
+    pub request_id: u64,
+}
+
 /// Emitted when ech0 detects a conflict during ingest.
 #[derive(Debug, Clone)]
 pub struct MemoryConflictDetected {
@@ -90,6 +96,7 @@ pub struct MemoryConsolidationCompleted {
 #[derive(Debug, Clone)]
 pub enum MemoryEvent {
     WriteRequested(MemoryWriteRequest),
+    WriteCompleted(MemoryWriteCompleted),
     SemanticIngestRequested(SemanticIngestRequest),
     SemanticIngestComplete(SemanticIngestComplete),
     QueryRequested(MemoryQueryRequest),
