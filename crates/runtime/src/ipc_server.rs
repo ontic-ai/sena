@@ -54,7 +54,13 @@ struct SessionHandle {
 impl IpcServer {
     pub fn new(bus: Arc<EventBus>) -> Self {
         let mut default_states = HashMap::new();
-        for name in &["ctp", "memory_consolidation", "platform_polling", "screen_capture", "speech"] {
+        for name in &[
+            "ctp",
+            "memory_consolidation",
+            "platform_polling",
+            "screen_capture",
+            "speech",
+        ] {
             default_states.insert((*name).to_string(), true);
         }
         Self {
@@ -214,8 +220,7 @@ impl IpcServer {
                 }) = event
                 {
                     {
-                        let mut states =
-                            loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut states = loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
                         states.insert(loop_name.clone(), enabled);
                     }
                     let _ = bus_tx.send(IpcMessage {
@@ -307,8 +312,7 @@ impl IpcServer {
                 }) = event
                 {
                     {
-                        let mut states =
-                            loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut states = loop_states_bus.lock().unwrap_or_else(|e| e.into_inner());
                         states.insert(loop_name.clone(), enabled);
                     }
                     let _ = bus_tx.send(IpcMessage {
@@ -415,8 +419,7 @@ impl IpcServer {
                 }
             }
             IpcPayload::SlashCommand { line } => {
-                let outputs =
-                    dispatch_slash_command(&line, &self.bus, &self.loop_states).await;
+                let outputs = dispatch_slash_command(&line, &self.bus, &self.loop_states).await;
                 for (content, style) in outputs {
                     let _ = tx.send(IpcMessage {
                         id: 0,
@@ -768,8 +771,10 @@ async fn dispatch_slash_command(
                         ("screen_capture", "Screen Capture"),
                         ("speech", "Speech"),
                     ];
-                    let mut lines =
-                        vec![("\u{2501}\u{2501}  Background Loops".to_string(), LineStyle::SystemNotice)];
+                    let mut lines = vec![(
+                        "\u{2501}\u{2501}  Background Loops".to_string(),
+                        LineStyle::SystemNotice,
+                    )];
                     for (name, label) in loop_order {
                         let enabled = states.get(*name).copied().unwrap_or(true);
                         // The dot color is rendered by the CLI sidebar; here we use text status.

@@ -133,7 +133,7 @@ impl SoulActor {
                 let truncate_at = content
                     .char_indices()
                     .map(|(i, _)| i)
-                    .nth(max_chars.saturating_sub(13))  // reserve space for suffix
+                    .nth(max_chars.saturating_sub(13)) // reserve space for suffix
                     .unwrap_or(0);
                 content.truncate(truncate_at);
                 content.push_str("...[truncated]");

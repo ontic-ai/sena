@@ -516,7 +516,10 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut bus_rx = bus.subscribe_broadcast();
 
-        actor.start(bus.clone()).await.expect("actor start should succeed in test");
+        actor
+            .start(bus.clone())
+            .await
+            .expect("actor start should succeed in test");
         let run_handle = tokio::spawn(async move { actor.run().await });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -543,7 +546,10 @@ mod tests {
                 _ => break,
             }
         }
-        assert!(found_disabled, "expected LoopStatusChanged {{ ctp, false }}");
+        assert!(
+            found_disabled,
+            "expected LoopStatusChanged {{ ctp, false }}"
+        );
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await
