@@ -562,3 +562,39 @@ This is a general principle, not a finite checklist. The signal types CTP ingest
 
 In planning and prioritisation, CTP improvements must not be consistently deferred in favor of surface-level features. CTP is the product's core differentiator. A polished CLI with a weak CTP is a chatbot, not an ambient intelligence.
 
+---
+
+## 17. Background Loop Registry
+
+Every Sena background processing loop MUST be registered in the IPC server's loop registry so the CLI can display and toggle it. This is a **mandatory** requirement — unregistered loops are invisible to the user and cannot be controlled.
+
+### 17.1 Loop Registration Rules
+
+- Every background loop in any actor must have a canonical name (lowercase, underscore-separated).
+- Every loop must be registered in `crates/runtime/src/ipc_server.rs` with its name, description, and default enabled state.
+- Every loop must respond to `SystemEvent::LoopControlRequested { loop_name, enabled }` by pausing or resuming accordingly.
+- When a loop's state changes (started or stopped for any reason), the actor must broadcast `SystemEvent::LoopStatusChanged { loop_name, enabled }`.
+- When a new loop is created in any actor, its registration in the IPC server loop registry is NOT optional — it must be added in the same commit.
+
+### 17.2 Current Registered Loops
+
+| Loop name | Actor | Default | Description |
+|---|---|---|---|
+| `ctp` | `CTPActor` | enabled | Continuous thought processing — signal ingestion and proactive inference trigger |
+| `memory_consolidation` | `MemoryActor` | enabled | Periodic memory consolidation — moves working memory to long-term store |
+| `platform_polling` | `PlatformActor` | enabled | Platform signal polling — active window, clipboard, keystroke cadence |
+| `screen_capture` | `PlatformActor` | enabled | Screen capture for vision-capable models — periodic screenshot acquisition |
+| `speech` | `SttActor` / `WakewordActor` | enabled | Speech input loop — wakeword detection and/or continuous STT capture |
+
+### 17.3 CLI Display Contract
+
+The CLI sidebar shows all registered loops with a colored status indicator:
+- Green dot (●) = loop enabled and running
+- Red dot (●) = loop disabled
+
+The `/loops` command lists all loops with their current state.  
+The `/loops <name>` command toggles a single loop by name.  
+The `/loops <name> on|off` command explicitly enables or disables a loop.
+
+New loops added in Phase 7+ must be added to the table in §17.2 AND to the IPC server registry before the implementing PR is closed.
+
