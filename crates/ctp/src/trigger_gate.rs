@@ -80,7 +80,7 @@ impl TriggerGate {
 
         self.last_snapshot = Some(snapshot.clone());
 
-        if diff_trigger && self.last_trigger.is_none() {
+        if diff_trigger {
             self.last_trigger = Some(now);
         }
 
