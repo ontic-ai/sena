@@ -50,7 +50,16 @@ pub enum IpcPayload {
 
     /// Daemon is ready and the session is established.
     /// Carries the schema version so the CLI can detect protocol mismatches.
-    SessionReady { schema_version: u8 },
+    /// Also carries the currently active model name (if one has been loaded).
+    SessionReady {
+        schema_version: u8,
+        #[serde(default)]
+        current_model: Option<String>,
+    },
+
+    /// Daemon → CLI: the active inference model has changed.
+    /// Sent whenever `InferenceEvent::ModelLoaded` fires so the CLI sidebar stays current.
+    ModelStatusUpdate { name: String },
 
     /// Daemon is shutting down — CLI should disconnect cleanly.
     DaemonShutdown,
@@ -259,6 +268,7 @@ mod tests {
             id: 0,
             payload: IpcPayload::SessionReady {
                 schema_version: IPC_SCHEMA_VERSION,
+                current_model: None,
             },
         };
 
@@ -274,12 +284,13 @@ mod tests {
             id: 0,
             payload: IpcPayload::SessionReady {
                 schema_version: IPC_SCHEMA_VERSION,
+                current_model: None,
             },
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: IpcMessage = serde_json::from_str(&json).expect("deserialize");
         match parsed.payload {
-            IpcPayload::SessionReady { schema_version } => {
+            IpcPayload::SessionReady { schema_version, .. } => {
                 assert_eq!(schema_version, IPC_SCHEMA_VERSION);
             }
             _ => panic!("expected SessionReady"),

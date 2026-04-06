@@ -231,6 +231,12 @@ impl IpcServer {
                         },
                     });
                 }
+                if let Event::Inference(InferenceEvent::ModelLoaded { ref name, .. }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -323,6 +329,12 @@ impl IpcServer {
                         },
                     });
                 }
+                if let Event::Inference(InferenceEvent::ModelLoaded { ref name, .. }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -365,10 +377,16 @@ impl IpcServer {
         match msg.payload {
             IpcPayload::Subscribe => {
                 tracing::info!("IPC client subscribed");
+                // Read the preferred model from config so the CLI sidebar shows it immediately.
+                let current_model = crate::config::load_or_create_config()
+                    .await
+                    .ok()
+                    .and_then(|c| c.preferred_model);
                 let _ = tx.send(IpcMessage {
                     id: msg.id,
                     payload: IpcPayload::SessionReady {
                         schema_version: IPC_SCHEMA_VERSION,
+                        current_model,
                     },
                 });
                 // Send initial loop state burst — one LoopStatusUpdate per registered loop.

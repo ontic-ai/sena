@@ -24,3 +24,22 @@ pub use actor::InferenceActor;
 pub use discovery::discover_models;
 pub use error::InferenceError;
 pub use queue::{InferenceQueue, WorkKind};
+
+/// Suppress all llama.cpp log output to prevent TUI terminal corruption.
+///
+/// Call this before entering any full-screen TUI mode. llama.cpp writes
+/// model-load progress and debug info directly to stderr via C callbacks,
+/// which corrupts ratatui's alternate screen buffer. This call installs a
+/// no-op log callback globally, silencing all llama.cpp output permanently
+/// for the lifetime of the process.
+pub fn suppress_llama_logs() {
+    use std::mem::ManuallyDrop;
+
+    use llama_cpp_2::llama_backend::LlamaBackend;
+    // LlamaBackend is a zero-field public struct. We wrap it in ManuallyDrop to
+    // prevent the Drop impl (which resets LLAMA_BACKEND_INITIALIZED) from running,
+    // since we are bypassing init() here. void_logs() only sets a global C callback
+    // and does not read or write any instance state, making this safe.
+    let mut b = ManuallyDrop::new(LlamaBackend {});
+    b.void_logs();
+}

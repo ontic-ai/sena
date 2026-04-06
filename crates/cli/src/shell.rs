@@ -2589,20 +2589,21 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Subscribe failed: {}", e))?;
 
     // Wait for SessionReady from daemon.
-    loop {
+    let initial_model: Option<String> = loop {
         match ipc_client.recv().await {
-            Some(msg) if matches!(msg.payload, IpcPayload::SessionReady { .. }) => {
-                tracing::info!("IPC session established");
-                break;
-            }
             Some(msg) => {
-                tracing::warn!("unexpected IPC message before SessionReady: {:?}", msg);
+                if let IpcPayload::SessionReady { current_model, .. } = msg.payload {
+                    tracing::info!("IPC session established");
+                    break current_model;
+                } else {
+                    tracing::warn!("unexpected IPC message before SessionReady: {:?}", msg);
+                }
             }
             None => {
                 return Err(anyhow::anyhow!("daemon disconnected during handshake"));
             }
         }
-    }
+    };
 
     crate::display::success("Connected to daemon.");
 
@@ -2640,9 +2641,24 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     loop_states.insert("screen_capture".to_string(), true);
     loop_states.insert("speech".to_string(), true);
 
+    // Initialize actor health - all actors assumed Ready if we connected to daemon
+    let mut actor_health: HashMap<&'static str, ActorStatus> = HashMap::new();
+    actor_health.insert("Platform", ActorStatus::Ready);
+    actor_health.insert("Inference", ActorStatus::Ready);
+    actor_health.insert("CTP", ActorStatus::Ready);
+    actor_health.insert("Memory", ActorStatus::Ready);
+    actor_health.insert("Soul", ActorStatus::Ready);
+
+    // Current model name — seeded from SessionReady, updated when ModelLoaded fires
+    let mut current_model: Option<String> = initial_model;
+
+    // Model selector popup state (mirrors standalone Shell behaviour)
+    let mut model_popup: Option<model_selector::ModelSelectorPopup> = None;
+    let mut pending_model_dir_input = false;
+
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
-        // Render the current state (simplified inline rendering).
+        // Render the current state.
         if let Err(e) = terminal.draw(|f| {
             render_ipc_tui(
                 f,
@@ -2652,6 +2668,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                 scroll_offset,
                 ctrl_c_first_press,
                 slash_dropdown.as_ref(),
+                &loop_states,
+                &actor_health,
+                current_model.as_deref(),
+                model_popup.as_ref(),
             )
         }) {
             tracing::error!("TUI render error: {}", e);
@@ -2704,6 +2724,9 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
                                 loop_states.insert(loop_name, enabled);
                                 // Trigger redraw - handled automatically by next render cycle
+                            }
+                            IpcPayload::ModelStatusUpdate { name } => {
+                                current_model = Some(name);
                             }
                             _ => {
                                 tracing::warn!("unexpected IPC payload: {:?}", msg);
@@ -2774,6 +2797,45 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                 break;
                             }
 
+                            // ── Model popup key handlers ──────────────────────────────
+                            (KeyCode::Up, _) if model_popup.is_some() => {
+                                if let Some(popup) = &mut model_popup {
+                                    popup.prev();
+                                }
+                            }
+                            (KeyCode::Down, _) if model_popup.is_some() => {
+                                if let Some(popup) = &mut model_popup {
+                                    popup.next();
+                                }
+                            }
+                            (KeyCode::Enter, _) if model_popup.is_some() => {
+                                if let Some(popup) = model_popup.take() {
+                                    if popup.is_change_dir_selected() {
+                                        pending_model_dir_input = true;
+                                        messages.push(Message::new(
+                                            MessageRole::System,
+                                            "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
+                                        ));
+                                    } else if let Some(selected) = popup.selected() {
+                                        let model_name = selected.name.clone();
+                                        let cmd = format!("/config set preferred_model {}", model_name);
+                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line: cmd }).await;
+                                        messages.push(Message::new(
+                                            MessageRole::System,
+                                            format!("Selected model: {} — change takes effect after daemon restart.", model_name),
+                                        ));
+                                        current_model = Some(model_name);
+                                    }
+                                }
+                            }
+                            (KeyCode::Esc, _) if model_popup.is_some() => {
+                                model_popup = None;
+                                messages.push(Message::new(
+                                    MessageRole::System,
+                                    "Model selection cancelled.".to_string(),
+                                ));
+                            }
+
                             // ── Slash Dropdown Key Handlers ───────────────────────────
                             (KeyCode::Up, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
                                 if let Some(dd) = &mut slash_dropdown {
@@ -2823,8 +2885,53 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                 if !line.is_empty() {
                                     editor.push_history(&line);
 
-                                    // Dispatch via IPC
-                                    if line.starts_with('/') {
+                                    // Handle pending model directory input
+                                    if pending_model_dir_input {
+                                        pending_model_dir_input = false;
+                                        if line.is_empty() {
+                                            messages.push(Message::new(
+                                                MessageRole::System,
+                                                "Model directory change cancelled.".to_string(),
+                                            ));
+                                        } else {
+                                            let path = std::path::PathBuf::from(&line);
+                                            match model_selector::discover_models_at(&path) {
+                                                Ok(models) if !models.is_empty() => {
+                                                    model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                }
+                                                Ok(_) => {
+                                                    messages.push(Message::new(
+                                                        MessageRole::Warning,
+                                                        format!("No models found in: {}", line),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    messages.push(Message::new(
+                                                        MessageRole::Warning,
+                                                        format!("Model discovery failed: {}", e),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    } else if line == "/models" {
+                                        // Handle /models locally — open interactive popup
+                                        let models_dir = runtime::ollama_models_dir().ok();
+                                        match models_dir
+                                            .as_deref()
+                                            .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
+                                            .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
+                                        {
+                                            Ok(models) => {
+                                                model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                            }
+                                            Err(e) => {
+                                                messages.push(Message::new(
+                                                    MessageRole::Warning,
+                                                    format!("Model discovery failed: {}", e),
+                                                ));
+                                            }
+                                        }
+                                    } else if line.starts_with('/') {
                                         // Slash command
                                         if line == "/close" || line == "/quit" {
                                             break;
@@ -2929,6 +3036,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 }
 
 /// Simplified TUI rendering for IPC mode.
+#[allow(clippy::too_many_arguments)]
 fn render_ipc_tui(
     frame: &mut ratatui::Frame,
     messages: &[Message],
@@ -2937,16 +3045,26 @@ fn render_ipc_tui(
     scroll_offset: usize,
     ctrl_c_first_press: Option<Instant>,
     slash_dropdown: Option<&SlashDropdown>,
+    loop_states: &HashMap<String, bool>,
+    actor_health: &HashMap<&'static str, ActorStatus>,
+    current_model: Option<&str>,
+    model_popup: Option<&model_selector::ModelSelectorPopup>,
 ) {
     // ── Vertical layout: header / body / input ────────────────────────────────
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header bar
-            Constraint::Min(1),    // Body area (conversation only in IPC mode)
+            Constraint::Min(1),    // Body area
             Constraint::Length(5), // Input area
         ])
         .split(frame.area());
+
+    // ── Body: conversation (60%) + sidebar (40%) ──────────────────────────────
+    let body_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(main_chunks[1]);
 
     // Header
     let elapsed = stats.elapsed_formatted();
@@ -2958,7 +3076,7 @@ fn render_ipc_tui(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  \u{2014}  IPC mode  \u{2014}  daemon-connected",
+            "  \u{2014}  local-first ambient AI  \u{2014}  daemon-connected",
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw("    "),
@@ -3020,7 +3138,7 @@ fn render_ipc_tui(
     }
 
     let total_lines = lines.len();
-    let inner_height = main_chunks[1].height.saturating_sub(2) as usize; // subtract borders
+    let inner_height = body_chunks[0].height.saturating_sub(2) as usize; // subtract borders
     let scroll = if scroll_offset == 0 {
         total_lines.saturating_sub(inner_height)
     } else {
@@ -3040,7 +3158,10 @@ fn render_ipc_tui(
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, main_chunks[1]);
+    frame.render_widget(paragraph, body_chunks[0]);
+
+    // ── Sidebar ───────────────────────────────────────────────────────────────────
+    render_ipc_sidebar(frame, body_chunks[1], loop_states, actor_health, current_model, stats);
 
     // Input area
     let prompt_line = Line::from(vec![
@@ -3098,10 +3219,132 @@ fn render_ipc_tui(
 
     // Slash dropdown overlay
     if let Some(dd) = slash_dropdown {
-        if !dd.is_empty() {
+        if !dd.is_empty() && model_popup.is_none() {
             render_slash_dropdown_overlay(frame, dd, main_chunks[2]);
         }
     }
+
+    // Model selector popup overlay
+    if let Some(popup) = model_popup {
+        model_selector::render_popup(popup, frame);
+    }
+}
+
+/// Render the status sidebar for IPC mode — same layout as Shell::render_sidebar().
+fn render_ipc_sidebar(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    loop_states: &HashMap<String, bool>,
+    actor_health: &HashMap<&'static str, ActorStatus>,
+    current_model: Option<&str>,
+    stats: &SessionStats,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── Model ─────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        " Model",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let model = current_model.unwrap_or("(selecting...)");
+    let inner_w = area.width.saturating_sub(4) as usize;
+    let display_model = if model.len() > inner_w {
+        &model[..inner_w]
+    } else {
+        model
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  {}", display_model),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+
+    // ── Session stats ─────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        " Session",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            stats.messages_sent.to_string(),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(" messages  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            stats.tokens_received.to_string(),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(" tokens", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(""));
+
+    // ── Actors ────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        " Actors",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
+    for name in &actor_names {
+        let status = actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let (dot, color, label) = match status {
+            ActorStatus::Ready => ("\u{25cf}", Color::Green, "Ready"),
+            ActorStatus::Starting => ("\u{25cb}", Color::Yellow, "Starting"),
+            ActorStatus::Failed(_) => ("\u{00d7}", Color::Red, "Failed"),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", dot), Style::default().fg(color)),
+            Span::styled(format!("{:<10}", name), Style::default().fg(Color::White)),
+            Span::styled(label, Style::default().fg(color)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    // ── Loops ─────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        " Loops",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let loop_order = [
+        ("ctp", "CTP"),
+        ("memory_consolidation", "Memory Consolidation"),
+        ("platform_polling", "Platform Polling"),
+        ("screen_capture", "Screen Capture"),
+        ("speech", "Speech"),
+    ];
+    for (loop_name, display_name) in &loop_order {
+        let enabled = loop_states.get(*loop_name).copied().unwrap_or(true);
+        let color = if enabled { Color::Green } else { Color::Red };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} ", "\u{25cf}"),
+                Style::default().fg(color),
+            ),
+            Span::styled(*display_name, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Span::styled(
+            " Status ",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let paragraph = Paragraph::new(Text::from(lines)).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 /// Render the slash command autocomplete dropdown for IPC mode.

@@ -125,6 +125,11 @@ async fn main() -> Result<()> {
         Some("query") => query::run_from_args(&args).await,
         Some("models") => model_selector::run().await,
         Some("cli") | Some("interactive") => {
+            // Suppress llama.cpp's direct-to-stderr logs before any TUI rendering.
+            // Model loading happens asynchronously after the TUI starts and would
+            // otherwise corrupt ratatui's alternate screen buffer.
+            runtime::suppress_llama_logs();
+
             // Phase 6: CLI connects to running daemon over IPC.
             // If daemon is not running, auto-start it and shut it down on exit.
             let cli_started_daemon = if !runtime::is_daemon_running() {
@@ -134,17 +139,20 @@ async fn main() -> Result<()> {
                         tracing::error!("auto-started daemon exited with error: {}", e);
                     }
                 });
-                // Poll until the daemon is ready (max 5 seconds).
+                // Poll until the IPC server is ready (max 30 seconds to allow full boot).
+                // We poll IpcClient::connect() directly — the IPC server starts at boot
+                // Step 13, well after the single-instance lock (Step 0), so checking
+                // is_daemon_running() would be a false-positive readiness signal.
                 let mut ready = false;
-                for _ in 0..50 {
+                for _ in 0..300 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    if runtime::is_daemon_running() {
+                    if ipc_client::IpcClient::connect().await.is_ok() {
                         ready = true;
                         break;
                     }
                 }
                 if !ready {
-                    eprintln!("Sena daemon failed to start within 5 seconds.");
+                    eprintln!("Sena daemon IPC server failed to become ready within 30 seconds.");
                     pause_before_exit();
                     std::process::exit(1);
                 }
