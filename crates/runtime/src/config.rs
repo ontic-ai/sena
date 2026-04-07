@@ -235,6 +235,12 @@ pub struct SenaConfig {
     ///          [".git", "node_modules"] elsewhere.
     #[serde(default = "default_file_watch_exclude_patterns")]
     pub file_watch_exclude_patterns: Vec<String>,
+
+    /// Path to the embedding model GGUF file (nomic-embed-text-v1.5 Q4_K_M quantization or compatible).
+    /// When None, Sena auto-resolves to `<config_dir>/models/nomic-embed-text-v1.5.Q4_K_M.gguf`
+    /// and auto-downloads on first boot if the file is not present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_model_path: Option<PathBuf>,
 }
 
 /// Configuration for the streaming inference pipeline.
@@ -303,6 +309,7 @@ impl Default for SenaConfig {
             keystroke_burst_threshold_epm: default_keystroke_burst_threshold_epm(),
             vision_frame_max_age_secs: default_vision_frame_max_age_secs(),
             file_watch_exclude_patterns: default_file_watch_exclude_patterns(),
+            embed_model_path: None,
         }
     }
 }
@@ -594,6 +601,14 @@ pub async fn apply_config_set(key: &str, value: &str) -> Result<(), String> {
                 None
             } else {
                 Some(value.to_string())
+            };
+            Ok(())
+        }
+        "embed_model_path" => {
+            config.embed_model_path = if value.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(value))
             };
             Ok(())
         }
