@@ -2862,8 +2862,25 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                     slash_dropdown = None;
                                     editor.push_history(&line);
 
-                                    // Dispatch via IPC
-                                    if line.starts_with('/') {
+                                    if line == "/models" {
+                                        // Handle /models locally even when selected from dropdown
+                                        let models_dir = runtime::ollama_models_dir().ok();
+                                        match models_dir
+                                            .as_deref()
+                                            .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
+                                            .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
+                                        {
+                                            Ok(models) => {
+                                                model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                            }
+                                            Err(e) => {
+                                                messages.push(Message::new(
+                                                    MessageRole::Warning,
+                                                    format!("Model discovery failed: {}", e),
+                                                ));
+                                            }
+                                        }
+                                    } else if line.starts_with('/') {
                                         let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
                                     } else {
                                         messages.push(Message::new(MessageRole::User, line.clone()));
