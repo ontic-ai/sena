@@ -11,6 +11,7 @@
 //! events back to subscribed clients.
 
 use bus::events::inference::{InferenceEvent, Priority};
+use bus::events::speech::SpeechEvent;
 use bus::events::system::SystemEvent;
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::ipc::{IpcMessage, IpcPayload, LineStyle, IPC_SCHEMA_VERSION};
@@ -681,10 +682,54 @@ async fn dispatch_slash_command(
             Err(e) => vec![(format!("Failed to load config: {}", e), LineStyle::Error)],
         },
         "/listen" => {
-            vec![(
-                "Live transcription (/listen) not yet implemented in IPC mode.".to_string(),
-                LineStyle::SystemNotice,
-            )]
+            // Subcommand format (sent by CLI): "/listen start <session_id>" or "/listen stop <session_id>"
+            match parts.get(1).copied() {
+                Some("start") => {
+                    let session_id: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    if let Err(e) = bus
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
+                            session_id,
+                        }))
+                        .await
+                    {
+                        vec![(
+                            format!("Failed to start listen mode: {}", e),
+                            LineStyle::Error,
+                        )]
+                    } else {
+                        vec![(
+                            "\u{1f3a4} Listen mode started — type /listen again to stop."
+                                .to_string(),
+                            LineStyle::SystemNotice,
+                        )]
+                    }
+                }
+                Some("stop") => {
+                    let session_id: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    if let Err(e) = bus
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
+                            session_id,
+                        }))
+                        .await
+                    {
+                        vec![(
+                            format!("Failed to stop listen mode: {}", e),
+                            LineStyle::Error,
+                        )]
+                    } else {
+                        vec![(
+                            "\u{1f3a4} Stopping listen mode...".to_string(),
+                            LineStyle::SystemNotice,
+                        )]
+                    }
+                }
+                _ => {
+                    vec![(
+                        "Usage: /listen (toggled by CLI — use /listen from the TUI).".to_string(),
+                        LineStyle::SystemNotice,
+                    )]
+                }
+            }
         }
         "/microphone" => {
             vec![(
@@ -936,6 +981,39 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
             // Only show in verbose mode (CLI-managed state).
             None
         }
+        Event::Speech(SpeechEvent::ListenModeTranscription {
+            text,
+            is_final,
+            confidence,
+            ..
+        }) => {
+            if *is_final {
+                Some(IpcMessage {
+                    id: 0,
+                    payload: IpcPayload::DisplayLine {
+                        content: text.clone(),
+                        style: LineStyle::Inference,
+                    },
+                })
+            } else if *confidence >= 0.4 {
+                Some(IpcMessage {
+                    id: 0,
+                    payload: IpcPayload::DisplayLine {
+                        content: format!("[\u{2026}] {}", text),
+                        style: LineStyle::Dimmed,
+                    },
+                })
+            } else {
+                None
+            }
+        }
+        Event::Speech(SpeechEvent::ListenModeStopped { .. }) => Some(IpcMessage {
+            id: 0,
+            payload: IpcPayload::DisplayLine {
+                content: "\u{1f3a4} Listen mode stopped.".to_string(),
+                style: LineStyle::SystemNotice,
+            },
+        }),
         Event::System(SystemEvent::ConfigReloaded) => Some(IpcMessage {
             id: 0,
             payload: IpcPayload::DisplayLine {

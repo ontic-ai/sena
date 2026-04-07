@@ -2644,8 +2644,16 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     let mut model_popup: Option<model_selector::ModelSelectorPopup> = None;
     let mut pending_model_dir_input = false;
 
+    // ── Inference and listen state ────────────────────────────────────────────
+    // True while we're waiting for an inference response from the daemon.
+    let mut waiting_for_inference = false;
+    // True while continuous listen mode is active in this CLI session.
+    let mut listen_mode_active = false;
+    // Session ID for the currently active listen session (0 when inactive).
+    let mut listen_session_id: u64 = 0;
+
     // ── Main event loop ───────────────────────────────────────────────────────
-    loop {
+    'main: loop {
         // Render the current state.
         if let Err(e) = terminal.draw(|f| {
             render_ipc_tui(
@@ -2660,6 +2668,8 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                 &actor_health,
                 current_model.as_deref(),
                 model_popup.as_ref(),
+                waiting_for_inference,
+                listen_mode_active,
             )
         }) {
             tracing::error!("TUI render error: {}", e);
@@ -2681,6 +2691,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                     Some(msg) => {
                         match msg.payload {
                             IpcPayload::DisplayLine { content, style } => {
+                                // Clear thinking state when inference response arrives.
+                                if matches!(style, LineStyle::Inference) {
+                                    waiting_for_inference = false;
+                                }
                                 let role = match style {
                                     LineStyle::Error => MessageRole::Warning,
                                     LineStyle::CtpThought => MessageRole::Warning,
@@ -2698,7 +2712,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                     "Daemon is shutting down — CLI will exit.".to_string(),
                                 ));
                                 tokio::time::sleep(Duration::from_secs(2)).await;
-                                break;
+                                break 'main;
                             }
                             IpcPayload::Pong => {
                                 // Keepalive — ignore
@@ -2707,11 +2721,12 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                 // Command acknowledged — ignore
                             }
                             IpcPayload::Error { reason, .. } => {
+                                // An IPC error clears the thinking state.
+                                waiting_for_inference = false;
                                 messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
                             }
                             IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
                                 loop_states.insert(loop_name, enabled);
-                                // Trigger redraw - handled automatically by next render cycle
                             }
                             IpcPayload::ModelStatusUpdate { name } => {
                                 current_model = Some(name);
@@ -2727,188 +2742,132 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             "Daemon disconnected.".to_string(),
                         ));
                         tokio::time::sleep(Duration::from_secs(2)).await;
-                        break;
+                        break 'main;
                     }
                 }
             }
 
-            // Keyboard events (poll in a non-blocking way)
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                // Poll for crossterm events
-                let poll_result = event::poll(Duration::from_millis(0));
-                match poll_result {
-                    Ok(true) => {},
-                    Ok(false) => continue,
-                    Err(e) => {
-                        tracing::error!("Poll error: {}", e);
-                        continue;
+            // Keyboard tick — 16 ms (~60 fps). Drain ALL queued key events each tick
+            // so rapid typing is processed without lag.
+            _ = tokio::time::sleep(Duration::from_millis(16)) => {
+                loop {
+                    match event::poll(Duration::from_millis(0)) {
+                        Ok(false) | Err(_) => break,
+                        Ok(true) => {}
                     }
-                }
 
-                match event::read() {
-                    Err(e) => {
-                        tracing::error!("Input error: {}", e);
-                        continue;
-                    }
-                    Ok(event::Event::Mouse(mouse)) => {
-                        match mouse.kind {
-                            event::MouseEventKind::ScrollUp => {
-                                scroll_offset = scroll_offset.saturating_add(3);
-                            }
-                            event::MouseEventKind::ScrollDown => {
-                                scroll_offset = scroll_offset.saturating_sub(3);
-                            }
-                            _ => {}
+                    match event::read() {
+                        Err(e) => {
+                            tracing::error!("Input error: {}", e);
+                            break;
                         }
-                    }
-
-                    Ok(event::Event::Key(key)) => {
-                        // Filter out key release events (Windows)
-                        if key.kind != KeyEventKind::Press {
-                            continue;
+                        Ok(event::Event::Mouse(mouse)) => {
+                            match mouse.kind {
+                                event::MouseEventKind::ScrollUp => {
+                                    scroll_offset = scroll_offset.saturating_add(3);
+                                }
+                                event::MouseEventKind::ScrollDown => {
+                                    scroll_offset = scroll_offset.saturating_sub(3);
+                                }
+                                _ => {}
+                            }
                         }
 
-                        match (key.code, key.modifiers) {
-                            // Ctrl+C
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                if let Some(first_press) = ctrl_c_first_press {
-                                    if first_press.elapsed() < Duration::from_secs(3) {
-                                        break;
-                                    }
-                                } else {
-                                    ctrl_c_first_press = Some(Instant::now());
-                                }
+                        Ok(event::Event::Key(key)) => {
+                            // Filter out key release events (Windows)
+                            if key.kind != KeyEventKind::Press {
+                                continue;
                             }
 
-                            // Ctrl+D
-                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                break;
-                            }
-
-                            // ── Model popup key handlers ──────────────────────────────
-                            (KeyCode::Up, _) if model_popup.is_some() => {
-                                if let Some(popup) = &mut model_popup {
-                                    popup.prev();
-                                }
-                            }
-                            (KeyCode::Down, _) if model_popup.is_some() => {
-                                if let Some(popup) = &mut model_popup {
-                                    popup.next();
-                                }
-                            }
-                            (KeyCode::Enter, _) if model_popup.is_some() => {
-                                if let Some(popup) = model_popup.take() {
-                                    if popup.is_change_dir_selected() {
-                                        pending_model_dir_input = true;
-                                        messages.push(Message::new(
-                                            MessageRole::System,
-                                            "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
-                                        ));
-                                    } else if let Some(selected) = popup.selected() {
-                                        let model_name = selected.name.clone();
-                                        let cmd = format!("/config set preferred_model {}", model_name);
-                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line: cmd }).await;
-                                        messages.push(Message::new(
-                                            MessageRole::System,
-                                            format!("Selected model: {} — change takes effect after daemon restart.", model_name),
-                                        ));
-                                        current_model = Some(model_name);
-                                    }
-                                }
-                            }
-                            (KeyCode::Esc, _) if model_popup.is_some() => {
-                                model_popup = None;
-                                messages.push(Message::new(
-                                    MessageRole::System,
-                                    "Model selection cancelled.".to_string(),
-                                ));
-                            }
-
-                            // ── Slash Dropdown Key Handlers ───────────────────────────
-                            (KeyCode::Up, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut slash_dropdown {
-                                    dd.prev();
-                                }
-                            }
-                            (KeyCode::Down, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut slash_dropdown {
-                                    dd.next();
-                                }
-                            }
-                            (KeyCode::Tab, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                // Complete the command into the input
-                                if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                    editor.input = cmd.to_string();
-                                    slash_dropdown = None;
-                                }
-                            }
-                            (KeyCode::Enter, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                // Complete and immediately submit
-                                if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                    let line = cmd.to_string();
-                                    editor.input.clear();
-                                    slash_dropdown = None;
-                                    editor.push_history(&line);
-
-                                    if line == "/models" {
-                                        // Handle /models locally even when selected from dropdown
-                                        let models_dir = runtime::ollama_models_dir().ok();
-                                        match models_dir
-                                            .as_deref()
-                                            .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
-                                            .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
-                                        {
-                                            Ok(models) => {
-                                                model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                            }
-                                            Err(e) => {
-                                                messages.push(Message::new(
-                                                    MessageRole::Warning,
-                                                    format!("Model discovery failed: {}", e),
-                                                ));
-                                            }
+                            match (key.code, key.modifiers) {
+                                // Ctrl+C
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                    if let Some(first_press) = ctrl_c_first_press {
+                                        if first_press.elapsed() < Duration::from_secs(3) {
+                                            break 'main;
                                         }
-                                    } else if line.starts_with('/') {
-                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
                                     } else {
-                                        messages.push(Message::new(MessageRole::User, line.clone()));
-                                        let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                        stats.messages_sent += 1;
+                                        ctrl_c_first_press = Some(Instant::now());
                                     }
                                 }
-                            }
-                            (KeyCode::Esc, _) if slash_dropdown.is_some() => {
-                                slash_dropdown = None;
-                            }
 
-                            // ── Normal Key Handlers ───────────────────────────────────
-                            // Enter — submit line
-                            (KeyCode::Enter, _) => {
-                                let line = editor.input.trim().to_string();
-                                editor.input.clear();
-                                slash_dropdown = None;
-                                if !line.is_empty() {
-                                    editor.push_history(&line);
+                                // Ctrl+D
+                                (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                                    break 'main;
+                                }
 
-                                    // Handle pending model directory input
-                                    if pending_model_dir_input {
-                                        pending_model_dir_input = false;
-                                        if line.is_empty() {
+                                // ── Model popup key handlers ──────────────────────────────
+                                (KeyCode::Up, _) if model_popup.is_some() => {
+                                    if let Some(popup) = &mut model_popup {
+                                        popup.prev();
+                                    }
+                                }
+                                (KeyCode::Down, _) if model_popup.is_some() => {
+                                    if let Some(popup) = &mut model_popup {
+                                        popup.next();
+                                    }
+                                }
+                                (KeyCode::Enter, _) if model_popup.is_some() => {
+                                    if let Some(popup) = model_popup.take() {
+                                        if popup.is_change_dir_selected() {
+                                            pending_model_dir_input = true;
                                             messages.push(Message::new(
                                                 MessageRole::System,
-                                                "Model directory change cancelled.".to_string(),
+                                                "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
                                             ));
-                                        } else {
-                                            let path = std::path::PathBuf::from(&line);
-                                            match model_selector::discover_models_at(&path) {
-                                                Ok(models) if !models.is_empty() => {
+                                        } else if let Some(selected) = popup.selected() {
+                                            let model_name = selected.name.clone();
+                                            let cmd = format!("/config set preferred_model {}", model_name);
+                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line: cmd }).await;
+                                            messages.push(Message::new(
+                                                MessageRole::System,
+                                                format!("Selected model: {} — change takes effect after daemon restart.", model_name),
+                                            ));
+                                            current_model = Some(model_name);
+                                        }
+                                    }
+                                }
+                                (KeyCode::Esc, _) if model_popup.is_some() => {
+                                    model_popup = None;
+                                    messages.push(Message::new(
+                                        MessageRole::System,
+                                        "Model selection cancelled.".to_string(),
+                                    ));
+                                }
+
+                                // ── Slash Dropdown Key Handlers ───────────────────────────
+                                (KeyCode::Up, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut slash_dropdown {
+                                        dd.prev();
+                                    }
+                                }
+                                (KeyCode::Down, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut slash_dropdown {
+                                        dd.next();
+                                    }
+                                }
+                                (KeyCode::Tab, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                        editor.input = cmd.to_string();
+                                        slash_dropdown = None;
+                                    }
+                                }
+                                (KeyCode::Enter, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                        let line = cmd.to_string();
+                                        editor.input.clear();
+                                        slash_dropdown = None;
+                                        editor.push_history(&line);
+
+                                        if line == "/models" {
+                                            let models_dir = runtime::ollama_models_dir().ok();
+                                            match models_dir
+                                                .as_deref()
+                                                .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
+                                                .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
+                                            {
+                                                Ok(models) => {
                                                     model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                                }
-                                                Ok(_) => {
-                                                    messages.push(Message::new(
-                                                        MessageRole::Warning,
-                                                        format!("No models found in: {}", line),
-                                                    ));
                                                 }
                                                 Err(e) => {
                                                     messages.push(Message::new(
@@ -2917,119 +2876,181 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                                     ));
                                                 }
                                             }
+                                        } else if line == "/listen" {
+                                            handle_listen_toggle_ipc(
+                                                &mut ipc_client,
+                                                &mut listen_mode_active,
+                                                &mut listen_session_id,
+                                                &mut messages,
+                                            ).await;
+                                        } else if line == "/close" || line == "/quit" {
+                                            break 'main;
+                                        } else if line.starts_with('/') {
+                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
+                                        } else {
+                                            messages.push(Message::new(MessageRole::User, line.clone()));
+                                            let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
+                                            waiting_for_inference = true;
+                                            stats.messages_sent += 1;
                                         }
-                                    } else if line == "/models" {
-                                        // Handle /models locally — open interactive popup
-                                        let models_dir = runtime::ollama_models_dir().ok();
-                                        match models_dir
-                                            .as_deref()
-                                            .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
-                                            .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
-                                        {
-                                            Ok(models) => {
-                                                model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                            }
-                                            Err(e) => {
+                                    }
+                                }
+                                (KeyCode::Esc, _) if slash_dropdown.is_some() => {
+                                    slash_dropdown = None;
+                                }
+
+                                // ── Normal Key Handlers ───────────────────────────────────
+                                // Enter — submit line
+                                (KeyCode::Enter, _) => {
+                                    let line = editor.input.trim().to_string();
+                                    editor.input.clear();
+                                    slash_dropdown = None;
+                                    if !line.is_empty() {
+                                        editor.push_history(&line);
+
+                                        if pending_model_dir_input {
+                                            pending_model_dir_input = false;
+                                            if line.is_empty() {
                                                 messages.push(Message::new(
-                                                    MessageRole::Warning,
-                                                    format!("Model discovery failed: {}", e),
+                                                    MessageRole::System,
+                                                    "Model directory change cancelled.".to_string(),
                                                 ));
+                                            } else {
+                                                let path = std::path::PathBuf::from(&line);
+                                                match model_selector::discover_models_at(&path) {
+                                                    Ok(models) if !models.is_empty() => {
+                                                        model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                    }
+                                                    Ok(_) => {
+                                                        messages.push(Message::new(
+                                                            MessageRole::Warning,
+                                                            format!("No models found in: {}", line),
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        messages.push(Message::new(
+                                                            MessageRole::Warning,
+                                                            format!("Model discovery failed: {}", e),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        } else if line == "/models" {
+                                            let models_dir = runtime::ollama_models_dir().ok();
+                                            match models_dir
+                                                .as_deref()
+                                                .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
+                                                .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
+                                            {
+                                                Ok(models) => {
+                                                    model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                }
+                                                Err(e) => {
+                                                    messages.push(Message::new(
+                                                        MessageRole::Warning,
+                                                        format!("Model discovery failed: {}", e),
+                                                    ));
+                                                }
+                                            }
+                                        } else if line == "/listen" {
+                                            handle_listen_toggle_ipc(
+                                                &mut ipc_client,
+                                                &mut listen_mode_active,
+                                                &mut listen_session_id,
+                                                &mut messages,
+                                            ).await;
+                                        } else if line.starts_with('/') {
+                                            if line == "/close" || line == "/quit" {
+                                                break 'main;
+                                            }
+                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
+                                        } else {
+                                            // Chat message
+                                            messages.push(Message::new(MessageRole::User, line.clone()));
+                                            let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
+                                            waiting_for_inference = true;
+                                            stats.messages_sent += 1;
+                                        }
+                                    }
+                                }
+
+                                // Backspace
+                                (KeyCode::Backspace, _) => {
+                                    editor.input.pop();
+                                    if editor.input.starts_with('/') {
+                                        if let Some(dd) = &mut slash_dropdown {
+                                            dd.update(&editor.input);
+                                            if dd.is_empty() {
+                                                slash_dropdown = None;
+                                            }
+                                        } else {
+                                            let dd = SlashDropdown::from_prefix(&editor.input);
+                                            if !dd.is_empty() {
+                                                slash_dropdown = Some(dd);
                                             }
                                         }
-                                    } else if line.starts_with('/') {
-                                        // Slash command
-                                        if line == "/close" || line == "/quit" {
-                                            break;
-                                        }
-                                        let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
                                     } else {
-                                        // Chat message
-                                        messages.push(Message::new(MessageRole::User, line.clone()));
-                                        let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                        stats.messages_sent += 1;
+                                        slash_dropdown = None;
                                     }
                                 }
-                            }
 
-                            // Backspace
-                            (KeyCode::Backspace, _) => {
-                                editor.input.pop();
-                                // Update slash dropdown after backspace
-                                if editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut slash_dropdown {
-                                        dd.update(&editor.input);
-                                        if dd.is_empty() {
-                                            slash_dropdown = None;
-                                        }
-                                    } else {
-                                        let dd = SlashDropdown::from_prefix(&editor.input);
-                                        if !dd.is_empty() {
-                                            slash_dropdown = Some(dd);
-                                        }
-                                    }
-                                } else {
+                                // Arrow Up — history prev
+                                (KeyCode::Up, _) if slash_dropdown.is_none() => {
+                                    editor.history_prev();
+                                }
+
+                                // Arrow Down — history next
+                                (KeyCode::Down, _) if slash_dropdown.is_none() => {
+                                    editor.history_next();
+                                }
+
+                                // Page Up — scroll up
+                                (KeyCode::PageUp, _) => {
+                                    scroll_offset = scroll_offset.saturating_add(10);
+                                }
+
+                                // Page Down — scroll down
+                                (KeyCode::PageDown, _) => {
+                                    scroll_offset = scroll_offset.saturating_sub(10);
+                                }
+
+                                // Escape — clear input and close dropdown
+                                (KeyCode::Esc, _) => {
+                                    editor.input.clear();
                                     slash_dropdown = None;
                                 }
-                            }
 
-                            // Arrow Up — history prev
-                            (KeyCode::Up, _) if slash_dropdown.is_none() => {
-                                editor.history_prev();
-                            }
-
-                            // Arrow Down — history next
-                            (KeyCode::Down, _) if slash_dropdown.is_none() => {
-                                editor.history_next();
-                            }
-
-                            // Page Up — scroll up
-                            (KeyCode::PageUp, _) => {
-                                scroll_offset = scroll_offset.saturating_add(10);
-                            }
-
-                            // Page Down — scroll down
-                            (KeyCode::PageDown, _) => {
-                                scroll_offset = scroll_offset.saturating_sub(10);
-                            }
-
-                            // Escape — clear input and close dropdown
-                            (KeyCode::Esc, _) => {
-                                editor.input.clear();
-                                slash_dropdown = None;
-                            }
-
-                            // Regular character
-                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                                editor.input.push(c);
-                                // Reset Ctrl+C first press if user is typing
-                                ctrl_c_first_press = None;
-                                // Update slash dropdown on every character typed
-                                if editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut slash_dropdown {
-                                        dd.update(&editor.input);
-                                        if dd.is_empty() {
-                                            slash_dropdown = None;
+                                // Regular character
+                                (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                                    editor.input.push(c);
+                                    ctrl_c_first_press = None;
+                                    if editor.input.starts_with('/') {
+                                        if let Some(dd) = &mut slash_dropdown {
+                                            dd.update(&editor.input);
+                                            if dd.is_empty() {
+                                                slash_dropdown = None;
+                                            }
+                                        } else {
+                                            let dd = SlashDropdown::from_prefix(&editor.input);
+                                            if !dd.is_empty() {
+                                                slash_dropdown = Some(dd);
+                                            }
                                         }
                                     } else {
-                                        let dd = SlashDropdown::from_prefix(&editor.input);
-                                        if !dd.is_empty() {
-                                            slash_dropdown = Some(dd);
-                                        }
+                                        slash_dropdown = None;
                                     }
-                                } else {
-                                    slash_dropdown = None;
                                 }
+
+                                _ => {}
                             }
+                        } // end event::Event::Key
 
-                            _ => {}
-                        }
-                    } // end event::Event::Key
-
-                    _ => {} // resize, focus, paste — ignore
-                }
+                        _ => {} // resize, focus, paste — ignore
+                    }
+                } // end keyboard drain loop
             }
         }
-    }
+    } // end 'main loop
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
     drop(_guard); // Restore terminal
@@ -3038,6 +3059,58 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     display::print_session_summary(&stats);
 
     Ok(())
+}
+
+/// Toggle listen mode in IPC shell: sends the appropriate `/listen start|stop` slash command
+/// to the daemon and updates the local tracking state.
+async fn handle_listen_toggle_ipc(
+    ipc_client: &mut crate::ipc_client::IpcClient,
+    listen_mode_active: &mut bool,
+    listen_session_id: &mut u64,
+    messages: &mut Vec<Message>,
+) {
+    if *listen_mode_active {
+        // Already active — stop it.
+        *listen_mode_active = false;
+        let stop_cmd = format!("/listen stop {}", *listen_session_id);
+        if let Err(e) = ipc_client
+            .send(bus::IpcPayload::SlashCommand { line: stop_cmd })
+            .await
+        {
+            messages.push(Message::new(
+                MessageRole::Warning,
+                format!("[listen] Failed to send stop: {}", e),
+            ));
+        } else {
+            messages.push(Message::new(
+                MessageRole::System,
+                "\u{1f3a4} Stopping listen mode...".to_string(),
+            ));
+        }
+    } else {
+        // Start a new session.
+        *listen_session_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1);
+        *listen_mode_active = true;
+        let start_cmd = format!("/listen start {}", *listen_session_id);
+        if let Err(e) = ipc_client
+            .send(bus::IpcPayload::SlashCommand { line: start_cmd })
+            .await
+        {
+            *listen_mode_active = false;
+            messages.push(Message::new(
+                MessageRole::Warning,
+                format!("[listen] Failed to start: {}", e),
+            ));
+        } else {
+            messages.push(Message::new(
+                MessageRole::System,
+                "\u{1f3a4} Listen mode started — type /listen again to stop.".to_string(),
+            ));
+        }
+    }
 }
 
 /// Simplified TUI rendering for IPC mode.
@@ -3054,6 +3127,8 @@ fn render_ipc_tui(
     actor_health: &HashMap<&'static str, ActorStatus>,
     current_model: Option<&str>,
     model_popup: Option<&model_selector::ModelSelectorPopup>,
+    waiting_for_inference: bool,
+    listen_mode_active: bool,
 ) {
     // ── Vertical layout: header / body / input ────────────────────────────────
     let main_chunks = Layout::default()
@@ -3196,17 +3271,31 @@ fn render_ipc_tui(
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ))
-        } else {
+        } else if waiting_for_inference {
             Line::from(Span::styled(
-                " Ready (IPC)",
-                Style::default().fg(Color::DarkGray),
+                " \u{22ef} Thinking...",
+                Style::default().fg(Color::Yellow),
             ))
+        } else if listen_mode_active {
+            Line::from(Span::styled(
+                " \u{1f3a4} Listening... (type /listen to stop)",
+                Style::default().fg(Color::Green),
+            ))
+        } else {
+            Line::from(Span::styled(" Ready", Style::default().fg(Color::DarkGray)))
         }
-    } else {
+    } else if waiting_for_inference {
         Line::from(Span::styled(
-            " Ready (IPC)",
-            Style::default().fg(Color::DarkGray),
+            " \u{22ef} Thinking...",
+            Style::default().fg(Color::Yellow),
         ))
+    } else if listen_mode_active {
+        Line::from(Span::styled(
+            " \u{1f3a4} Listening... (type /listen to stop)",
+            Style::default().fg(Color::Green),
+        ))
+    } else {
+        Line::from(Span::styled(" Ready", Style::default().fg(Color::DarkGray)))
     };
 
     let hints_line = Line::from(Span::styled(
@@ -3216,13 +3305,21 @@ fn render_ipc_tui(
             .add_modifier(Modifier::DIM),
     ));
 
+    let input_border_color = if waiting_for_inference {
+        Color::Yellow
+    } else if listen_mode_active {
+        Color::Green
+    } else {
+        Color::Magenta
+    };
+
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(Style::default().fg(input_border_color))
         .title(Span::styled(
             " Input ",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(input_border_color)
                 .add_modifier(Modifier::BOLD),
         ));
     let input_widget =
