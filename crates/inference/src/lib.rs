@@ -33,13 +33,5 @@ pub use queue::{InferenceQueue, WorkKind};
 /// no-op log callback globally, silencing all llama.cpp output permanently
 /// for the lifetime of the process.
 pub fn suppress_llama_logs() {
-    use std::mem::ManuallyDrop;
-
-    use llama_cpp_2::llama_backend::LlamaBackend;
-    // LlamaBackend is a zero-field public struct. We wrap it in ManuallyDrop to
-    // prevent the Drop impl (which resets LLAMA_BACKEND_INITIALIZED) from running,
-    // since we are bypassing init() here. void_logs() only sets a global C callback
-    // and does not read or write any instance state, making this safe.
-    let mut b = ManuallyDrop::new(LlamaBackend {});
-    b.void_logs();
+    infer::suppress_llama_logs();
 }
