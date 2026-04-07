@@ -5,8 +5,8 @@ use std::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{
-    CTPEvent, InferenceEvent, MemoryEvent, PlatformEvent, PlatformVisionEvent, SoulEvent,
-    SpeechEvent, SystemEvent, TransparencyEvent,
+    CTPEvent, DownloadEvent, InferenceEvent, MemoryEvent, PlatformEvent, PlatformVisionEvent,
+    SoulEvent, SpeechEvent, SystemEvent, TransparencyEvent,
 };
 
 /// Unified event type for all bus communication.
@@ -30,6 +30,8 @@ pub enum Event {
     Speech(SpeechEvent),
     /// Transparency layer events (user queries for observation, memory, explanation).
     Transparency(TransparencyEvent),
+    /// Download events (model download progress from any Sena downloader).
+    Download(DownloadEvent),
 }
 
 /// Bus operation errors.

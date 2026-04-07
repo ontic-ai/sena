@@ -8,8 +8,9 @@ pub mod ipc;
 pub use actor::{Actor, ActorError};
 pub use bus::{BusError, Event, EventBus};
 pub use events::{
-    CTPEvent, InferenceEvent, InferenceSource, MemoryEvent, PlatformEvent, PlatformVisionEvent,
-    Priority, SoulEvent, SpeechEvent, SystemEvent, TransparencyEvent, TrayMenuItem,
+    CTPEvent, DownloadEvent, InferenceEvent, InferenceSource, MemoryEvent, PlatformEvent,
+    PlatformVisionEvent, Priority, SoulEvent, SpeechEvent, SystemEvent, TransparencyEvent,
+    TrayMenuItem,
 };
 pub use ipc::{IpcMessage, IpcPayload, LineStyle, IPC_SCHEMA_VERSION};
 

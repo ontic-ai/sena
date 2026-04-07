@@ -5,6 +5,7 @@
 //! and carry no logic — they are pure data.
 
 pub mod ctp;
+pub mod download;
 pub mod inference;
 pub mod memory;
 pub mod platform;
@@ -15,6 +16,7 @@ pub mod system;
 pub mod transparency;
 
 pub use ctp::*;
+pub use download::*;
 pub use inference::*;
 pub use memory::*;
 pub use platform::*;
