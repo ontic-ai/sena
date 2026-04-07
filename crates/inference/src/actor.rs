@@ -83,6 +83,11 @@ pub struct InferenceActor {
     streaming_max_buffer_chars: usize,
     /// Hard-cap threshold for sentence boundary detection in streaming mode.
     streaming_max_sentence_chars: usize,
+    /// Path to the dedicated embedding model GGUF file.
+    /// When Some, WorkKind::Embed uses a separate backend loaded from this path.
+    embed_model_path: Option<PathBuf>,
+    /// Dedicated embedding backend (lazy-initialized on first WorkKind::Embed use).
+    embed_backend: Option<Arc<Mutex<Box<dyn LlmBackend>>>>,
 }
 
 impl InferenceActor {
@@ -120,6 +125,8 @@ impl InferenceActor {
             proactive_request_counter: 1,
             streaming_max_buffer_chars: 150,
             streaming_max_sentence_chars: 400,
+            embed_model_path: None,
+            embed_backend: None,
         }
     }
 
@@ -188,6 +195,22 @@ impl InferenceActor {
     /// Configure the maximum reflection rounds for iterative inference.
     pub fn with_max_reflection_rounds(mut self, rounds: usize) -> Self {
         self.max_reflection_rounds = rounds.clamp(1, ITERATIVE_MAX_HARD_CAP);
+        self
+    }
+
+    /// Set the path to a dedicated embedding model GGUF.
+    /// When set, WorkKind::Embed will use this model instead of the generation backend.
+    pub fn with_embed_model_path(mut self, path: PathBuf) -> Self {
+        self.embed_model_path = Some(path);
+        self
+    }
+
+    /// Pre-inject a constructed embedding backend (used in tests to avoid loading a real GGUF).
+    ///
+    /// In production, prefer `with_embed_model_path` — the backend is loaded lazily.
+    /// In tests, inject a `MockBackend` here so `WorkKind::Embed` tests work without model files.
+    pub fn with_embed_backend(mut self, backend: Box<dyn LlmBackend>) -> Self {
+        self.embed_backend = Some(Arc::new(Mutex::new(backend)));
         self
     }
 
@@ -268,6 +291,52 @@ impl InferenceActor {
                 tracing::error!("inference: model load FAILED: {}", e);
                 Err(format!("model load failed: {}", e))
             }
+        }
+    }
+
+    /// Ensures the dedicated embedding backend is loaded from `embed_model_path`.
+    /// Returns the Arc<Mutex<...>> to the embed backend if successfully loaded,
+    /// or an error string if the path is not configured or the backend fails.
+    async fn ensure_embed_loaded(&mut self) -> Result<Arc<Mutex<Box<dyn LlmBackend>>>, String> {
+        // Already loaded
+        if let Some(ref backend) = self.embed_backend {
+            return Ok(backend.clone());
+        }
+
+        // Path must be configured
+        let path = self.embed_model_path.clone().ok_or_else(|| {
+            "no embedding model configured; set embed_model_path in config".to_string()
+        })?;
+
+        if !path.exists() {
+            return Err(format!(
+                "embedding model not found at {}: run `sena` to auto-download",
+                path.display()
+            ));
+        }
+
+        tracing::info!("inference: loading embed backend from {:?}", path);
+
+        let backend_type = self.backend_type;
+        let load_result = tokio::task::spawn_blocking(move || {
+            let mut b =
+                infer::LlamaBackend::new().map_err(|e| format!("embed backend init: {}", e))?;
+            b.load_model(&path, backend_type)
+                .map_err(|e| format!("embed model load: {}", e))?;
+            let boxed: Box<dyn LlmBackend> = Box::new(b);
+            Ok::<Box<dyn LlmBackend>, String>(boxed)
+        })
+        .await
+        .map_err(|e| format!("embed load task panicked: {}", e))?;
+
+        match load_result {
+            Ok(b) => {
+                let arc = Arc::new(Mutex::new(b));
+                self.embed_backend = Some(arc.clone());
+                tracing::info!("inference: embed backend loaded successfully");
+                Ok(arc)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -371,9 +440,22 @@ impl InferenceActor {
                 }
             }
             WorkKind::Embed { text, response_tx } => {
-                let backend_clone = backend;
+                let embed_backend = match self.ensure_embed_loaded().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = response_tx.send(Err(e.clone()));
+                        let _ = bus
+                            .broadcast(Event::Inference(InferenceEvent::EmbedFailed {
+                                request_id,
+                                reason: e,
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+
                 let result = tokio::task::spawn_blocking(move || {
-                    let guard = backend_clone
+                    let guard = embed_backend
                         .lock()
                         .map_err(|e| format!("lock poisoned: {}", e))?;
                     guard.embed(&text).map_err(|e| format!("{}", e))
@@ -392,10 +474,6 @@ impl InferenceActor {
                     }
                     Ok(Err(e)) => {
                         let _ = response_tx.send(Err(e.clone()));
-                        // Broadcast EmbedFailed so SenaEmbedder fails fast
-                        // rather than waiting for the 30-second timeout.
-                        // EmbedFailed is NOT the same as InferenceFailed — it is an
-                        // internal subsystem failure and must never appear in the CLI.
                         let _ = bus
                             .broadcast(Event::Inference(InferenceEvent::EmbedFailed {
                                 request_id,
@@ -1724,7 +1802,13 @@ mod tests {
     }
 
     fn mock_actor(models_dir: PathBuf) -> InferenceActor {
-        InferenceActor::new(models_dir, mock_backend())
+        // Pre-load a mock embed backend so WorkKind::Embed tests work without a real GGUF file.
+        // MockBackend::embed() requires the backend to be loaded before use.
+        let mut embed_mock = MockBackend::new();
+        embed_mock
+            .load_model(&PathBuf::from("/test/embed.gguf"), BackendType::Cpu)
+            .expect("mock embed load");
+        InferenceActor::new(models_dir, mock_backend()).with_embed_backend(Box::new(embed_mock))
     }
 
     #[test]
