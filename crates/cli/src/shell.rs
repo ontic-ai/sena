@@ -20,7 +20,7 @@ use bus::events::transparency::{
     InferenceExplanationResponse, MemoryResponse, ObservationResponse, TransparencyEvent,
     TransparencyQuery,
 };
-use bus::{Event, TransparencyEvent as BusTransparencyEvent};
+use bus::{DownloadEvent, Event, TransparencyEvent as BusTransparencyEvent};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -245,8 +245,8 @@ struct Shell {
     runtime: Arc<Runtime>,
     /// Shell-local voice UX state (does not persist config).
     voice_enabled: bool,
-    /// Last emitted download-progress bucket (0..=10) keyed by speech request ID.
-    speech_download_progress: HashMap<u64, u64>,
+    /// Last emitted download-progress bucket (0..=10) keyed by request ID.
+    download_progress: HashMap<u64, u64>,
     /// True while continuous listen mode is active in this CLI session.
     listen_mode_active: bool,
     /// Session ID of the currently active listen session (0 when inactive).
@@ -309,7 +309,7 @@ impl Shell {
             pending_model_dir_input: false,
             runtime,
             voice_enabled,
-            speech_download_progress: HashMap::new(),
+            download_progress: HashMap::new(),
             listen_mode_active: false,
             listen_session_id: 0,
         }
@@ -1050,71 +1050,59 @@ impl Shell {
                     format!("Voice transcription failed: {}", reason),
                 );
             }
-            Event::Speech(SpeechEvent::ModelDownloadStarted {
+            Event::Download(DownloadEvent::Started {
                 model_name,
                 total_bytes,
                 request_id,
             }) => {
-                self.speech_download_progress.insert(request_id, 0);
+                let mb = total_bytes / (1024 * 1024);
                 self.add_message(
                     MessageRole::System,
-                    format!(
-                        "[speech] Downloading model: {} ({} bytes)",
-                        model_name, total_bytes
-                    ),
+                    format!("Downloading {} ({} MB)...", model_name, mb),
                 );
+                self.download_progress.insert(request_id, 0);
             }
-            Event::Speech(SpeechEvent::ModelDownloadProgress {
+            Event::Download(DownloadEvent::Progress {
                 model_name,
                 bytes_downloaded,
                 total_bytes,
                 request_id,
             }) => {
-                let percent = if total_bytes == 0 {
-                    0
+                let pct = if total_bytes > 0 {
+                    bytes_downloaded * 100 / total_bytes
                 } else {
-                    (bytes_downloaded.saturating_mul(100) / total_bytes).min(100)
+                    0
                 };
-                let bucket = (percent / 10).min(10);
-                let previous_bucket = self
-                    .speech_download_progress
+                let bucket = pct / 10;
+                let prev = self
+                    .download_progress
                     .get(&request_id)
                     .copied()
                     .unwrap_or(0);
-                if bucket > previous_bucket || bytes_downloaded >= total_bytes {
-                    self.speech_download_progress.insert(request_id, bucket);
-                    self.add_message(
-                        MessageRole::System,
-                        format!(
-                            "[speech] {}: {}/{} bytes ({}%)",
-                            model_name, bytes_downloaded, total_bytes, percent
-                        ),
-                    );
+                if bucket > prev {
+                    self.add_message(MessageRole::System, format!("  {} … {}%", model_name, pct));
+                    self.download_progress.insert(request_id, bucket);
                 }
             }
-            Event::Speech(SpeechEvent::ModelDownloadCompleted {
+            Event::Download(DownloadEvent::Completed {
                 model_name,
+                cached_path: _,
                 request_id,
-                ..
             }) => {
-                self.speech_download_progress.remove(&request_id);
+                self.download_progress.remove(&request_id);
                 self.add_message(
                     MessageRole::System,
-                    format!("[speech] Model downloaded: {}", model_name),
+                    format!("Download complete: {}", model_name),
                 );
             }
-            Event::Speech(SpeechEvent::ModelDownloadFailed {
+            Event::Download(DownloadEvent::Failed {
                 model_name,
                 reason,
-                request_id,
+                request_id: _,
             }) => {
-                self.speech_download_progress.remove(&request_id);
                 self.add_message(
                     MessageRole::Warning,
-                    format!(
-                        "[speech] Model download failed: {} - {}",
-                        model_name, reason
-                    ),
+                    format!("Download failed: {} — {}", model_name, reason),
                 );
             }
             Event::Speech(SpeechEvent::WakewordDetected { confidence }) => {
@@ -3178,7 +3166,14 @@ fn render_ipc_tui(
     frame.render_widget(paragraph, body_chunks[0]);
 
     // ── Sidebar ───────────────────────────────────────────────────────────────────
-    render_ipc_sidebar(frame, body_chunks[1], loop_states, actor_health, current_model, stats);
+    render_ipc_sidebar(
+        frame,
+        body_chunks[1],
+        loop_states,
+        actor_health,
+        current_model,
+        stats,
+    );
 
     // Input area
     let prompt_line = Line::from(vec![
@@ -3341,10 +3336,7 @@ fn render_ipc_sidebar(
         let enabled = loop_states.get(*loop_name).copied().unwrap_or(true);
         let color = if enabled { Color::Green } else { Color::Red };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {} ", "\u{25cf}"),
-                Style::default().fg(color),
-            ),
+            Span::styled(format!("  {} ", "\u{25cf}"), Style::default().fg(color)),
             Span::styled(*display_name, Style::default().fg(Color::White)),
         ]));
     }

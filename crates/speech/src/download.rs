@@ -5,7 +5,7 @@
 //! Downloads are user-consented and happen during onboarding or explicit enable.
 
 use crate::error::SpeechError;
-use bus::{Event, EventBus, SpeechEvent};
+use bus::{DownloadEvent, Event, EventBus};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -211,6 +211,33 @@ impl DownloadClient {
         model: &ModelInfo,
         request_id: u64,
     ) -> Result<PathBuf, SpeechError> {
+        // Execute download and capture result
+        let result = self
+            .download_model_inner(bus, model_dir, model, request_id)
+            .await;
+
+        // Emit Failed event on error
+        if let Err(ref err) = result {
+            let _ = bus
+                .broadcast(Event::Download(DownloadEvent::Failed {
+                    model_name: model.name.clone(),
+                    reason: err.to_string(),
+                    request_id,
+                }))
+                .await;
+        }
+
+        result
+    }
+
+    /// Inner download implementation — errors are converted to Failed events by the wrapper.
+    async fn download_model_inner(
+        &self,
+        bus: &Arc<EventBus>,
+        model_dir: &Path,
+        model: &ModelInfo,
+        request_id: u64,
+    ) -> Result<PathBuf, SpeechError> {
         // Ensure model directory exists
         fs::create_dir_all(model_dir)
             .await
@@ -234,7 +261,7 @@ impl DownloadClient {
 
         // Emit download started event
         let _ = bus
-            .broadcast(Event::Speech(SpeechEvent::ModelDownloadStarted {
+            .broadcast(Event::Download(DownloadEvent::Started {
                 model_name: model.name.clone(),
                 total_bytes: model.size_bytes,
                 request_id,
@@ -280,7 +307,7 @@ impl DownloadClient {
                 || bytes_downloaded == model.size_bytes
             {
                 let _ = bus
-                    .broadcast(Event::Speech(SpeechEvent::ModelDownloadProgress {
+                    .broadcast(Event::Download(DownloadEvent::Progress {
                         model_name: model.name.clone(),
                         bytes_downloaded,
                         total_bytes: model.size_bytes,
@@ -338,7 +365,7 @@ impl DownloadClient {
 
         // Emit download completed event
         let _ = bus
-            .broadcast(Event::Speech(SpeechEvent::ModelDownloadCompleted {
+            .broadcast(Event::Download(DownloadEvent::Completed {
                 model_name: model.name.clone(),
                 cached_path: path.to_string_lossy().to_string(),
                 request_id,

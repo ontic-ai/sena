@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use bus::{Event, EventBus, SpeechEvent};
+use bus::{DownloadEvent, Event, EventBus, SpeechEvent};
 use cpal::traits::HostTrait;
 
 use crate::download::{DownloadClient, ModelCache, ModelManifest};
@@ -62,10 +62,10 @@ pub async fn run_speech_onboarding(
             }
             Err(e) => {
                 // Non-critical: if one model fails, continue with others
-                // The specific ModelDownloadFailed event was already emitted by download_model
+                // The specific Failed event was already emitted by download_model
                 // Log but continue
                 let _ = bus
-                    .broadcast(Event::Speech(SpeechEvent::ModelDownloadFailed {
+                    .broadcast(Event::Download(DownloadEvent::Failed {
                         model_name: model.name.clone(),
                         reason: e.to_string(),
                         request_id,
