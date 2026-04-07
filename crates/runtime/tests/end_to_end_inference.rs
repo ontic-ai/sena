@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bus::{Actor, Event, EventBus, InferenceEvent};
+use inference::LlmBackend;
 use tempfile::tempdir;
 
 /// Create the minimal Ollama manifest directory structure so that
@@ -81,10 +82,20 @@ async fn end_to_end_thought_triggers_inference_cycle() {
     std::fs::create_dir_all(&model_dir).expect("create model_dir");
     create_mock_ollama_structure(&model_dir);
 
+    // Pre-load a mock embed backend so memory queries can embed without a real GGUF.
+    let mut embed_mock = inference::MockBackend::new();
+    embed_mock
+        .load_model(
+            &std::path::Path::new("/test/embed.gguf"),
+            inference::BackendType::Cpu,
+        )
+        .expect("mock embed load");
+
     let inference_actor = inference::InferenceActor::new(
         model_dir,
         Box::new(inference::MockBackend::new()), // Mock backend
-    );
+    )
+    .with_embed_backend(Box::new(embed_mock));
     let mut inference_box = Box::new(inference_actor);
     inference_box
         .start(Arc::clone(&bus))

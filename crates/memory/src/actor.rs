@@ -569,8 +569,23 @@ impl Actor for MemoryActor {
                                 MemoryEvent::QueryRequested(req) => {
                                     let s = Arc::clone(&store);
                                     let b = Arc::clone(&bus);
+                                    let req_id = req.request_id;
                                     self.task_set.spawn(async move {
-                                            let _ = Self::handle_query(s, req, b).await;
+                                        if let Err(e) = Self::handle_query(s, req, Arc::clone(&b)).await {
+                                            // Graceful degradation: embed may be unavailable (no embed model
+                                            // configured). Broadcast empty results so the requester doesn't hang.
+                                            tracing::warn!(
+                                                "memory: query {} failed, returning empty results: {}",
+                                                req_id, e
+                                            );
+                                            let response = MemoryQueryResponse {
+                                                chunks: Vec::new(),
+                                                request_id: req_id,
+                                            };
+                                            let _ = b
+                                                .broadcast(Event::Memory(MemoryEvent::QueryCompleted(response)))
+                                                .await;
+                                        }
                                     });
                                 }
                                 // Outbound-only events — ignore if directed back.

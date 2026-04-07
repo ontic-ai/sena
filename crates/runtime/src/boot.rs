@@ -1,5 +1,6 @@
 //! Boot sequence orchestration.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,6 +69,9 @@ pub enum BootError {
 
     #[error("inference init failed: {0}")]
     InferenceInitFailed(String),
+
+    #[error("embed model download failed: {0}")]
+    EmbedModelDownloadFailed(String),
 
     #[error("prompt init failed: {0}")]
     PromptInitFailed(String),
@@ -154,6 +158,15 @@ pub async fn boot() -> Result<Runtime, BootError> {
             .map_err(|e| BootError::BroadcastFailed(e.to_string()))?;
     }
 
+    // Step 3.5: Ensure embed model is available.
+    // The embed model is required for memory subsystem vector embeddings.
+    // If the file is missing, download it now (blocking boot — user preference).
+    let embed_model_path = ensure_embed_model(&bus, &config)
+        .await
+        .map_err(|e| BootError::EmbedModelDownloadFailed(e.to_string()))?;
+    // Store the resolved path in config so CLI /config show displays it.
+    config.embed_model_path = Some(embed_model_path.clone());
+
     // Step 4: Initialize Soul (SoulBox)
     let soul_db_path = platform::config_dir()
         .map_err(|e| BootError::SoulInitFailed(e.to_string()))?
@@ -232,7 +245,8 @@ pub async fn boot() -> Result<Runtime, BootError> {
             config.inference_streaming.max_sentence_chars,
         )
         .with_conversation_history_cap(config.conversation_history_max_pairs)
-        .with_max_reflection_rounds(config.max_reflection_rounds);
+        .with_max_reflection_rounds(config.max_reflection_rounds)
+        .with_embed_model_path(embed_model_path.clone());
     spawn_actor(&bus, &mut registry, inference_actor);
     expected_actors.push("Inference");
 
@@ -478,6 +492,63 @@ fn spawn_memory_monitor(bus: Arc<EventBus>, config: &SenaConfig) -> tokio::task:
             }
         }
     })
+}
+
+/// Ensures the embedding model is present on disk.
+/// Downloads from HuggingFace if the file is missing.
+/// Returns the resolved path to the model file.
+async fn ensure_embed_model(bus: &Arc<EventBus>, config: &SenaConfig) -> Result<PathBuf, String> {
+    // Determine model directory: use config override or platform default
+    let model_dir = if let Some(ref p) = config.embed_model_path {
+        // If user set an explicit path, use its parent as the directory
+        p.parent()
+            .map(|par| par.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        // Default: <config_dir>/models/
+        platform::config_dir()
+            .map_err(|e| format!("config dir resolve failed: {}", e))?
+            .join("models")
+    };
+
+    let model = crate::download_manager::ModelManifest::nomic_embed_v1_5();
+
+    // Compute full expected path
+    let expected_path = if let Some(ref p) = config.embed_model_path {
+        p.clone()
+    } else {
+        crate::download_manager::ModelCache::cached_path(&model_dir, &model)
+    };
+
+    // Already present and valid — fast path
+    if crate::download_manager::ModelCache::is_cached(&model_dir, &model).await {
+        tracing::info!(
+            "boot: embed model already cached at {}",
+            expected_path.display()
+        );
+        return Ok(expected_path);
+    }
+
+    tracing::info!(
+        "boot: embed model not found at {} — downloading ({}MB, this blocks boot)",
+        expected_path.display(),
+        model.size_bytes / (1024 * 1024)
+    );
+
+    let client = crate::download_manager::DownloadClient::new()
+        .map_err(|e| format!("download client init: {}", e))?;
+
+    let downloaded_path = client
+        .download_model(bus, &model_dir, &model, 0)
+        .await
+        .map_err(|e| format!("embed model download: {}", e))?;
+
+    tracing::info!(
+        "boot: embed model downloaded to {}",
+        downloaded_path.display()
+    );
+
+    Ok(downloaded_path)
 }
 
 #[cfg(test)]
