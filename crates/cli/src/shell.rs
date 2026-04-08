@@ -20,7 +20,7 @@ use bus::events::transparency::{
     InferenceExplanationResponse, MemoryResponse, ObservationResponse, TransparencyEvent,
     TransparencyQuery,
 };
-use bus::{DownloadEvent, Event, TransparencyEvent as BusTransparencyEvent};
+use bus::{DownloadEvent, Event, IpcPayload, TransparencyEvent as BusTransparencyEvent};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -1145,353 +1145,44 @@ impl Shell {
 
     /// Dispatch user input (command or chat).
     async fn dispatch_line(&mut self, line: String) -> DispatchResult {
-        // Handle pending model directory input
-        if self.state.pending_model_dir_input {
-            self.state.pending_model_dir_input = false;
-            return self.handle_model_dir_input(line).await;
-        }
-
-        let lower = line.to_lowercase();
-        #[allow(clippy::manual_unwrap_or_default, clippy::manual_unwrap_or)]
-        let cmd = if let Some(v) = lower.split_whitespace().next() {
-            v
-        } else {
-            ""
-        };
-
-        match cmd {
-            "/observation" | "/obs" => {
-                self.fire_transparency_query(
-                    TransparencyQuery::CurrentObservation,
-                    "Querying current observation...",
-                )
-                .await;
-                DispatchResult::Continue
-            }
-            "/memory" | "/mem" => {
-                self.fire_transparency_query(TransparencyQuery::UserMemory, "Querying memory...")
-                    .await;
-                DispatchResult::Continue
-            }
-            "/explanation" | "/why" => {
-                self.fire_transparency_query(
-                    TransparencyQuery::InferenceExplanation,
-                    "Querying last inference...",
-                )
-                .await;
-                DispatchResult::Continue
-            }
-            "/models" => {
-                let models_dir = self.current_models_dir();
-                match models_dir
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
-                    .and_then(model_selector::discover_models_at)
-                {
-                    Ok(models) => {
-                        self.state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                    }
-                    Err(e) => {
-                        self.add_message(
-                            MessageRole::Warning,
-                            format!("Model discovery failed: {}", e),
-                        );
-                    }
+        if line.starts_with('/') || self.state.pending_model_dir_input {
+            let mut command_state = CommandRuntimeState {
+                verbose: self.verbose,
+                voice_enabled: self.voice_enabled,
+                transparency_loading: self.transparency_loading,
+                pending_transparency: self.pending_transparency.take(),
+            };
+            let mut deps = CommandDeps {
+                runtime: Some(self.runtime.as_ref()),
+                state: &mut self.state,
+                command_state: &mut command_state,
+            };
+            let mut target = DispatchTarget::LocalBus(&self.bus);
+            match dispatch_command(&line, &mut target, &mut deps).await {
+                Ok(result) => {
+                    self.verbose = command_state.verbose;
+                    self.voice_enabled = command_state.voice_enabled;
+                    self.transparency_loading = command_state.transparency_loading;
+                    self.pending_transparency = command_state.pending_transparency;
+                    return result;
                 }
-                DispatchResult::Continue
-            }
-            "/verbose" => {
-                self.verbose = !self.verbose;
-                let state = if self.verbose { "ON" } else { "OFF" };
-                self.add_message(MessageRole::System, format!("Verbose logging: {}", state));
-                DispatchResult::Continue
-            }
-            "/voice" => {
-                if !self.runtime.config.speech_enabled {
+                Err(e) => {
                     self.add_message(
                         MessageRole::Warning,
-                        "Voice is unavailable because speech is disabled in config.".to_string(),
+                        format!("Command failed: {}", e),
                     );
+                    self.verbose = command_state.verbose;
+                    self.voice_enabled = command_state.voice_enabled;
+                    self.transparency_loading = command_state.transparency_loading;
+                    self.pending_transparency = command_state.pending_transparency;
                     return DispatchResult::Continue;
                 }
-
-                self.voice_enabled = !self.voice_enabled;
-                let state = if self.voice_enabled { "ON" } else { "OFF" };
-                self.add_message(MessageRole::System, format!("VOICE: {}", state));
-                self.add_message(
-                    MessageRole::System,
-                    "Voice input toggled for this CLI session; persistent runtime speech settings remain in config.".to_string(),
-                );
-                DispatchResult::Continue
-            }
-            "/speech" => {
-                self.show_speech_config();
-                DispatchResult::Continue
-            }
-            "/listen" => {
-                if self.state.listen_mode_active {
-                    // Toggle off — stop the active session.
-                    let session_id = self.state.listen_session_id;
-                    self.state.listen_mode_active = false;
-                    if let Err(e) = self
-                        .bus
-                        .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
-                            session_id,
-                        }))
-                        .await
-                    {
-                        self.add_message(
-                            MessageRole::Warning,
-                            format!("[listen] Failed to send stop: {}", e),
-                        );
-                    }
-                    self.add_message(
-                        MessageRole::System,
-                        "\u{1f3a4} Stopping listen mode...".to_string(),
-                    );
-                } else {
-                    if !self.runtime.config.speech_enabled {
-                        self.add_message(
-                            MessageRole::Warning,
-                            "Speech must be enabled for /listen. Use /config set speech_enabled true".to_string(),
-                        );
-                        return DispatchResult::Continue;
-                    }
-                    // Derive a monotonically increasing session ID from message count.
-                    self.state.listen_session_id = self.state.stats.messages_sent as u64
-                        + std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                    self.state.listen_mode_active = true;
-                    let session_id = self.state.listen_session_id;
-                    if let Err(e) = self
-                        .bus
-                        .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
-                            session_id,
-                        }))
-                        .await
-                    {
-                        self.state.listen_mode_active = false;
-                        self.add_message(
-                            MessageRole::Warning,
-                            format!("[listen] Failed to start: {}", e),
-                        );
-                        return DispatchResult::Continue;
-                    }
-                    self.add_message(
-                        MessageRole::System,
-                        "\u{1f3a4} Listen mode started — type /listen again to stop.".to_string(),
-                    );
-                }
-                DispatchResult::Continue
-            }
-            "/microphone" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.get(1) == Some(&"select") {
-                    // /microphone select <index>
-                    let idx_str = parts.get(2).copied().unwrap_or("");
-                    match idx_str.parse::<usize>() {
-                        Err(_) => {
-                            self.add_message(
-                                MessageRole::Warning,
-                                "Usage: /microphone select <index>  (see /microphone for index list)".to_string(),
-                            );
-                        }
-                        Ok(idx) => {
-                            let devices = runtime::list_input_devices();
-                            if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
-                                // Send ConfigSetRequested for microphone_device
-                                let value = if idx == 0 {
-                                    String::new() // empty value clears device (system default)
-                                } else {
-                                    name.clone()
-                                };
-
-                                if let Err(e) = self
-                                    .bus
-                                    .broadcast(Event::System(
-                                        bus::events::SystemEvent::ConfigSetRequested {
-                                            key: "microphone_device".to_string(),
-                                            value,
-                                        },
-                                    ))
-                                    .await
-                                {
-                                    self.add_message(
-                                        MessageRole::Warning,
-                                        format!("Failed to send config change: {}", e),
-                                    );
-                                } else {
-                                    self.add_message(
-                                        MessageRole::System,
-                                        format!(
-                                            "\u{1f3a4} Microphone set to: {}{}",
-                                            name,
-                                            if idx == 0 { " (system default)" } else { "" }
-                                        ),
-                                    );
-                                    self.add_message(
-                                        MessageRole::System,
-                                        "Restart Sena for the new microphone to take effect."
-                                            .to_string(),
-                                    );
-                                }
-                            } else {
-                                self.add_message(
-                                    MessageRole::Warning,
-                                    format!(
-                                        "No device at index {}. Run /microphone to list devices.",
-                                        idx
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    // /microphone — list available devices
-                    let devices = runtime::list_input_devices();
-                    let current = self
-                        .runtime
-                        .config
-                        .microphone_device
-                        .as_deref()
-                        .unwrap_or("(system default)");
-                    self.add_message(
-                        MessageRole::System,
-                        format!(
-                            "\u{2501}\u{2501}  Available Microphones  (current: {})",
-                            current
-                        ),
-                    );
-                    if devices.is_empty() {
-                        self.add_message(
-                            MessageRole::Warning,
-                            "No input devices found.".to_string(),
-                        );
-                    } else {
-                        for (idx, name) in &devices {
-                            self.add_message(MessageRole::System, format!("  [{}]  {}", idx, name));
-                        }
-                        self.add_message(
-                            MessageRole::System,
-                            "Use /microphone select <index> to switch. Index 0 = system default."
-                                .to_string(),
-                        );
-                    }
-                }
-                DispatchResult::Continue
-            }
-            "/screenshot" => {
-                let capture_status = if self.runtime.config.screen_capture_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                let platform_support = if cfg!(target_os = "windows") {
-                    "supported"
-                } else {
-                    "not implemented"
-                };
-                let frame_ready = self
-                    .runtime
-                    .vision_frame_store
-                    .lock()
-                    .map(|frame| if frame.is_some() { "yes" } else { "no" })
-                    .unwrap_or("unknown");
-                let active_model = self.state.current_model.as_deref().unwrap_or("unknown");
-                let vision_status = match self.state.current_model.as_deref() {
-                    Some(model_name) => {
-                        if is_vision_capable_model(model_name) {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                    }
-                    None => "unknown",
-                };
-
-                self.add_message(
-                    MessageRole::System,
-                    format!(
-                        "Screenshot capture: {} | Platform: {} | Frame ready: {} | Active model: {} | Vision capable: {}",
-                        capture_status, platform_support, frame_ready, active_model, vision_status
-                    ),
-                );
-                self.add_message(
-                    MessageRole::System,
-                    "Privacy: screenshots are in-memory only and not persisted. Availability depends on platform support.".to_string(),
-                );
-                DispatchResult::Continue
-            }
-            "/config" => {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.get(1) == Some(&"set") {
-                    let key = parts.get(2).copied().unwrap_or("");
-                    let value = if parts.len() > 3 {
-                        parts[3..].join(" ")
-                    } else {
-                        String::new()
-                    };
-                    self.set_config_value(key, &value).await;
-                } else {
-                    self.show_config().await;
-                }
-                DispatchResult::Continue
-            }
-            "/help" | "/h" => {
-                self.show_help();
-                DispatchResult::Continue
-            }
-            "/actors" => {
-                self.actors_popup_visible = true;
-                DispatchResult::Continue
-            }
-            "/copy" => {
-                self.copy_last_response();
-                DispatchResult::Continue
-            }
-            _ if exit_command_result(cmd).is_some() => match exit_command_result(cmd) {
-                Some(result) => result,
-                None => DispatchResult::Continue,
-            },
-            _ if line.starts_with('/') => {
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Unknown command '{}'. Type /help for commands.", line),
-                );
-                DispatchResult::Continue
-            }
-            _ => {
-                // Free text → inference chat
-                self.send_chat(line).await;
-                DispatchResult::Continue
             }
         }
-    }
 
-    /// Fire a transparency query on the bus and return immediately.
-    /// The response arrives asynchronously via handle_bus_event.
-    async fn fire_transparency_query(&mut self, query: TransparencyQuery, loading_msg: &str) {
-        tracing::info!("cli: firing transparency query: {:?}", query);
-        self.add_message(MessageRole::System, loading_msg.to_string());
-        self.transparency_loading = true;
-        if let Err(e) = self
-            .bus
-            .broadcast(Event::Transparency(BusTransparencyEvent::QueryRequested(
-                query.clone(),
-            )))
-            .await
-        {
-            self.pending_transparency = None;
-            self.transparency_loading = false;
-            self.add_message(MessageRole::Warning, format!("Failed to send query: {}", e));
-        } else {
-            self.pending_transparency = Some(PendingTransparencyQuery {
-                query,
-                started_at: Instant::now(),
-            });
-        }
+        // Free text -> inference chat
+        self.send_chat(line).await;
+        DispatchResult::Continue
     }
 
     fn handle_transparency_timeout(&mut self) {
@@ -1574,340 +1265,9 @@ impl Shell {
         }
     }
 
-    /// Show help text.
-    fn show_help(&mut self) {
-        self.add_message(MessageRole::System, "━━  Commands".to_string());
-        self.add_message(
-            MessageRole::System,
-            "/observation or /obs   What are you observing right now?".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/memory or /mem        What do you remember about me?".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/explanation or /why   Why did you say that?".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/models                Select which model to use".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/voice                 Toggle voice input in this CLI session".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/speech                View speech configuration and status".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/listen                Start/stop continuous live transcription".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/microphone            List microphones or select one (/microphone select <index>)"
-                .to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/loops                 List all background loops and their status".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/loops <name>          Toggle a loop on/off".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/loops <name> on|off   Explicitly enable or disable a loop".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/help                  Show this message".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/close or /quit        Close the CLI session".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/shutdown              Shut down Sena completely".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "/copy                  Copy last response to clipboard".to_string(),
-        );
-        self.add_message(MessageRole::System, "".to_string());
-        self.add_message(MessageRole::System, "━━  Keyboard Shortcuts".to_string());
-        self.add_message(
-            MessageRole::System,
-            "Ctrl+Y                 Copy last response to clipboard".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "Ctrl+Shift+C           Copy last response to clipboard".to_string(),
-        );
-        self.add_message(MessageRole::System, "".to_string());
-        self.add_message(
-            MessageRole::System,
-            "Type any message to chat with the model.".to_string(),
-        );
-    }
-
-    /// Show config file path and current settings (reads directly from config file).
-    ///
-    /// Displays ALL settings in TOML format so new fields are never silently omitted.
-    async fn show_config(&mut self) {
-        let config_path = runtime::config::config_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "(unavailable)".to_string());
-
-        // Read fresh config from file — not the boot-time snapshot.
-        let config = match runtime::config::load_or_create_config().await {
-            Ok(c) => c,
-            Err(e) => {
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Could not read config file: {}", e),
-                );
-                return;
-            }
-        };
-
-        self.add_message(MessageRole::System, "━━  Configuration".to_string());
-        self.add_message(MessageRole::System, format!("Config file: {}", config_path));
-        self.add_message(MessageRole::System, "".to_string());
-
-        // Serialize the full config to TOML so all fields are shown dynamically.
-        // New fields added to SenaConfig appear here automatically.
-        match toml::to_string_pretty(&config) {
-            Ok(toml_str) => {
-                // Show each line as a separate message for proper TUI wrapping
-                for line in toml_str.lines() {
-                    // Add ⚠ markers for settings that may need careful adjustment
-                    let marked = if line.starts_with("inference_max_tokens") {
-                        format!("{line}  ← low values truncate responses; auto-tune planned")
-                    } else if line.starts_with("inference_ctx_size") {
-                        format!("{line}  ← must not exceed model training context")
-                    } else if line.starts_with("ctp_trigger_sensitivity") {
-                        format!("{line}  ← 0.0–1.0; lower = less proactive")
-                    } else {
-                        line.to_string()
-                    };
-                    self.add_message(MessageRole::System, marked);
-                }
-            }
-            Err(e) => {
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Could not serialize config: {}", e),
-                );
-            }
-        }
-
-        self.add_message(MessageRole::System, "".to_string());
-        self.add_message(
-            MessageRole::System,
-            "Use /config set <key> <value> to edit. Restart actors for most changes.".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            "Examples: /config set speech_enabled true  |  /config set inference_max_tokens 1024"
-                .to_string(),
-        );
-    }
-
-    /// Update a single config field from the CLI.
-    ///
-    /// Broadcasts a ConfigSetRequested event to the supervisor.
-    /// The response (ConfigReloaded or ConfigSetFailed) arrives asynchronously via handle_bus_event.
-    async fn set_config_value(&mut self, key: &str, value: &str) {
-        if let Err(e) = self
-            .bus
-            .broadcast(Event::System(
-                bus::events::SystemEvent::ConfigSetRequested {
-                    key: key.to_string(),
-                    value: value.to_string(),
-                },
-            ))
-            .await
-        {
-            self.add_message(
-                MessageRole::Warning,
-                format!("Failed to send config change: {}", e),
-            );
-        } else {
-            self.add_message(
-                MessageRole::System,
-                format!("Setting {} = {}...", key, value),
-            );
-        }
-    }
-
-    /// Show speech configuration and status.
-    fn show_speech_config(&mut self) {
-        let enabled = self.runtime.config.speech_enabled;
-        let model_dir = self
-            .runtime
-            .config
-            .speech_model_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(default platform path)".to_string());
-        let always_listening = self.runtime.config.voice_always_listening;
-        let wakeword_enabled = self.runtime.config.wakeword_enabled;
-        let tts_rate = self.runtime.config.tts_rate;
-        let proactive = self.runtime.config.proactive_speech_enabled;
-
-        self.add_message(
-            MessageRole::System,
-            "\u{2501}\u{2501}  Speech Configuration".to_string(),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("speech_enabled            {}", enabled),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("speech_model_dir          {}", model_dir),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("voice_always_listening    {}", always_listening),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("wakeword_enabled          {}", wakeword_enabled),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("tts_rate                  {:.1}", tts_rate),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!("proactive_speech_enabled  {}", proactive),
-        );
-        self.add_message(
-            MessageRole::System,
-            format!(
-                "voice_session_active      {}",
-                if self.voice_enabled { "yes" } else { "no" }
-            ),
-        );
-        self.add_message(MessageRole::System, "".to_string());
-        if enabled {
-            self.add_message(
-                MessageRole::System,
-                "Speech is enabled. Use /voice to toggle microphone input for this session."
-                    .to_string(),
-            );
-            self.add_message(
-                MessageRole::System,
-                "To change persistent speech settings: edit config file and restart.".to_string(),
-            );
-        } else {
-            self.add_message(
-                MessageRole::System,
-                "Speech is disabled. To enable: set speech_enabled = true in config and restart."
-                    .to_string(),
-            );
-        }
-    }
-
     /// Copy the most recent Sena response to the system clipboard.
     fn copy_last_response(&mut self) {
-        let last_response = self
-            .state
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, MessageRole::Sena))
-            .map(|m| m.text.clone());
-
-        match last_response {
-            Some(text) => match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                Ok(_) => {
-                    self.add_message(
-                        MessageRole::System,
-                        "Last response copied to clipboard.".to_string(),
-                    );
-                }
-                Err(e) => {
-                    self.add_message(MessageRole::Warning, format!("Copy failed: {}", e));
-                }
-            },
-            None => {
-                self.add_message(MessageRole::System, "No response to copy yet.".to_string());
-            }
-        }
-    }
-
-    /// Handle model directory path input.
-    async fn handle_model_dir_input(&mut self, path_str: String) -> DispatchResult {
-        let previous_dir = self.current_models_dir();
-        let trimmed = path_str.trim();
-
-        if trimmed.is_empty() {
-            self.add_message(
-                MessageRole::System,
-                "Model directory change cancelled. Keeping current directory.".to_string(),
-            );
-            return DispatchResult::Continue;
-        }
-
-        let path = std::path::PathBuf::from(trimmed);
-
-        // Validate directory contains GGUF models.
-        match model_selector::discover_models_at(&path) {
-            Ok(models) => {
-                let model_count = models.len();
-                let mut config = self.runtime.config.clone();
-                config.models_dir = Some(path.clone());
-
-                match runtime::save_config(&config).await {
-                    Ok(_) => {
-                        self.add_message(
-                            MessageRole::System,
-                            format!(
-                                "Model directory set to: {} ({} models found)",
-                                path.display(),
-                                model_count
-                            ),
-                        );
-                        self.state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                    }
-                    Err(e) => {
-                        self.add_message(
-                            MessageRole::Warning,
-                            format!("Failed to save config: {}", e),
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Model directory rejected: {}", e),
-                );
-                if let Some(prev) = previous_dir {
-                    self.add_message(
-                        MessageRole::System,
-                        format!("Keeping previous model directory: {}", prev.display()),
-                    );
-                }
-            }
-        }
-
-        DispatchResult::Continue
-    }
-
-    fn current_models_dir(&self) -> Option<PathBuf> {
-        if let Some(path) = self.runtime.config.models_dir.clone() {
-            return Some(path);
-        }
-
-        runtime::ollama_models_dir().ok()
+        copy_last_response_shared(&mut self.state);
     }
 }
 
@@ -1917,6 +1277,679 @@ enum DispatchResult {
     Continue,
     Close,
     Shutdown,
+}
+
+enum DispatchTarget<'a> {
+    LocalBus(&'a Arc<bus::EventBus>),
+    IpcClient(&'a mut crate::ipc_client::IpcClient),
+}
+
+impl<'a> DispatchTarget<'a> {
+    async fn send_event(&mut self, event: Event) -> Result<()> {
+        match self {
+            Self::LocalBus(bus) => bus
+                .broadcast(event)
+                .await
+                .map_err(|e| anyhow::anyhow!("bus broadcast failed: {}", e)),
+            Self::IpcClient(client) => {
+                let payload = event_to_ipc_payload(&event)?;
+                client
+                    .send(payload)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("IPC send failed: {}", e))
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn send_ipc(&mut self, payload: IpcPayload) -> Result<()> {
+        match self {
+            Self::LocalBus(_) => Ok(()),
+            Self::IpcClient(client) => client
+                .send(payload)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("IPC send failed: {}", e)),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CommandRuntimeState {
+    verbose: bool,
+    voice_enabled: bool,
+    transparency_loading: bool,
+    pending_transparency: Option<PendingTransparencyQuery>,
+}
+
+struct CommandDeps<'a> {
+    runtime: Option<&'a Runtime>,
+    state: &'a mut crate::tui_state::ShellState<SlashDropdown>,
+    command_state: &'a mut CommandRuntimeState,
+}
+
+async fn dispatch_command(
+    input: &str,
+    target: &mut DispatchTarget<'_>,
+    deps: &mut CommandDeps<'_>,
+) -> Result<DispatchResult> {
+    let line = input.trim();
+    if line.is_empty() {
+        return Ok(DispatchResult::Continue);
+    }
+
+    if deps.state.pending_model_dir_input {
+        deps.state.pending_model_dir_input = false;
+        handle_model_dir_input_shared(line, deps.state)?;
+        return Ok(DispatchResult::Continue);
+    }
+
+    if !line.starts_with('/') {
+        return Ok(DispatchResult::Continue);
+    }
+
+    let lower = line.to_lowercase();
+    let cmd = lower.split_whitespace().next().unwrap_or("");
+    match cmd {
+        "/observation" | "/obs" => {
+            add_message(deps.state, MessageRole::System, "Querying current observation...");
+            deps.command_state.transparency_loading = true;
+            deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
+                query: TransparencyQuery::CurrentObservation,
+                started_at: Instant::now(),
+            });
+            target
+                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+                    TransparencyQuery::CurrentObservation,
+                )))
+                .await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/memory" | "/mem" => {
+            add_message(deps.state, MessageRole::System, "Querying memory...");
+            deps.command_state.transparency_loading = true;
+            deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
+                query: TransparencyQuery::UserMemory,
+                started_at: Instant::now(),
+            });
+            target
+                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+                    TransparencyQuery::UserMemory,
+                )))
+                .await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/explanation" | "/why" => {
+            add_message(deps.state, MessageRole::System, "Querying last inference...");
+            deps.command_state.transparency_loading = true;
+            deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
+                query: TransparencyQuery::InferenceExplanation,
+                started_at: Instant::now(),
+            });
+            target
+                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+                    TransparencyQuery::InferenceExplanation,
+                )))
+                .await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/models" => {
+            let models_dir = current_models_dir(deps.runtime).await?;
+            let models = model_selector::discover_models_at(models_dir.as_path())?;
+            deps.state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+            Ok(DispatchResult::Continue)
+        }
+        "/verbose" => {
+            deps.command_state.verbose = !deps.command_state.verbose;
+            let status = if deps.command_state.verbose { "ON" } else { "OFF" };
+            add_message(
+                deps.state,
+                MessageRole::System,
+                &format!("Verbose logging: {}", status),
+            );
+            Ok(DispatchResult::Continue)
+        }
+        "/voice" => {
+            let speech_enabled = load_speech_enabled(deps.runtime).await?;
+            if !speech_enabled {
+                add_message(
+                    deps.state,
+                    MessageRole::Warning,
+                    "Voice is unavailable because speech is disabled in config.",
+                );
+                return Ok(DispatchResult::Continue);
+            }
+
+            deps.command_state.voice_enabled = !deps.command_state.voice_enabled;
+            let state = if deps.command_state.voice_enabled { "ON" } else { "OFF" };
+            add_message(deps.state, MessageRole::System, &format!("VOICE: {}", state));
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Voice input toggled for this CLI session; persistent runtime speech settings remain in config.",
+            );
+            Ok(DispatchResult::Continue)
+        }
+        "/speech" => {
+            show_speech_config_shared(
+                deps.runtime,
+                deps.state,
+                deps.command_state.voice_enabled,
+            )
+            .await;
+            Ok(DispatchResult::Continue)
+        }
+        "/listen" => {
+            if deps.state.listen_mode_active {
+                let session_id = deps.state.listen_session_id;
+                deps.state.listen_mode_active = false;
+                target
+                    .send_event(Event::Speech(SpeechEvent::ListenModeStopRequested {
+                        session_id,
+                    }))
+                    .await?;
+                add_message(deps.state, MessageRole::System, "🎤 Stopping listen mode...");
+            } else {
+                let speech_enabled = load_speech_enabled(deps.runtime).await?;
+                if !speech_enabled {
+                    add_message(
+                        deps.state,
+                        MessageRole::Warning,
+                        "Speech must be enabled for /listen. Use /config set speech_enabled true",
+                    );
+                    return Ok(DispatchResult::Continue);
+                }
+
+                deps.state.listen_session_id = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(1);
+                deps.state.listen_mode_active = true;
+                let session_id = deps.state.listen_session_id;
+                target
+                    .send_event(Event::Speech(SpeechEvent::ListenModeRequested {
+                        session_id,
+                    }))
+                    .await?;
+                add_message(
+                    deps.state,
+                    MessageRole::System,
+                    "🎤 Listen mode started — type /listen again to stop.",
+                );
+            }
+            Ok(DispatchResult::Continue)
+        }
+        "/microphone" => {
+            handle_microphone_command(line, target, deps.state).await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/screenshot" => {
+            show_screenshot_status_shared(deps.runtime, deps.state).await;
+            Ok(DispatchResult::Continue)
+        }
+        "/config" => {
+            handle_config_command(line, target, deps.state).await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/loops" => {
+            handle_loops_command(line, target, deps.state).await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/help" | "/h" => {
+            show_help_shared(deps.state);
+            Ok(DispatchResult::Continue)
+        }
+        "/actors" => {
+            show_actors_shared(deps.state);
+            Ok(DispatchResult::Continue)
+        }
+        "/copy" => {
+            copy_last_response_shared(deps.state);
+            Ok(DispatchResult::Continue)
+        }
+        "/close" | "/quit" | "/exit" | "/q" => Ok(DispatchResult::Close),
+        "/shutdown" => {
+            target
+                .send_event(Event::System(bus::events::SystemEvent::ShutdownSignal))
+                .await?;
+            Ok(DispatchResult::Shutdown)
+        }
+        _ => {
+            add_message(
+                deps.state,
+                MessageRole::Warning,
+                &format!("Unknown command '{}'. Type /help for commands.", line),
+            );
+            Ok(DispatchResult::Continue)
+        }
+    }
+}
+
+fn add_message(state: &mut crate::tui_state::ShellState<SlashDropdown>, role: MessageRole, text: &str) {
+    state.messages.push(Message::new(role, text.to_string()));
+}
+
+fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
+    match event {
+        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::CurrentObservation)) => {
+            Ok(IpcPayload::SlashCommand { line: "/observation".to_string() })
+        }
+        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::UserMemory)) => {
+            Ok(IpcPayload::SlashCommand { line: "/memory".to_string() })
+        }
+        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::InferenceExplanation)) => {
+            Ok(IpcPayload::SlashCommand { line: "/explanation".to_string() })
+        }
+        Event::Speech(SpeechEvent::ListenModeRequested { session_id }) => Ok(IpcPayload::SlashCommand {
+            line: format!("/listen start {}", session_id),
+        }),
+        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }) => Ok(IpcPayload::SlashCommand {
+            line: format!("/listen stop {}", session_id),
+        }),
+        Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => Ok(IpcPayload::SlashCommand {
+            line: format!("/config set {} {}", key, value),
+        }),
+        Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => Ok(IpcPayload::SlashCommand {
+            line: format!("/loops {} {}", loop_name, if *enabled { "on" } else { "off" }),
+        }),
+        Event::System(bus::events::SystemEvent::ShutdownSignal) => Ok(IpcPayload::ShutdownRequested),
+        _ => Err(anyhow::anyhow!("event cannot be sent over IPC target")),
+    }
+}
+
+async fn current_models_dir(runtime: Option<&Runtime>) -> Result<PathBuf> {
+    if let Some(runtime) = runtime {
+        if let Some(path) = runtime.config.models_dir.clone() {
+            return Ok(path);
+        }
+    } else if let Ok(config) = runtime::config::load_or_create_config().await {
+        if let Some(path) = config.models_dir {
+            return Ok(path);
+        }
+    }
+
+    runtime::ollama_models_dir().map_err(|e| anyhow::anyhow!("Could not resolve models directory: {}", e))
+}
+
+async fn load_speech_enabled(runtime: Option<&Runtime>) -> Result<bool> {
+    if let Some(runtime) = runtime {
+        return Ok(runtime.config.speech_enabled);
+    }
+
+    runtime::config::load_or_create_config()
+        .await
+        .map(|c| c.speech_enabled)
+        .map_err(|e| anyhow::anyhow!("Could not read config: {}", e))
+}
+
+async fn show_speech_config_shared(
+    runtime: Option<&Runtime>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+    voice_enabled: bool,
+) {
+    let config = if let Some(runtime) = runtime {
+        runtime.config.clone()
+    } else {
+        match runtime::config::load_or_create_config().await {
+            Ok(c) => c,
+            Err(e) => {
+                add_message(
+                    state,
+                    MessageRole::Warning,
+                    &format!("Failed to load config: {}", e),
+                );
+                return;
+            }
+        }
+    };
+
+    add_message(state, MessageRole::System, "━━  Speech Configuration");
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("speech_enabled            {}", config.speech_enabled),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!(
+            "speech_model_dir          {}",
+            config
+                .speech_model_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(default platform path)".to_string())
+        ),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("voice_always_listening    {}", config.voice_always_listening),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("wakeword_enabled          {}", config.wakeword_enabled),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("tts_rate                  {:.1}", config.tts_rate),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!(
+            "proactive_speech_enabled  {}",
+            config.proactive_speech_enabled
+        ),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("voice_session_active      {}", if voice_enabled { "yes" } else { "no" }),
+    );
+}
+
+async fn show_screenshot_status_shared(
+    runtime: Option<&Runtime>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) {
+    let capture_enabled = if let Some(runtime) = runtime {
+        runtime.config.screen_capture_enabled
+    } else {
+        runtime::config::load_or_create_config()
+            .await
+            .map(|c| c.screen_capture_enabled)
+            .unwrap_or(false)
+    };
+    let platform_support = if cfg!(target_os = "windows") {
+        "supported"
+    } else {
+        "not implemented"
+    };
+    let active_model = state.current_model.as_deref().unwrap_or("unknown");
+    let vision_status = if is_vision_capable_model(active_model) {
+        "yes"
+    } else {
+        "no"
+    };
+    add_message(
+        state,
+        MessageRole::System,
+        &format!(
+            "Screenshot capture: {} | Platform: {} | Active model: {} | Vision capable: {}",
+            if capture_enabled { "enabled" } else { "disabled" },
+            platform_support,
+            active_model,
+            vision_status
+        ),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        "Privacy: screenshots are in-memory only and not persisted. Availability depends on platform support.",
+    );
+}
+
+async fn handle_microphone_command(
+    line: &str,
+    target: &mut DispatchTarget<'_>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) -> Result<()> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.get(1) == Some(&"select") {
+        let idx_str = parts.get(2).copied().unwrap_or("");
+        let idx: usize = idx_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Usage: /microphone select <index>"))?;
+        let devices = runtime::list_input_devices();
+        if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
+            let value = if idx == 0 { String::new() } else { name.clone() };
+            target
+                .send_event(Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                    key: "microphone_device".to_string(),
+                    value,
+                }))
+                .await?;
+            add_message(
+                state,
+                MessageRole::System,
+                &format!(
+                    "🎤 Microphone set to: {}{}",
+                    name,
+                    if idx == 0 { " (system default)" } else { "" }
+                ),
+            );
+        } else {
+            add_message(
+                state,
+                MessageRole::Warning,
+                &format!("No device at index {}. Run /microphone to list devices.", idx),
+            );
+        }
+    } else {
+        let devices = runtime::list_input_devices();
+        add_message(state, MessageRole::System, "━━  Available Microphones");
+        if devices.is_empty() {
+            add_message(state, MessageRole::Warning, "No input devices found.");
+        } else {
+            for (idx, name) in &devices {
+                add_message(state, MessageRole::System, &format!("  [{}]  {}", idx, name));
+            }
+            add_message(
+                state,
+                MessageRole::System,
+                "Use /microphone select <index> to switch. Index 0 = system default.",
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn handle_config_command(
+    line: &str,
+    target: &mut DispatchTarget<'_>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) -> Result<()> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.get(1) == Some(&"set") {
+        let key = parts.get(2).copied().unwrap_or("");
+        let value = if parts.len() > 3 {
+            parts[3..].join(" ")
+        } else {
+            String::new()
+        };
+        target
+            .send_event(Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                key: key.to_string(),
+                value: value.clone(),
+            }))
+            .await?;
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("Setting {} = {}...", key, value),
+        );
+    } else {
+        let config_path = runtime::config::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "(unavailable)".to_string());
+        let config = runtime::config::load_or_create_config().await?;
+
+        add_message(state, MessageRole::System, "━━  Configuration");
+        add_message(state, MessageRole::System, &format!("Config file: {}", config_path));
+        match toml::to_string_pretty(&config) {
+            Ok(toml_str) => {
+                for line in toml_str.lines() {
+                    add_message(state, MessageRole::System, line);
+                }
+            }
+            Err(e) => {
+                add_message(
+                    state,
+                    MessageRole::Warning,
+                    &format!("Could not serialize config: {}", e),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_loops_command(
+    line: &str,
+    target: &mut DispatchTarget<'_>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) -> Result<()> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    match parts.as_slice() {
+        ["/loops"] => {
+            add_message(state, MessageRole::System, "━━  Background Loops");
+            let loop_order = [
+                ("ctp", "CTP"),
+                ("memory_consolidation", "Memory Consolidation"),
+                ("platform_polling", "Platform Polling"),
+                ("screen_capture", "Screen Capture"),
+                ("speech", "Speech"),
+            ];
+            for (name, label) in &loop_order {
+                let enabled = state.loop_states.get(*name).copied().unwrap_or(true);
+                add_message(
+                    state,
+                    MessageRole::System,
+                    &format!("  {} — {}", label, if enabled { "enabled" } else { "disabled" }),
+                );
+            }
+        }
+        ["/loops", name] => {
+            let enabled = !state.loop_states.get(*name).copied().unwrap_or(true);
+            target
+                .send_event(Event::System(bus::events::SystemEvent::LoopControlRequested {
+                    loop_name: (*name).to_string(),
+                    enabled,
+                }))
+                .await?;
+            add_message(
+                state,
+                MessageRole::System,
+                &format!(
+                    "{} loop '{}'...",
+                    if enabled { "Enabling" } else { "Disabling" },
+                    name
+                ),
+            );
+        }
+        ["/loops", name, state_arg] => {
+            let enabled = match state_arg.to_ascii_lowercase().as_str() {
+                "on" | "enable" | "true" => true,
+                "off" | "disable" | "false" => false,
+                _ => {
+                    add_message(state, MessageRole::Warning, "Invalid state. Use on or off.");
+                    return Ok(());
+                }
+            };
+            target
+                .send_event(Event::System(bus::events::SystemEvent::LoopControlRequested {
+                    loop_name: (*name).to_string(),
+                    enabled,
+                }))
+                .await?;
+            add_message(
+                state,
+                MessageRole::System,
+                &format!(
+                    "{} loop '{}'...",
+                    if enabled { "Enabling" } else { "Disabling" },
+                    name
+                ),
+            );
+        }
+        _ => add_message(
+            state,
+            MessageRole::Warning,
+            "Usage: /loops | /loops <name> | /loops <name> on|off",
+        ),
+    }
+    Ok(())
+}
+
+fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
+    for line in [
+        "━━  Commands",
+        "/observation or /obs   What are you observing right now?",
+        "/memory or /mem        What do you remember about me?",
+        "/explanation or /why   Why did you say that?",
+        "/models                Select which model to use",
+        "/voice                 Toggle voice input in this CLI session",
+        "/speech                View speech configuration and status",
+        "/listen                Start/stop continuous live transcription",
+        "/microphone            List microphones or select one (/microphone select <index>)",
+        "/loops                 List all background loops and their status",
+        "/loops <name>          Toggle a loop on/off",
+        "/loops <name> on|off   Explicitly enable or disable a loop",
+        "/help                  Show this message",
+        "/close or /quit        Close the CLI session",
+        "/shutdown              Shut down Sena completely",
+        "/copy                  Copy last response to clipboard",
+    ] {
+        add_message(state, MessageRole::System, line);
+    }
+}
+
+fn show_actors_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
+    add_message(state, MessageRole::System, "━━  Actor Status");
+    for name in ["Platform", "Inference", "CTP", "Memory", "Soul"] {
+        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let text = match status {
+            ActorStatus::Ready => "Ready".to_string(),
+            ActorStatus::Starting => "Starting".to_string(),
+            ActorStatus::Failed(reason) => format!("Failed: {}", reason),
+        };
+        add_message(state, MessageRole::System, &format!("{}  {}", name, text));
+    }
+}
+
+fn copy_last_response_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
+    let last_response = state
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, MessageRole::Sena))
+        .map(|m| m.text.clone());
+
+    match last_response {
+        Some(text) => match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+            Ok(_) => add_message(
+                state,
+                MessageRole::System,
+                "Last response copied to clipboard.",
+            ),
+            Err(e) => add_message(state, MessageRole::Warning, &format!("Copy failed: {}", e)),
+        },
+        None => add_message(state, MessageRole::System, "No response to copy yet."),
+    }
+}
+
+fn handle_model_dir_input_shared(
+    path_str: &str,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) -> Result<()> {
+    if path_str.trim().is_empty() {
+        add_message(
+            state,
+            MessageRole::System,
+            "Model directory change cancelled. Keeping current directory.",
+        );
+        return Ok(());
+    }
+
+    let path = PathBuf::from(path_str.trim());
+    let models = model_selector::discover_models_at(&path)?;
+    state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -2523,14 +2556,13 @@ fn verbose_format(ev: &Event) -> Option<String> {
 /// instead of booting its own runtime. All bus events and commands flow through
 /// the IPC channel.
 pub async fn run_with_ipc() -> anyhow::Result<()> {
-    use crate::ipc_client::IpcClient;
     use bus::{IpcPayload, LineStyle};
 
     crate::display::banner();
     crate::display::info("Connecting to Sena daemon...");
 
     // Connect to daemon IPC endpoint.
-    let mut ipc_client = IpcClient::connect()
+    let mut ipc_client = crate::ipc_client::IpcClient::connect()
         .await
         .map_err(|e| anyhow::anyhow!("IPC connection failed: {}", e))?;
 
@@ -2575,6 +2607,14 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     
     // Seed current_model from SessionReady handshake.
     state.current_model = initial_model;
+
+    let mut command_state = CommandRuntimeState {
+        voice_enabled: runtime::config::load_or_create_config()
+            .await
+            .map(|c| c.speech_enabled)
+            .unwrap_or(false),
+        ..CommandRuntimeState::default()
+    };
 
     // ── Main event loop ───────────────────────────────────────────────────────
     'main: loop {
@@ -2772,37 +2812,14 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                         state.slash_dropdown = None;
                                         state.editor.push_history(&line);
 
-                                        if line == "/models" {
-                                            let models_dir = runtime::ollama_models_dir().ok();
-                                            match models_dir
-                                                .as_deref()
-                                                .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
-                                                .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
-                                            {
-                                                Ok(models) => {
-                                                    state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                                }
-                                                Err(e) => {
-                                                    state.messages.push(Message::new(
-                                                        MessageRole::Warning,
-                                                        format!("Model discovery failed: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                        } else if line == "/listen" {
-                                            handle_listen_toggle_ipc(
-                                                &mut ipc_client,
-                                                &mut state,
-                                            ).await;
-                                        } else if line == "/close" || line == "/quit" {
-                                            break 'main;
-                                        } else if line.starts_with('/') {
-                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
-                                        } else {
-                                            state.messages.push(Message::new(MessageRole::User, line.clone()));
-                                            let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                            state.waiting_for_inference = true;
-                                            state.stats.messages_sent += 1;
+                                        match dispatch_ipc_input_line(
+                                            &line,
+                                            &mut ipc_client,
+                                            &mut state,
+                                            &mut command_state,
+                                        ).await {
+                                            DispatchResult::Continue => {}
+                                            DispatchResult::Close | DispatchResult::Shutdown => break 'main,
                                         }
                                     }
                                 }
@@ -2819,66 +2836,14 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                     if !line.is_empty() {
                                         state.editor.push_history(&line);
 
-                                        if state.pending_model_dir_input {
-                                            state.pending_model_dir_input = false;
-                                            if line.is_empty() {
-                                                state.messages.push(Message::new(
-                                                    MessageRole::System,
-                                                    "Model directory change cancelled.".to_string(),
-                                                ));
-                                            } else {
-                                                let path = std::path::PathBuf::from(&line);
-                                                match model_selector::discover_models_at(&path) {
-                                                    Ok(models) if !models.is_empty() => {
-                                                        state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                                    }
-                                                    Ok(_) => {
-                                                        state.messages.push(Message::new(
-                                                            MessageRole::Warning,
-                                                            format!("No models found in: {}", line),
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        state.messages.push(Message::new(
-                                                            MessageRole::Warning,
-                                                            format!("Model discovery failed: {}", e),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        } else if line == "/models" {
-                                            let models_dir = runtime::ollama_models_dir().ok();
-                                            match models_dir
-                                                .as_deref()
-                                                .ok_or_else(|| anyhow::anyhow!("Could not resolve models directory"))
-                                                .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
-                                            {
-                                                Ok(models) => {
-                                                    state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
-                                                }
-                                                Err(e) => {
-                                                    state.messages.push(Message::new(
-                                                        MessageRole::Warning,
-                                                        format!("Model discovery failed: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                        } else if line == "/listen" {
-                                            handle_listen_toggle_ipc(
-                                                &mut ipc_client,
-                                                &mut state,
-                                            ).await;
-                                        } else if line.starts_with('/') {
-                                            if line == "/close" || line == "/quit" {
-                                                break 'main;
-                                            }
-                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
-                                        } else {
-                                            // Chat message
-                                            state.messages.push(Message::new(MessageRole::User, line.clone()));
-                                            let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                            state.waiting_for_inference = true;
-                                            state.stats.messages_sent += 1;
+                                        match dispatch_ipc_input_line(
+                                            &line,
+                                            &mut ipc_client,
+                                            &mut state,
+                                            &mut command_state,
+                                        ).await {
+                                            DispatchResult::Continue => {}
+                                            DispatchResult::Close | DispatchResult::Shutdown => break 'main,
                                         }
                                     }
                                 }
@@ -2970,54 +2935,45 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Toggle listen mode in IPC shell: sends the appropriate `/listen start|stop` slash command
-/// to the daemon and updates the local tracking state.
-async fn handle_listen_toggle_ipc(
+async fn dispatch_ipc_input_line(
+    line: &str,
     ipc_client: &mut crate::ipc_client::IpcClient,
     state: &mut crate::tui_state::ShellState<SlashDropdown>,
-) {
-    if state.listen_mode_active {
-        // Already active — stop it.
-        state.listen_mode_active = false;
-        let stop_cmd = format!("/listen stop {}", state.listen_session_id);
-        if let Err(e) = ipc_client
-            .send(bus::IpcPayload::SlashCommand { line: stop_cmd })
-            .await
-        {
-            state.messages.push(Message::new(
-                MessageRole::Warning,
-                format!("[listen] Failed to send stop: {}", e),
-            ));
-        } else {
-            state.messages.push(Message::new(
-                MessageRole::System,
-                "\u{1f3a4} Stopping listen mode...".to_string(),
-            ));
-        }
-    } else {
-        // Start a new session.
-        state.listen_session_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(1);
-        state.listen_mode_active = true;
-        let start_cmd = format!("/listen start {}", state.listen_session_id);
-        if let Err(e) = ipc_client
-            .send(bus::IpcPayload::SlashCommand { line: start_cmd })
-            .await
-        {
-            state.listen_mode_active = false;
-            state.messages.push(Message::new(
-                MessageRole::Warning,
-                format!("[listen] Failed to start: {}", e),
-            ));
-        } else {
-            state.messages.push(Message::new(
-                MessageRole::System,
-                "\u{1f3a4} Listen mode started — type /listen again to stop.".to_string(),
-            ));
+    command_state: &mut CommandRuntimeState,
+) -> DispatchResult {
+    if line.starts_with('/') || state.pending_model_dir_input {
+        let mut target = DispatchTarget::IpcClient(ipc_client);
+        let mut deps = CommandDeps {
+            runtime: None,
+            state,
+            command_state,
+        };
+        match dispatch_command(line, &mut target, &mut deps).await {
+            Ok(result) => return result,
+            Err(e) => {
+                add_message(deps.state, MessageRole::Warning, &format!("Command failed: {}", e));
+                return DispatchResult::Continue;
+            }
         }
     }
+
+    state.messages.push(Message::new(MessageRole::User, line.to_string()));
+    if let Err(e) = ipc_client
+        .send(bus::IpcPayload::Chat {
+            text: line.to_string(),
+        })
+        .await
+    {
+        add_message(
+            state,
+            MessageRole::Warning,
+            &format!("Failed to send chat: {}", e),
+        );
+    } else {
+        state.waiting_for_inference = true;
+        state.stats.messages_sent += 1;
+    }
+    DispatchResult::Continue
 }
 
 /// Simplified TUI rendering for IPC mode.
