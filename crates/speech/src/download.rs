@@ -64,10 +64,10 @@ impl ModelManifest {
         ModelInfo {
             name: "whisper-base-en-safetensors".to_string(),
             filename: "model.safetensors".to_string(),
-            url: "https://huggingface.co/openai/whisper-base/resolve/main/model.safetensors"
+            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/model.safetensors"
                 .to_string(),
-            sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 145_000_000, // ~145MB
+            sha256: "d4dd5542fd6a1d35639e21384238f3bfe6c557c849d392b5905d33ee29e71db5".to_string(),
+            size_bytes: 290_000_000, // ~290MB
             model_type: ModelType::WhisperStt,
         }
     }
@@ -77,7 +77,7 @@ impl ModelManifest {
         ModelInfo {
             name: "whisper-config".to_string(),
             filename: "config.json".to_string(),
-            url: "https://huggingface.co/openai/whisper-base/resolve/main/config.json"
+            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/config.json"
                 .to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 2_000, // ~2KB
@@ -90,7 +90,7 @@ impl ModelManifest {
         ModelInfo {
             name: "whisper-tokenizer".to_string(),
             filename: "tokenizer.json".to_string(),
-            url: "https://huggingface.co/openai/whisper-base/resolve/main/tokenizer.json"
+            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/tokenizer.json"
                 .to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 2_000_000, // ~2MB
@@ -106,8 +106,8 @@ impl ModelManifest {
             // Placeholder URL — will be updated to actual HF URL
             url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx".to_string(),
             // Placeholder checksum — will be updated to actual SHA-256
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 60_000_000, // ~60MB
+            sha256: "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f".to_string(),
+            size_bytes: 63_200_000, // ~63.2MB
             model_type: ModelType::PiperTts,
         }
     }

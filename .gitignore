@@ -25,3 +25,6 @@ memories
 # Added by cargo
 
 /target
+
+# Local scratch docs that are not part of project governance docs
+docs/_scratch/

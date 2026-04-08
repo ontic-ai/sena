@@ -16,6 +16,7 @@ Read these files first. Do not generate code without understanding them:
 3. `docs/ROADMAP.md` — what phase we are in and what is in scope
 
 If you are asked to implement something not in the current phase, say so. Do not implement it.
+If you have any questions -- they must be asked using the #askquestions tool
 
 ---
 

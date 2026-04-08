@@ -214,10 +214,7 @@ impl SttActor {
                 })?;
 
                 reply_rx.await.map_err(|e| {
-                    SpeechError::TranscriptionFailed(format!(
-                        "candle worker reply failed: {}",
-                        e
-                    ))
+                    SpeechError::TranscriptionFailed(format!("candle worker reply failed: {}", e))
                 })?
             }
             None => Err(SpeechError::TranscriptionFailed(
@@ -562,8 +559,7 @@ fn candle_worker_loop(
                     let confidence = if text.trim().is_empty() {
                         0.0
                     } else {
-                        (crate::silence_detector::calculate_rms(&samples) * 10.0)
-                            .clamp(0.55, 0.99)
+                        (crate::silence_detector::calculate_rms(&samples) * 10.0).clamp(0.55, 0.99)
                     };
                     TranscriptionResult { text, confidence }
                 });
