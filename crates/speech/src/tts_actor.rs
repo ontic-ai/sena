@@ -31,7 +31,10 @@ pub struct TtsActor {
     request_rx: Option<mpsc::Receiver<SpeakRequest>>,
     active_backend: Option<ActiveTtsBackend>,
     tts_voice: Option<String>,
-    tts_rate: f32,
+    /// User-configured base speaking rate.
+    base_tts_rate: f32,
+    /// Current personality state as (warmth, assertiveness, brevity).
+    current_personality: Option<(u8, u8, u8)>,
     model_dir: Option<PathBuf>,
     interrupt: Arc<AtomicBool>,
     /// Synthesized audio indexed by sentence_index, awaiting ordered playback.
@@ -84,7 +87,8 @@ impl TtsActor {
             request_rx: Some(request_rx),
             active_backend: None,
             tts_voice: None,
-            tts_rate: 1.0,
+            base_tts_rate: 1.0,
+            current_personality: None,
             model_dir: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             streaming_pending: BTreeMap::new(),
@@ -104,8 +108,34 @@ impl TtsActor {
 
     /// Set TTS rate (0.5-2.0 speed multiplier).
     pub fn with_rate(mut self, rate: f32) -> Self {
-        self.tts_rate = rate.clamp(0.5, 2.0);
+        self.base_tts_rate = rate.clamp(0.5, 2.0);
         self
+    }
+
+    fn effective_tts_rate(&self) -> f32 {
+        (self.base_tts_rate * self.personality_rate_modifier()).clamp(0.5, 2.0)
+    }
+
+    /// Compute a subtle rate multiplier from personality values.
+    ///
+    /// - assertiveness higher => slightly faster
+    /// - brevity higher => slightly faster
+    /// - warmth higher => slightly calmer/slower
+    fn personality_rate_modifier(&self) -> f32 {
+        let Some((warmth, assertiveness, brevity)) = self.current_personality else {
+            return 1.0;
+        };
+
+        let warmth_delta = (warmth as f32 - 50.0) / 50.0;
+        let assertiveness_delta = (assertiveness as f32 - 50.0) / 50.0;
+        let brevity_delta = (brevity as f32 - 50.0) / 50.0;
+
+        let modifier = 1.0
+            + (assertiveness_delta * 0.08)
+            + (brevity_delta * 0.06)
+            - (warmth_delta * 0.06);
+
+        modifier.clamp(0.8, 1.2)
     }
 
     /// Set model directory for resolving voice model paths.
@@ -193,7 +223,7 @@ impl TtsActor {
             .ok_or_else(|| SpeechError::TtsInitFailed("backend not initialized".to_string()))?;
 
         let text = text.to_string();
-        let rate = self.tts_rate;
+        let rate = self.effective_tts_rate();
 
         tracing::debug!(
             "tts: generate_and_play — backend={:?} text_len={} rate={}",
@@ -276,7 +306,7 @@ impl TtsActor {
     async fn play_synth_result(&self, result: &SynthResult) -> Result<(), SpeechError> {
         let backend = self.active_backend.clone();
         let sentence = result.sentence.clone();
-        let rate = self.tts_rate;
+        let rate = self.effective_tts_rate();
         let audio = result.audio.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -313,7 +343,7 @@ impl TtsActor {
     /// The result is sent to `synth_tx` when complete.
     fn spawn_sentence_synthesis(&self, sentence: String, request_id: u64, sentence_index: u64) {
         let backend = self.active_backend.clone();
-        let rate = self.tts_rate;
+        let rate = self.effective_tts_rate();
         let synth_tx = self.synth_tx.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -419,9 +449,28 @@ impl Actor for TtsActor {
                             break;
                         }
                         Ok(Event::Soul(SoulEvent::PersonalityUpdated(update))) => {
-                            // Apply rate immediately; warmth and verbosity are noted here for
-                            // future Piper SSML integration (TODO M6: pass to synthesis pipeline).
-                            self.tts_rate = update.rate.clamp(0.5, 2.0);
+                            // Soul currently emits `rate`, `warmth`, and `verbosity`.
+                            // Until assertiveness/brevity are added upstream, derive:
+                            // assertiveness from normalized rate, brevity as inverse verbosity.
+                            let assertiveness = (((update.rate.clamp(0.5, 2.0) - 0.5) / 1.5)
+                                * 100.0)
+                                .round() as u8;
+                            let brevity = 100u8.saturating_sub(update.verbosity.min(100));
+
+                            self.current_personality = Some((
+                                update.warmth.min(100),
+                                assertiveness.min(100),
+                                brevity,
+                            ));
+
+                            tracing::info!(
+                                "tts: personality updated — rate={:.2}, warmth={}, verbosity={}, modifier={:.3}, effective_rate={:.3}",
+                                update.rate,
+                                update.warmth,
+                                update.verbosity,
+                                self.personality_rate_modifier(),
+                                self.effective_tts_rate(),
+                            );
                         }
                         Ok(Event::Inference(InferenceEvent::InferenceSentenceReady {
                             sentence,
@@ -756,6 +805,29 @@ fn resample_pcm_i16(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personality_rate_modifier_reflects_personality_and_is_bounded() {
+        let mut actor = TtsActor::new(TtsBackend::Mock).with_rate(1.0);
+
+        assert!((actor.personality_rate_modifier() - 1.0).abs() < f32::EPSILON);
+
+        actor.current_personality = Some((20, 90, 90));
+        let faster = actor.personality_rate_modifier();
+        assert!(faster > 1.0);
+
+        actor.current_personality = Some((100, 0, 0));
+        let calmer = actor.personality_rate_modifier();
+        assert!(calmer < 1.0);
+
+        actor.current_personality = Some((0, 100, 100));
+        let max_modifier = actor.personality_rate_modifier();
+        assert!(max_modifier <= 1.2);
+
+        actor.current_personality = Some((100, 0, 0));
+        let min_modifier = actor.personality_rate_modifier();
+        assert!(min_modifier >= 0.8);
+    }
 
     #[tokio::test]
     async fn tts_actor_boots_and_stops_cleanly() {
