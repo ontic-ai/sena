@@ -1158,7 +1158,8 @@ impl Shell {
                 command_state: &mut command_state,
             };
             let mut target = DispatchTarget::LocalBus(&self.bus);
-            match dispatch_command(&line, &mut target, &mut deps).await {
+            let mut transport = LocalCommandDispatchTransport;
+            match dispatch_command(&line, &mut transport, &mut target, &mut deps).await {
                 Ok(result) => {
                     self.verbose = command_state.verbose;
                     self.voice_enabled = command_state.voice_enabled;
@@ -1281,24 +1282,24 @@ enum DispatchResult {
 
 enum DispatchTarget<'a> {
     LocalBus(&'a Arc<bus::EventBus>),
-    IpcClient(&'a mut crate::ipc_client::IpcClient),
+    Noop,
 }
 
 impl<'a> DispatchTarget<'a> {
     async fn send_event(&mut self, event: Event) -> Result<()> {
         match self {
-            Self::LocalBus(bus) => bus
-                .broadcast(event)
-                .await
-                .map_err(|e| anyhow::anyhow!("bus broadcast failed: {}", e)),
-            Self::IpcClient(client) => {
-                let payload = event_to_ipc_payload(&event)?;
-                client
-                    .send(payload)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| anyhow::anyhow!("IPC send failed: {}", e))
+            Self::LocalBus(bus) => {
+                if matches!(event, Event::Inference(InferenceEvent::InferenceRequested { .. })) {
+                    bus.send_directed("inference", event)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("directed send failed: {}", e))
+                } else {
+                    bus.broadcast(event)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("bus broadcast failed: {}", e))
+                }
             }
+            Self::Noop => Err(anyhow::anyhow!("dispatch target does not support send_event")),
         }
     }
 
@@ -1306,12 +1307,84 @@ impl<'a> DispatchTarget<'a> {
     async fn send_ipc(&mut self, payload: IpcPayload) -> Result<()> {
         match self {
             Self::LocalBus(_) => Ok(()),
-            Self::IpcClient(client) => client
-                .send(payload)
-                .await
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("IPC send failed: {}", e)),
+            Self::Noop => {
+                let _ = payload;
+                Ok(())
+            }
         }
+    }
+}
+
+enum DisplayMessage {
+    BusEvent(Box<Event>),
+    IpcPayload(IpcPayload),
+}
+
+trait MessageTransport: Send {
+    async fn recv(&mut self) -> Option<DisplayMessage>;
+    async fn send(&mut self, target: &mut DispatchTarget<'_>, event: Event) -> Result<()>;
+}
+
+pub struct LocalBusTransport {
+    rx: tokio::sync::broadcast::Receiver<Event>,
+}
+
+impl LocalBusTransport {
+    fn new(rx: tokio::sync::broadcast::Receiver<Event>) -> Self {
+        Self { rx }
+    }
+}
+
+impl MessageTransport for LocalBusTransport {
+    async fn recv(&mut self) -> Option<DisplayMessage> {
+        match self.rx.recv().await {
+            Ok(event) => Some(DisplayMessage::BusEvent(Box::new(event))),
+            Err(_) => None,
+        }
+    }
+
+    async fn send(&mut self, target: &mut DispatchTarget<'_>, event: Event) -> Result<()> {
+        target.send_event(event).await
+    }
+}
+
+pub struct IpcTransport {
+    client: crate::ipc_client::IpcClient,
+}
+
+impl IpcTransport {
+    fn new(client: crate::ipc_client::IpcClient) -> Self {
+        Self { client }
+    }
+}
+
+impl MessageTransport for IpcTransport {
+    async fn recv(&mut self) -> Option<DisplayMessage> {
+        self.client
+            .recv()
+            .await
+            .map(|msg| DisplayMessage::IpcPayload(msg.payload))
+    }
+
+    async fn send(&mut self, _target: &mut DispatchTarget<'_>, event: Event) -> Result<()> {
+        let payload = event_to_ipc_payload(&event)?;
+        self.client
+            .send(payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("IPC send failed: {}", e))
+    }
+}
+
+struct LocalCommandDispatchTransport;
+
+impl MessageTransport for LocalCommandDispatchTransport {
+    async fn recv(&mut self) -> Option<DisplayMessage> {
+        None
+    }
+
+    async fn send(&mut self, target: &mut DispatchTarget<'_>, event: Event) -> Result<()> {
+        target.send_event(event).await
     }
 }
 
@@ -1329,8 +1402,9 @@ struct CommandDeps<'a> {
     command_state: &'a mut CommandRuntimeState,
 }
 
-async fn dispatch_command(
+async fn dispatch_command<T: MessageTransport + ?Sized>(
     input: &str,
+    transport: &mut T,
     target: &mut DispatchTarget<'_>,
     deps: &mut CommandDeps<'_>,
 ) -> Result<DispatchResult> {
@@ -1359,8 +1433,8 @@ async fn dispatch_command(
                 query: TransparencyQuery::CurrentObservation,
                 started_at: Instant::now(),
             });
-            target
-                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+            transport
+                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
                     TransparencyQuery::CurrentObservation,
                 )))
                 .await?;
@@ -1373,8 +1447,8 @@ async fn dispatch_command(
                 query: TransparencyQuery::UserMemory,
                 started_at: Instant::now(),
             });
-            target
-                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+            transport
+                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
                     TransparencyQuery::UserMemory,
                 )))
                 .await?;
@@ -1387,8 +1461,8 @@ async fn dispatch_command(
                 query: TransparencyQuery::InferenceExplanation,
                 started_at: Instant::now(),
             });
-            target
-                .send_event(Event::Transparency(BusTransparencyEvent::QueryRequested(
+            transport
+                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
                     TransparencyQuery::InferenceExplanation,
                 )))
                 .await?;
@@ -1444,8 +1518,8 @@ async fn dispatch_command(
             if deps.state.listen_mode_active {
                 let session_id = deps.state.listen_session_id;
                 deps.state.listen_mode_active = false;
-                target
-                    .send_event(Event::Speech(SpeechEvent::ListenModeStopRequested {
+                transport
+                    .send(target, Event::Speech(SpeechEvent::ListenModeStopRequested {
                         session_id,
                     }))
                     .await?;
@@ -1467,8 +1541,8 @@ async fn dispatch_command(
                     .unwrap_or(1);
                 deps.state.listen_mode_active = true;
                 let session_id = deps.state.listen_session_id;
-                target
-                    .send_event(Event::Speech(SpeechEvent::ListenModeRequested {
+                transport
+                    .send(target, Event::Speech(SpeechEvent::ListenModeRequested {
                         session_id,
                     }))
                     .await?;
@@ -1481,7 +1555,7 @@ async fn dispatch_command(
             Ok(DispatchResult::Continue)
         }
         "/microphone" => {
-            handle_microphone_command(line, target, deps.state).await?;
+            handle_microphone_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
         "/screenshot" => {
@@ -1489,11 +1563,11 @@ async fn dispatch_command(
             Ok(DispatchResult::Continue)
         }
         "/config" => {
-            handle_config_command(line, target, deps.state).await?;
+            handle_config_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
         "/loops" => {
-            handle_loops_command(line, target, deps.state).await?;
+            handle_loops_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
         "/help" | "/h" => {
@@ -1510,8 +1584,8 @@ async fn dispatch_command(
         }
         "/close" | "/quit" | "/exit" | "/q" => Ok(DispatchResult::Close),
         "/shutdown" => {
-            target
-                .send_event(Event::System(bus::events::SystemEvent::ShutdownSignal))
+            transport
+                .send(target, Event::System(bus::events::SystemEvent::ShutdownSignal))
                 .await?;
             Ok(DispatchResult::Shutdown)
         }
@@ -1693,8 +1767,9 @@ async fn show_screenshot_status_shared(
     );
 }
 
-async fn handle_microphone_command(
+async fn handle_microphone_command<T: MessageTransport + ?Sized>(
     line: &str,
+    transport: &mut T,
     target: &mut DispatchTarget<'_>,
     state: &mut crate::tui_state::ShellState<SlashDropdown>,
 ) -> Result<()> {
@@ -1707,8 +1782,8 @@ async fn handle_microphone_command(
         let devices = runtime::list_input_devices();
         if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
             let value = if idx == 0 { String::new() } else { name.clone() };
-            target
-                .send_event(Event::System(bus::events::SystemEvent::ConfigSetRequested {
+            transport
+                .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
                     key: "microphone_device".to_string(),
                     value,
                 }))
@@ -1748,8 +1823,9 @@ async fn handle_microphone_command(
     Ok(())
 }
 
-async fn handle_config_command(
+async fn handle_config_command<T: MessageTransport + ?Sized>(
     line: &str,
+    transport: &mut T,
     target: &mut DispatchTarget<'_>,
     state: &mut crate::tui_state::ShellState<SlashDropdown>,
 ) -> Result<()> {
@@ -1761,8 +1837,8 @@ async fn handle_config_command(
         } else {
             String::new()
         };
-        target
-            .send_event(Event::System(bus::events::SystemEvent::ConfigSetRequested {
+        transport
+            .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
                 key: key.to_string(),
                 value: value.clone(),
             }))
@@ -1798,8 +1874,9 @@ async fn handle_config_command(
     Ok(())
 }
 
-async fn handle_loops_command(
+async fn handle_loops_command<T: MessageTransport + ?Sized>(
     line: &str,
+    transport: &mut T,
     target: &mut DispatchTarget<'_>,
     state: &mut crate::tui_state::ShellState<SlashDropdown>,
 ) -> Result<()> {
@@ -1825,8 +1902,8 @@ async fn handle_loops_command(
         }
         ["/loops", name] => {
             let enabled = !state.loop_states.get(*name).copied().unwrap_or(true);
-            target
-                .send_event(Event::System(bus::events::SystemEvent::LoopControlRequested {
+            transport
+                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
                     loop_name: (*name).to_string(),
                     enabled,
                 }))
@@ -1850,8 +1927,8 @@ async fn handle_loops_command(
                     return Ok(());
                 }
             };
-            target
-                .send_event(Event::System(bus::events::SystemEvent::LoopControlRequested {
+            transport
+                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
                     loop_name: (*name).to_string(),
                     enabled,
                 }))
@@ -1978,388 +2055,11 @@ fn is_vision_capable_model(name: &str) -> bool {
 /// Run the interactive shell. Returns the exit reason for the restart loop.
 #[allow(dead_code)]
 pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
-    // ── Enter raw mode and alternate screen ───────────────────────────────────
-    terminal::enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let _guard = TerminalGuard; // Ensures cleanup on drop
-
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    // ── Initialize shell state ────────────────────────────────────────────────
-    let mut shell = Shell::new(Arc::clone(&runtime));
-
-    // ── Ctrl-C shutdown watch ─────────────────────────────────────────────────
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = shutdown_tx.send(true);
-    });
-
-    // ── Bus subscriber for events ─────────────────────────────────────────────
-    let mut bus_rx = runtime.bus.subscribe_broadcast();
-
-    let mut exit_reason = ShellExitReason::Close;
-
-    // ── Main event loop ───────────────────────────────────────────────────────
-    loop {
-        // Render the current state
-        if let Err(e) = terminal.draw(|f| shell.render(f)) {
-            shell.add_message(MessageRole::Warning, format!("Display error: {}", e));
-            // Try to continue — next frame may succeed
-        }
-
-        // Check for Ctrl+C timeout (reset if 3 seconds passed)
-        if let Some(first_press) = shell.state.ctrl_c_first_press {
-            if first_press.elapsed() > Duration::from_secs(3) {
-                shell.state.ctrl_c_first_press = None;
-            }
-        }
-
-        tokio::select! {
-            biased;
-
-            // Ctrl-C signal
-            _ = shutdown_rx.changed() => {
-                if let Some(first_press) = shell.state.ctrl_c_first_press {
-                    if first_press.elapsed() < Duration::from_secs(3) {
-                        // Second Ctrl+C within 3 seconds
-                        break;
-                    }
-                } else {
-                    shell.state.ctrl_c_first_press = Some(Instant::now());
-                }
-            }
-
-            // Bus events
-            bcast = bus_rx.recv() => {
-                match bcast {
-                    Ok(ev) => {
-                        if matches!(ev, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
-                            tracing::info!("cli: ShutdownSignal received on bus — exiting shell");
-                            exit_reason = ShellExitReason::Shutdown;
-                            break;
-                        }
-                        shell.handle_bus_event(ev).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("cli: broadcast channel closed unexpectedly — exiting shell");
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("cli: broadcast receiver lagged by {} events — some events dropped", n);
-                    }
-                }
-            }
-
-            // Keyboard events (poll in a non-blocking way)
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                shell.handle_transparency_timeout();
-
-                // Poll for crossterm events
-                let poll_result = event::poll(Duration::from_millis(0));
-                match poll_result {
-                    Ok(true) => {},
-                    Ok(false) => continue,
-                    Err(e) => {
-                        shell.add_message(
-                            MessageRole::Warning,
-                            format!("Poll error: {}", e),
-                        );
-                        continue;
-                    }
-                }
-
-                match event::read() {
-                    Err(e) => {
-                        shell.add_message(
-                            MessageRole::Warning,
-                            format!("Input error: {}", e),
-                        );
-                        continue;
-                    }
-                    Ok(event::Event::Mouse(mouse)) => {
-                        match mouse.kind {
-                            event::MouseEventKind::ScrollUp => {
-                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_add(3);
-                            }
-                            event::MouseEventKind::ScrollDown => {
-                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_sub(3);
-                                // Snap to bottom when at bottom
-                                if shell.state.scroll_offset == 0 {
-                                    shell.state.scroll_offset = 0;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    Ok(event::Event::Key(key)) => {
-                        // Filter out key release events (Windows)
-                        if key.kind != KeyEventKind::Press {
-                            continue;
-                        }
-
-                        match (key.code, key.modifiers) {
-                            // Ctrl+Shift+C — copy last response to clipboard
-                            (KeyCode::Char('c'), mods)
-                                if mods.contains(KeyModifiers::CONTROL)
-                                    && mods.contains(KeyModifiers::SHIFT) =>
-                            {
-                                shell.copy_last_response();
-                            }
-
-                            // Ctrl+C handled via shutdown signal above
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                if let Some(first_press) = shell.state.ctrl_c_first_press {
-                                    if first_press.elapsed() < Duration::from_secs(3) {
-                                        break;
-                                    }
-                                } else {
-                                    shell.state.ctrl_c_first_press = Some(Instant::now());
-                                }
-                            }
-
-                            // Ctrl+Y — copy last response to clipboard
-                            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                                shell.copy_last_response();
-                            }
-
-            // Ctrl+D
-                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                break;
-                            }
-
-                            // ── Model Popup Key Handlers ──────────────────────────────
-                            // When popup is visible, intercept navigation keys
-                            (KeyCode::Up, _) if shell.state.model_popup.is_some() => {
-                                if let Some(popup) = &mut shell.state.model_popup {
-                                    popup.prev();
-                                }
-                            }
-                            (KeyCode::Down, _) if shell.state.model_popup.is_some() => {
-                                if let Some(popup) = &mut shell.state.model_popup {
-                                    popup.next();
-                                }
-                            }
-                            (KeyCode::Enter, _) if shell.state.model_popup.is_some() => {
-                                // Apply selection
-                                if let Some(popup) = shell.state.model_popup.take() {
-                                    if popup.is_change_dir_selected() {
-                                        // Prompt for directory path
-                                        shell.state.pending_model_dir_input = true;
-                                        shell.add_message(
-                                            MessageRole::System,
-                                            "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
-                                        );
-                                    } else if let Some(selected) = popup.selected() {
-                                        let model_name = selected.name.clone();
-                                        // Update config
-                                        let mut config = shell.runtime.config.clone();
-                                        config.preferred_model = Some(model_name.clone());
-                                        match runtime::save_config(&config).await {
-                                            Ok(_) => {
-                                                shell.add_message(
-                                                    MessageRole::System,
-                                                    format!("Selected model: {}", model_name),
-                                                );
-                                                shell.add_message(
-                                                    MessageRole::System,
-                                                    "Model change will take effect after restart.".to_string(),
-                                                );
-                                            }
-                                            Err(e) => {
-                                                shell.add_message(
-                                                    MessageRole::Warning,
-                                                    format!("Failed to save config: {}", e),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            (KeyCode::Esc, _) if shell.state.model_popup.is_some() => {
-                                // Cancel popup
-                                shell.state.model_popup = None;
-                                shell.add_message(
-                                    MessageRole::System,
-                                    "Model selection cancelled.".to_string(),
-                                );
-                            }
-
-                            // ── Actors Popup Key Handlers ─────────────────────────────
-                            // Any key dismisses the actors health popup
-                            _ if shell.actors_popup_visible && shell.state.model_popup.is_none() => {
-                                shell.actors_popup_visible = false;
-                            }
-
-                            // ── Slash Dropdown Key Handlers ───────────────────────────
-                            (KeyCode::Up, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut shell.state.slash_dropdown {
-                                    dd.prev();
-                                }
-                            }
-                            (KeyCode::Down, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut shell.state.slash_dropdown {
-                                    dd.next();
-                                }
-                            }
-                            (KeyCode::Tab, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                // Complete the command into the input
-                                if let Some(cmd) = shell.state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                    shell.state.editor.input = cmd.to_string();
-                                    shell.state.slash_dropdown = None;
-                                }
-                            }
-                            (KeyCode::Enter, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                // Complete and immediately submit
-                                if let Some(cmd) = shell.state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                    let line = cmd.to_string();
-                                    shell.state.editor.input.clear();
-                                    shell.state.slash_dropdown = None;
-                                    shell.state.editor.push_history(&line);
-                                    let result = shell.dispatch_line(line).await;
-                                    match result {
-                                        DispatchResult::Continue => {}
-                                        DispatchResult::Close => {
-                                            exit_reason = ShellExitReason::Close;
-                                            break;
-                                        }
-                                        DispatchResult::Shutdown => {
-                                            exit_reason = ShellExitReason::Shutdown;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            (KeyCode::Esc, _) if shell.state.slash_dropdown.is_some() => {
-                                shell.state.slash_dropdown = None;
-                            }
-
-                            // ── Normal Key Handlers (when popup is NOT visible) ──────
-                            // Enter — submit line
-                            (KeyCode::Enter, _) => {
-                                let line = shell.state.editor.input.trim().to_string();
-                                shell.state.editor.input.clear();
-                                shell.state.slash_dropdown = None;
-                                if !line.is_empty() {
-                                    shell.state.editor.push_history(&line);
-                                    let result = shell.dispatch_line(line).await;
-                                    match result {
-                                        DispatchResult::Continue => {}
-                                        DispatchResult::Close => {
-                                            exit_reason = ShellExitReason::Close;
-                                            break;
-                                        }
-                                        DispatchResult::Shutdown => {
-                                            exit_reason = ShellExitReason::Shutdown;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Backspace
-                            (KeyCode::Backspace, _) if shell.state.model_popup.is_none() => {
-                                shell.state.editor.input.pop();
-                                // Update slash dropdown after backspace
-                                if shell.state.editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut shell.state.slash_dropdown {
-                                        dd.update(&shell.state.editor.input);
-                                        if dd.is_empty() {
-                                            shell.state.slash_dropdown = None;
-                                        }
-                                    } else {
-                                        let dd = SlashDropdown::from_prefix(&shell.state.editor.input);
-                                        if !dd.is_empty() {
-                                            shell.state.slash_dropdown = Some(dd);
-                                        }
-                                    }
-                                } else {
-                                    shell.state.slash_dropdown = None;
-                                }
-                            }
-
-                            // Arrow Up — history prev (only when dropdown not active)
-                            (KeyCode::Up, _) if shell.state.model_popup.is_none() && shell.state.slash_dropdown.is_none() => {
-                                shell.state.editor.history_prev();
-                            }
-
-                            // Arrow Down — history next (only when dropdown not active)
-                            (KeyCode::Down, _) if shell.state.model_popup.is_none() && shell.state.slash_dropdown.is_none() => {
-                                shell.state.editor.history_next();
-                            }
-
-                            // Page Up — scroll up
-                            (KeyCode::PageUp, _) if shell.state.model_popup.is_none() => {
-                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_add(10);
-                            }
-
-                            // Page Down — scroll down
-                            (KeyCode::PageDown, _) if shell.state.model_popup.is_none() => {
-                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_sub(10);
-                            }
-
-                            // Escape — clear input and close dropdown
-                            (KeyCode::Esc, _) if shell.state.model_popup.is_none() => {
-                                shell.state.editor.input.clear();
-                                shell.state.slash_dropdown = None;
-                            }
-
-                            // Regular character
-                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) && shell.state.model_popup.is_none() => {
-                                shell.state.editor.input.push(c);
-                                // Reset Ctrl+C first press if user is typing
-                                shell.state.ctrl_c_first_press = None;
-                                // Update slash dropdown on every character typed
-                                if shell.state.editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut shell.state.slash_dropdown {
-                                        dd.update(&shell.state.editor.input);
-                                        if dd.is_empty() {
-                                            shell.state.slash_dropdown = None;
-                                        }
-                                    } else {
-                                        let dd = SlashDropdown::from_prefix(&shell.state.editor.input);
-                                        if !dd.is_empty() {
-                                            shell.state.slash_dropdown = Some(dd);
-                                        }
-                                    }
-                                } else {
-                                    shell.state.slash_dropdown = None;
-                                }
-                            }
-
-                            _ => {}
-                        }
-                        } // end event::Event::Key
-
-                        _ => {} // resize, focus, paste — ignore
-                    }
-            }
-        }
-    }
-
-    // ── Graceful shutdown ─────────────────────────────────────────────────────
-    drop(_guard); // Restore terminal
-    drop(terminal); // Drop terminal before printing to stdout
-
-    // Extract stats before dropping shell
-    let stats = shell.state.stats.clone();
-
-    // Drop shell to release Arc<Runtime> reference
-    drop(shell);
-
-    display::print_session_summary(&stats);
-
-    if exit_reason == ShellExitReason::Close {
-        let _ = runtime
-            .bus
-            .broadcast(Event::System(bus::events::SystemEvent::CliSessionClosed))
-            .await;
-    }
-
-    Ok(exit_reason)
+    let shell = Shell::new(Arc::clone(&runtime));
+    let transport = LocalBusTransport::new(runtime.bus.subscribe_broadcast());
+    let bus = runtime.bus.clone();
+    let target = DispatchTarget::LocalBus(&bus);
+    run_shell(transport, target, ShellMode::Local { runtime, shell }).await
 }
 
 /// Helper to create a centered rect using percentage of the available rect.
@@ -2556,7 +2256,7 @@ fn verbose_format(ev: &Event) -> Option<String> {
 /// instead of booting its own runtime. All bus events and commands flow through
 /// the IPC channel.
 pub async fn run_with_ipc() -> anyhow::Result<()> {
-    use bus::{IpcPayload, LineStyle};
+    use bus::IpcPayload;
 
     crate::display::banner();
     crate::display::info("Connecting to Sena daemon...");
@@ -2591,16 +2291,6 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 
     crate::display::success("Connected to daemon.");
 
-    // ── Enter raw mode and alternate screen ───────────────────────────────────
-    terminal::enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let _guard = TerminalGuard; // Ensures cleanup on drop
-
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    // ── Initialize simplified IPC shell state using ShellState ───────────────
     let mut state = crate::tui_state::ShellState::new();
     state.add_welcome_message("Connected to Sena daemon — local-first ambient AI");
     state.add_welcome_message("Type /help for commands, or chat freely.");
@@ -2608,101 +2298,316 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     // Seed current_model from SessionReady handshake.
     state.current_model = initial_model;
 
-    let mut command_state = CommandRuntimeState {
+    let command_state = CommandRuntimeState {
         voice_enabled: runtime::config::load_or_create_config()
             .await
             .map(|c| c.speech_enabled)
             .unwrap_or(false),
         ..CommandRuntimeState::default()
     };
+    let transport = IpcTransport::new(ipc_client);
+    let target = DispatchTarget::Noop;
+    run_shell(
+        transport,
+        target,
+        ShellMode::Ipc {
+            state,
+            command_state,
+        },
+    )
+    .await
+    .map(|_| ())
+}
 
-    // ── Main event loop ───────────────────────────────────────────────────────
-    'main: loop {
-        // Render the current state.
-        if let Err(e) = terminal.draw(|f| {
-            render_ipc_tui(
-                f,
-                &state,
-            )
-        }) {
-            tracing::error!("TUI render error: {}", e);
+enum ShellMode {
+    Local { runtime: Arc<Runtime>, shell: Shell },
+    Ipc {
+        state: crate::tui_state::ShellState<SlashDropdown>,
+        command_state: CommandRuntimeState,
+    },
+}
+
+impl ShellMode {
+    fn state(&self) -> &crate::tui_state::ShellState<SlashDropdown> {
+        match self {
+            Self::Local { shell, .. } => &shell.state,
+            Self::Ipc { state, .. } => state,
+        }
+    }
+
+    fn state_mut(&mut self) -> &mut crate::tui_state::ShellState<SlashDropdown> {
+        match self {
+            Self::Local { shell, .. } => &mut shell.state,
+            Self::Ipc { state, .. } => state,
+        }
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame) {
+        match self {
+            Self::Local { shell, .. } => shell.render(frame),
+            Self::Ipc { state, .. } => render_ipc_tui(frame, state),
+        }
+    }
+
+    fn on_tick(&mut self) {
+        if let Self::Local { shell, .. } = self {
+            shell.handle_transparency_timeout();
+        }
+    }
+
+    fn copy_last_response(&mut self) {
+        match self {
+            Self::Local { shell, .. } => shell.copy_last_response(),
+            Self::Ipc { state, .. } => copy_last_response_shared(state),
+        }
+    }
+
+    fn dismiss_actors_popup_if_open(&mut self) -> bool {
+        if let Self::Local { shell, .. } = self {
+            if shell.actors_popup_visible && shell.state.model_popup.is_none() {
+                shell.actors_popup_visible = false;
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn dispatch_input_line<T: MessageTransport>(
+        &mut self,
+        line: &str,
+        transport: &mut T,
+        target: &mut DispatchTarget<'_>,
+    ) -> DispatchResult {
+        match self {
+            Self::Local { shell, .. } => shell.dispatch_line(line.to_string()).await,
+            Self::Ipc {
+                state,
+                command_state,
+            } => {
+                if line.starts_with('/') || state.pending_model_dir_input {
+                    let mut deps = CommandDeps {
+                        runtime: None,
+                        state,
+                        command_state,
+                    };
+                    match dispatch_command(line, transport, target, &mut deps).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            add_message(
+                                deps.state,
+                                MessageRole::Warning,
+                                &format!("Command failed: {}", e),
+                            );
+                            DispatchResult::Continue
+                        }
+                    }
+                } else {
+                    state.messages.push(Message::new(MessageRole::User, line.to_string()));
+                    let request_id = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(1);
+                    let event = Event::Inference(InferenceEvent::InferenceRequested {
+                        prompt: line.to_string(),
+                        priority: Priority::High,
+                        request_id,
+                        source: bus::InferenceSource::UserText,
+                    });
+                    if let Err(e) = transport.send(target, event).await {
+                        add_message(
+                            state,
+                            MessageRole::Warning,
+                            &format!("Failed to send chat: {}", e),
+                        );
+                    } else {
+                        state.waiting_for_inference = true;
+                        state.stats.messages_sent += 1;
+                    }
+                    DispatchResult::Continue
+                }
+            }
+        }
+    }
+
+    async fn handle_message(&mut self, message: DisplayMessage) -> Option<ShellExitReason> {
+        match self {
+            Self::Local { shell, .. } => {
+                if let DisplayMessage::BusEvent(event) = message {
+                    if matches!(*event, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
+                        tracing::info!("cli: ShutdownSignal received on bus — exiting shell");
+                        return Some(ShellExitReason::Shutdown);
+                    }
+                    shell.handle_bus_event(*event).await;
+                }
+                None
+            }
+            Self::Ipc { state, .. } => {
+                use bus::LineStyle;
+                if let DisplayMessage::IpcPayload(payload) = message {
+                    match payload {
+                        IpcPayload::DisplayLine { content, style } => {
+                            if matches!(style, LineStyle::Inference) {
+                                state.waiting_for_inference = false;
+                            }
+                            let role = match style {
+                                LineStyle::Error => MessageRole::Warning,
+                                LineStyle::CtpThought => MessageRole::Warning,
+                                LineStyle::Inference => MessageRole::Sena,
+                                LineStyle::Success => MessageRole::Sena,
+                                LineStyle::Normal => MessageRole::System,
+                                LineStyle::Dimmed => MessageRole::System,
+                                LineStyle::SystemNotice => MessageRole::System,
+                            };
+                            state.messages.push(Message::new(role, content));
+                        }
+                        IpcPayload::DaemonShutdown => {
+                            state.messages.push(Message::new(
+                                MessageRole::Warning,
+                                "Daemon is shutting down — CLI will exit.".to_string(),
+                            ));
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            return Some(ShellExitReason::Close);
+                        }
+                        IpcPayload::Pong | IpcPayload::Ack { .. } => {}
+                        IpcPayload::Error { reason, .. } => {
+                            state.waiting_for_inference = false;
+                            state
+                                .messages
+                                .push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                        }
+                        IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
+                            state.loop_states.insert(loop_name, enabled);
+                        }
+                        IpcPayload::ModelStatusUpdate { name } => {
+                            state.current_model = Some(name);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    async fn handle_model_popup_enter<T: MessageTransport>(
+        &mut self,
+        transport: &mut T,
+        target: &mut DispatchTarget<'_>,
+    ) {
+        let popup = self.state_mut().model_popup.take();
+        let Some(popup) = popup else {
+            return;
+        };
+
+        if popup.is_change_dir_selected() {
+            let state = self.state_mut();
+            state.pending_model_dir_input = true;
+            add_message(
+                state,
+                MessageRole::System,
+                "Enter the full path to your model directory (Enter on empty input to cancel):",
+            );
+            return;
         }
 
-        // Check for Ctrl+C timeout (reset if 3 seconds passed).
-        if let Some(first_press) = state.ctrl_c_first_press {
+        let Some(selected) = popup.selected() else {
+            return;
+        };
+        let model_name = selected.name.clone();
+
+        match self {
+            Self::Local { runtime, shell } => {
+                let mut config = runtime.config.clone();
+                config.preferred_model = Some(model_name.clone());
+                match runtime::save_config(&config).await {
+                    Ok(_) => {
+                        shell.add_message(MessageRole::System, format!("Selected model: {}", model_name));
+                        shell.add_message(
+                            MessageRole::System,
+                            "Model change will take effect after restart.".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        shell.add_message(
+                            MessageRole::Warning,
+                            format!("Failed to save config: {}", e),
+                        );
+                    }
+                }
+            }
+            Self::Ipc { state, .. } => {
+                let event = Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                    key: "preferred_model".to_string(),
+                    value: model_name.clone(),
+                });
+                if let Err(e) = transport.send(target, event).await {
+                    add_message(
+                        state,
+                        MessageRole::Warning,
+                        &format!("Failed to change model: {}", e),
+                    );
+                } else {
+                    add_message(
+                        state,
+                        MessageRole::System,
+                        &format!(
+                            "Selected model: {} — change takes effect after daemon restart.",
+                            model_name
+                        ),
+                    );
+                    state.current_model = Some(model_name);
+                }
+            }
+        }
+    }
+}
+
+async fn run_shell<T: MessageTransport>(
+    mut transport: T,
+    mut target: DispatchTarget<'_>,
+    mut mode: ShellMode,
+) -> Result<ShellExitReason> {
+    terminal::enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let _guard = TerminalGuard;
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let mut exit_reason = ShellExitReason::Close;
+
+    'main: loop {
+        if let Err(e) = terminal.draw(|f| mode.render(f)) {
+            add_message(mode.state_mut(), MessageRole::Warning, &format!("Display error: {}", e));
+        }
+
+        if let Some(first_press) = mode.state().ctrl_c_first_press {
             if first_press.elapsed() > Duration::from_secs(3) {
-                state.ctrl_c_first_press = None;
+                mode.state_mut().ctrl_c_first_press = None;
             }
         }
 
         tokio::select! {
-            biased;
-
-            // IPC messages from daemon
-            ipc_msg = ipc_client.recv() => {
-                match ipc_msg {
-                    Some(msg) => {
-                        match msg.payload {
-                            IpcPayload::DisplayLine { content, style } => {
-                                // Clear thinking state when inference response arrives.
-                                if matches!(style, LineStyle::Inference) {
-                                    state.waiting_for_inference = false;
-                                }
-                                let role = match style {
-                                    LineStyle::Error => MessageRole::Warning,
-                                    LineStyle::CtpThought => MessageRole::Warning,
-                                    LineStyle::Inference => MessageRole::Sena,
-                                    LineStyle::Success => MessageRole::Sena,
-                                    LineStyle::Normal => MessageRole::System,
-                                    LineStyle::Dimmed => MessageRole::System,
-                                    LineStyle::SystemNotice => MessageRole::System,
-                                };
-                                state.messages.push(Message::new(role, content));
-                            }
-                            IpcPayload::DaemonShutdown => {
-                                state.messages.push(Message::new(
-                                    MessageRole::Warning,
-                                    "Daemon is shutting down — CLI will exit.".to_string(),
-                                ));
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                                break 'main;
-                            }
-                            IpcPayload::Pong => {
-                                // Keepalive — ignore
-                            }
-                            IpcPayload::Ack { .. } => {
-                                // Command acknowledged — ignore
-                            }
-                            IpcPayload::Error { reason, .. } => {
-                                // An IPC error clears the thinking state.
-                                state.waiting_for_inference = false;
-                                state.messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
-                            }
-                            IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
-                                state.loop_states.insert(loop_name, enabled);
-                            }
-                            IpcPayload::ModelStatusUpdate { name } => {
-                                state.current_model = Some(name);
-                            }
-                            _ => {
-                                tracing::warn!("unexpected IPC payload: {:?}", msg);
-                            }
+            maybe_msg = transport.recv() => {
+                match maybe_msg {
+                    Some(message) => {
+                        if let Some(reason) = mode.handle_message(message).await {
+                            exit_reason = reason;
+                            break 'main;
                         }
                     }
                     None => {
-                        state.messages.push(Message::new(
-                            MessageRole::Warning,
-                            "Daemon disconnected.".to_string(),
-                        ));
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if let ShellMode::Ipc { state, .. } = &mut mode {
+                            state.messages.push(Message::new(MessageRole::Warning, "Daemon disconnected.".to_string()));
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                         break 'main;
                     }
                 }
             }
-
-            // Keyboard tick — 16 ms (~60 fps). Drain ALL queued key events each tick
-            // so rapid typing is processed without lag.
             _ = tokio::time::sleep(Duration::from_millis(16)) => {
+                mode.on_tick();
                 loop {
                     match event::poll(Duration::from_millis(0)) {
                         Ok(false) | Err(_) => break,
@@ -2711,269 +2616,210 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 
                     match event::read() {
                         Err(e) => {
-                            tracing::error!("Input error: {}", e);
+                            add_message(mode.state_mut(), MessageRole::Warning, &format!("Input error: {}", e));
                             break;
                         }
                         Ok(event::Event::Mouse(mouse)) => {
                             match mouse.kind {
                                 event::MouseEventKind::ScrollUp => {
-                                    state.scroll_offset = state.scroll_offset.saturating_add(3);
+                                    mode.state_mut().scroll_offset = mode.state().scroll_offset.saturating_add(3);
                                 }
                                 event::MouseEventKind::ScrollDown => {
-                                    state.scroll_offset = state.scroll_offset.saturating_sub(3);
+                                    mode.state_mut().scroll_offset = mode.state().scroll_offset.saturating_sub(3);
                                 }
                                 _ => {}
                             }
                         }
-
                         Ok(event::Event::Key(key)) => {
-                            // Filter out key release events (Windows)
                             if key.kind != KeyEventKind::Press {
                                 continue;
                             }
 
+                            if mode.dismiss_actors_popup_if_open() {
+                                continue;
+                            }
+
                             match (key.code, key.modifiers) {
-                                // Ctrl+C
+                                (KeyCode::Char('c'), mods) if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) => {
+                                    mode.copy_last_response();
+                                }
                                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                    if let Some(first_press) = state.ctrl_c_first_press {
+                                    if let Some(first_press) = mode.state().ctrl_c_first_press {
                                         if first_press.elapsed() < Duration::from_secs(3) {
                                             break 'main;
                                         }
                                     } else {
-                                        state.ctrl_c_first_press = Some(Instant::now());
+                                        mode.state_mut().ctrl_c_first_press = Some(Instant::now());
                                     }
                                 }
-
-                                // Ctrl+D
+                                (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                                    mode.copy_last_response();
+                                }
                                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                                     break 'main;
                                 }
-
-                                // ── Model popup key handlers ──────────────────────────────
-                                (KeyCode::Up, _) if state.model_popup.is_some() => {
-                                    if let Some(popup) = &mut state.model_popup {
+                                (KeyCode::Up, _) if mode.state().model_popup.is_some() => {
+                                    if let Some(popup) = &mut mode.state_mut().model_popup {
                                         popup.prev();
                                     }
                                 }
-                                (KeyCode::Down, _) if state.model_popup.is_some() => {
-                                    if let Some(popup) = &mut state.model_popup {
+                                (KeyCode::Down, _) if mode.state().model_popup.is_some() => {
+                                    if let Some(popup) = &mut mode.state_mut().model_popup {
                                         popup.next();
                                     }
                                 }
-                                (KeyCode::Enter, _) if state.model_popup.is_some() => {
-                                    if let Some(popup) = state.model_popup.take() {
-                                        if popup.is_change_dir_selected() {
-                                            state.pending_model_dir_input = true;
-                                            state.messages.push(Message::new(
-                                                MessageRole::System,
-                                                "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
-                                            ));
-                                        } else if let Some(selected) = popup.selected() {
-                                            let model_name = selected.name.clone();
-                                            let cmd = format!("/config set preferred_model {}", model_name);
-                                            let _ = ipc_client.send(IpcPayload::SlashCommand { line: cmd }).await;
-                                            state.messages.push(Message::new(
-                                                MessageRole::System,
-                                                format!("Selected model: {} — change takes effect after daemon restart.", model_name),
-                                            ));
-                                            state.current_model = Some(model_name);
-                                        }
-                                    }
+                                (KeyCode::Enter, _) if mode.state().model_popup.is_some() => {
+                                    mode.handle_model_popup_enter(&mut transport, &mut target).await;
                                 }
-                                (KeyCode::Esc, _) if state.model_popup.is_some() => {
-                                    state.model_popup = None;
-                                    state.messages.push(Message::new(
-                                        MessageRole::System,
-                                        "Model selection cancelled.".to_string(),
-                                    ));
+                                (KeyCode::Esc, _) if mode.state().model_popup.is_some() => {
+                                    mode.state_mut().model_popup = None;
+                                    add_message(mode.state_mut(), MessageRole::System, "Model selection cancelled.");
                                 }
-
-                                // ── Slash Dropdown Key Handlers ───────────────────────────
-                                (KeyCode::Up, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(dd) = &mut state.slash_dropdown {
+                                (KeyCode::Up, _) if mode.state().slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut mode.state_mut().slash_dropdown {
                                         dd.prev();
                                     }
                                 }
-                                (KeyCode::Down, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(dd) = &mut state.slash_dropdown {
+                                (KeyCode::Down, _) if mode.state().slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut mode.state_mut().slash_dropdown {
                                         dd.next();
                                     }
                                 }
-                                (KeyCode::Tab, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(cmd) = state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                        state.editor.input = cmd.to_string();
-                                        state.slash_dropdown = None;
+                                (KeyCode::Tab, _) if mode.state().slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = mode.state().slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                        mode.state_mut().editor.input = cmd.to_string();
+                                        mode.state_mut().slash_dropdown = None;
                                     }
                                 }
-                                (KeyCode::Enter, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(cmd) = state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                (KeyCode::Enter, _) if mode.state().slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = mode.state().slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
                                         let line = cmd.to_string();
-                                        state.editor.input.clear();
-                                        state.slash_dropdown = None;
-                                        state.editor.push_history(&line);
-
-                                        match dispatch_ipc_input_line(
-                                            &line,
-                                            &mut ipc_client,
-                                            &mut state,
-                                            &mut command_state,
-                                        ).await {
+                                        mode.state_mut().editor.input.clear();
+                                        mode.state_mut().slash_dropdown = None;
+                                        mode.state_mut().editor.push_history(&line);
+                                        match mode.dispatch_input_line(&line, &mut transport, &mut target).await {
                                             DispatchResult::Continue => {}
-                                            DispatchResult::Close | DispatchResult::Shutdown => break 'main,
+                                            DispatchResult::Close => {
+                                                exit_reason = ShellExitReason::Close;
+                                                break 'main;
+                                            }
+                                            DispatchResult::Shutdown => {
+                                                exit_reason = ShellExitReason::Shutdown;
+                                                break 'main;
+                                            }
                                         }
                                     }
                                 }
-                                (KeyCode::Esc, _) if state.slash_dropdown.is_some() => {
-                                    state.slash_dropdown = None;
+                                (KeyCode::Esc, _) if mode.state().slash_dropdown.is_some() => {
+                                    mode.state_mut().slash_dropdown = None;
                                 }
-
-                                // ── Normal Key Handlers ───────────────────────────────────
-                                // Enter — submit line
                                 (KeyCode::Enter, _) => {
-                                    let line = state.editor.input.trim().to_string();
-                                    state.editor.input.clear();
-                                    state.slash_dropdown = None;
+                                    let line = mode.state().editor.input.trim().to_string();
+                                    mode.state_mut().editor.input.clear();
+                                    mode.state_mut().slash_dropdown = None;
                                     if !line.is_empty() {
-                                        state.editor.push_history(&line);
-
-                                        match dispatch_ipc_input_line(
-                                            &line,
-                                            &mut ipc_client,
-                                            &mut state,
-                                            &mut command_state,
-                                        ).await {
+                                        mode.state_mut().editor.push_history(&line);
+                                        match mode.dispatch_input_line(&line, &mut transport, &mut target).await {
                                             DispatchResult::Continue => {}
-                                            DispatchResult::Close | DispatchResult::Shutdown => break 'main,
+                                            DispatchResult::Close => {
+                                                exit_reason = ShellExitReason::Close;
+                                                break 'main;
+                                            }
+                                            DispatchResult::Shutdown => {
+                                                exit_reason = ShellExitReason::Shutdown;
+                                                break 'main;
+                                            }
                                         }
                                     }
                                 }
-
-                                // Backspace
-                                (KeyCode::Backspace, _) => {
-                                    state.editor.input.pop();
-                                    if state.editor.input.starts_with('/') {
-                                        if let Some(dd) = &mut state.slash_dropdown {
-                                            dd.update(&state.editor.input);
+                                (KeyCode::Backspace, _) if mode.state().model_popup.is_none() => {
+                                    mode.state_mut().editor.input.pop();
+                                    if mode.state().editor.input.starts_with('/') {
+                                        let current_input = mode.state().editor.input.clone();
+                                        if let Some(dd) = &mut mode.state_mut().slash_dropdown {
+                                            dd.update(&current_input);
                                             if dd.is_empty() {
-                                                state.slash_dropdown = None;
+                                                mode.state_mut().slash_dropdown = None;
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&state.editor.input);
+                                            let dd = SlashDropdown::from_prefix(&current_input);
                                             if !dd.is_empty() {
-                                                state.slash_dropdown = Some(dd);
+                                                mode.state_mut().slash_dropdown = Some(dd);
                                             }
                                         }
                                     } else {
-                                        state.slash_dropdown = None;
+                                        mode.state_mut().slash_dropdown = None;
                                     }
                                 }
-
-                                // Arrow Up — history prev
-                                (KeyCode::Up, _) if state.slash_dropdown.is_none() => {
-                                    state.editor.history_prev();
+                                (KeyCode::Up, _) if mode.state().model_popup.is_none() && mode.state().slash_dropdown.is_none() => {
+                                    mode.state_mut().editor.history_prev();
                                 }
-
-                                // Arrow Down — history next
-                                (KeyCode::Down, _) if state.slash_dropdown.is_none() => {
-                                    state.editor.history_next();
+                                (KeyCode::Down, _) if mode.state().model_popup.is_none() && mode.state().slash_dropdown.is_none() => {
+                                    mode.state_mut().editor.history_next();
                                 }
-
-                                // Page Up — scroll up
-                                (KeyCode::PageUp, _) => {
-                                    state.scroll_offset = state.scroll_offset.saturating_add(10);
+                                (KeyCode::PageUp, _) if mode.state().model_popup.is_none() => {
+                                    mode.state_mut().scroll_offset = mode.state().scroll_offset.saturating_add(10);
                                 }
-
-                                // Page Down — scroll down
-                                (KeyCode::PageDown, _) => {
-                                    state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                                (KeyCode::PageDown, _) if mode.state().model_popup.is_none() => {
+                                    mode.state_mut().scroll_offset = mode.state().scroll_offset.saturating_sub(10);
                                 }
-
-                                // Escape — clear input and close dropdown
-                                (KeyCode::Esc, _) => {
-                                    state.editor.input.clear();
-                                    state.slash_dropdown = None;
+                                (KeyCode::Esc, _) if mode.state().model_popup.is_none() => {
+                                    mode.state_mut().editor.input.clear();
+                                    mode.state_mut().slash_dropdown = None;
                                 }
-
-                                // Regular character
-                                (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                                    state.editor.input.push(c);
-                                    state.ctrl_c_first_press = None;
-                                    if state.editor.input.starts_with('/') {
-                                        if let Some(dd) = &mut state.slash_dropdown {
-                                            dd.update(&state.editor.input);
+                                (KeyCode::Char(c), mods)
+                                    if !mods.contains(KeyModifiers::CONTROL)
+                                        && !mods.contains(KeyModifiers::ALT)
+                                        && mode.state().model_popup.is_none() => {
+                                    mode.state_mut().editor.input.push(c);
+                                    mode.state_mut().ctrl_c_first_press = None;
+                                    if mode.state().editor.input.starts_with('/') {
+                                        let current_input = mode.state().editor.input.clone();
+                                        if let Some(dd) = &mut mode.state_mut().slash_dropdown {
+                                            dd.update(&current_input);
                                             if dd.is_empty() {
-                                                state.slash_dropdown = None;
+                                                mode.state_mut().slash_dropdown = None;
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&state.editor.input);
+                                            let dd = SlashDropdown::from_prefix(&current_input);
                                             if !dd.is_empty() {
-                                                state.slash_dropdown = Some(dd);
+                                                mode.state_mut().slash_dropdown = Some(dd);
                                             }
                                         }
                                     } else {
-                                        state.slash_dropdown = None;
+                                        mode.state_mut().slash_dropdown = None;
                                     }
                                 }
-
                                 _ => {}
                             }
-                        } // end event::Event::Key
-
-                        _ => {} // resize, focus, paste — ignore
+                        }
+                        _ => {}
                     }
-                } // end keyboard drain loop
-            }
-        }
-    } // end 'main loop
-
-    // ── Graceful shutdown ─────────────────────────────────────────────────────
-    drop(_guard); // Restore terminal
-    drop(terminal); // Drop terminal before printing to stdout
-
-    display::print_session_summary(&state.stats);
-
-    Ok(())
-}
-
-async fn dispatch_ipc_input_line(
-    line: &str,
-    ipc_client: &mut crate::ipc_client::IpcClient,
-    state: &mut crate::tui_state::ShellState<SlashDropdown>,
-    command_state: &mut CommandRuntimeState,
-) -> DispatchResult {
-    if line.starts_with('/') || state.pending_model_dir_input {
-        let mut target = DispatchTarget::IpcClient(ipc_client);
-        let mut deps = CommandDeps {
-            runtime: None,
-            state,
-            command_state,
-        };
-        match dispatch_command(line, &mut target, &mut deps).await {
-            Ok(result) => return result,
-            Err(e) => {
-                add_message(deps.state, MessageRole::Warning, &format!("Command failed: {}", e));
-                return DispatchResult::Continue;
+                }
             }
         }
     }
 
-    state.messages.push(Message::new(MessageRole::User, line.to_string()));
-    if let Err(e) = ipc_client
-        .send(bus::IpcPayload::Chat {
-            text: line.to_string(),
-        })
-        .await
-    {
-        add_message(
-            state,
-            MessageRole::Warning,
-            &format!("Failed to send chat: {}", e),
-        );
-    } else {
-        state.waiting_for_inference = true;
-        state.stats.messages_sent += 1;
+    drop(_guard);
+    drop(terminal);
+
+    let stats = mode.state().stats.clone();
+    let close_bus = match &mode {
+        ShellMode::Local { runtime, .. } if exit_reason == ShellExitReason::Close => {
+            Some(runtime.bus.clone())
+        }
+        _ => None,
+    };
+
+    display::print_session_summary(&stats);
+
+    if let Some(bus) = close_bus {
+        let _ = bus
+            .broadcast(Event::System(bus::events::SystemEvent::CliSessionClosed))
+            .await;
     }
-    DispatchResult::Continue
+
+    Ok(exit_reason)
 }
 
 /// Simplified TUI rendering for IPC mode.
