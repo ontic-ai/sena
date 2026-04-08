@@ -3,11 +3,19 @@
 target-dir = "target"
 
 [target.x86_64-pc-windows-msvc]
-# /DEBUG:FASTLINK avoids LNK1318 "PDB LIMIT" errors on large debug builds by
-# storing references to object files instead of copying all debug info into the PDB.
-# /FORCE:MULTIPLE allows duplicate ggml symbols from whisper-rs-sys and llama-cpp-sys-2
-# (both bundle ggml; both use the same implementation so duplicate-silencing is safe).
+# /DEBUG:FASTLINK avoids LNK1318 "PDB LIMIT" errors on large debug builds.
+# /FORCE:MULTIPLE resolves duplicate ggml symbols from whisper-rs-sys and llama-cpp-sys-2.
+# Both crates bundle their own ggml (same ggml project, patch versions 0.9.5 vs 0.9.7).
+# Patch-version ggml is ABI-compatible so deduplication is safe.
 rustflags = ["-C", "link-arg=/DEBUG:FASTLINK", "-C", "link-arg=/FORCE:MULTIPLE"]
+
+[env]
+# Force all cmake builds (whisper-rs-sys, llama-cpp-sys-2) to use the release DLL CRT (/MD).
+# Without this, cmake-rs enters "Debug" cmake mode when Rust opt-level=0, defaulting to
+# /MDd in MSVC. That loads ucrtbased.dll (debug UCRT) which has _osfile(fh)&FOPEN
+# assertions that fire when mixing with fds opened via the release CRT. Setting this
+# env var overrides cmake's per-build-type CRT selection globally (cmake CMP0091).
+CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
 
 [term]
 # Better terminal output
@@ -15,9 +23,14 @@ verbose = false
 color = "auto"
 
 [profile.dev]
-# Development profile optimizations
+# opt-level=1: one optimization pass.
+# CRITICAL on Windows MSVC: cmake-rs enters "Debug" cmake mode when opt-level=0,
+# which compiles native C/C++ with /MDd instead of /MD, loading ucrtbased.dll
+# (the debug UCRT with runtime assertions). opt-level=1 keeps cmake-rs in Release
+# mode so all native code uses /MD consistently. See cmake-rs issue #240.
+# Value 1 also makes debug builds usable for LLM inference (0 = multi-second latency).
 incremental = true
-opt-level = 0
+opt-level = 1
 
 [profile.release]
 # Release profile settings
