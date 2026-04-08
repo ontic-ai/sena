@@ -28,12 +28,12 @@ hex = "0.4"
 # STT backend (Whisper.cpp)
 # NOTE: whisper-rs requires whisper.cpp C++ library
 # For testing/development without whisper.cpp, use Mock backend
-whisper-rs = { version = "0.12", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
-default = []
-# Enable real whisper.cpp backend (requires whisper.cpp installed)
+default = ["whisper"]
+# Enable real whisper.cpp backend (requires whisper.cpp C++ library)
 whisper = ["whisper-rs"]

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["whisper"]
 whisper = ["speech/whisper"]
 
 [dependencies]

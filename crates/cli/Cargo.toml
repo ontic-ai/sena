@@ -11,7 +11,7 @@ name = "sena"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["whisper"]
 whisper = ["runtime/whisper"]
 
 [dependencies]

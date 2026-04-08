@@ -1077,28 +1077,42 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
 
 fn format_observation_response(resp: &bus::events::transparency::ObservationResponse) -> String {
     let snapshot = &resp.snapshot;
-    let mut parts = vec![];
-
-    // Active app context
-    let app = &snapshot.active_app;
-    let title = app.window_title.as_deref().unwrap_or("(no title)");
-    parts.push(format!("Active window: {} - {}", app.app_name, title));
-
-    // Clipboard digest
-    if let Some(clip) = &snapshot.clipboard_digest {
-        parts.push(format!("Clipboard: {}", clip));
-    }
-
-    // Recent files
-    if !snapshot.recent_files.is_empty() {
-        parts.push(format!("Files: {} events", snapshot.recent_files.len()));
-    }
-
-    if parts.is_empty() {
-        "No observation data.".to_string()
+    let app = &snapshot.active_app.app_name;
+    let title = snapshot
+        .active_app
+        .window_title
+        .as_deref()
+        .unwrap_or("(no title)");
+    let task = match &snapshot.inferred_task {
+        Some(hint) => format!("{} ({:.0}%)", hint.category, hint.confidence * 100.0),
+        None => "(no task inferred)".to_string(),
+    };
+    let clipboard = if snapshot.clipboard_digest.is_some() {
+        "ready"
     } else {
-        parts.join("\n")
+        "empty"
+    };
+    let rate = snapshot.keystroke_cadence.events_per_minute;
+    let secs = snapshot.session_duration.as_secs();
+    let session = if secs >= 60 {
+        format!("{} min {} sec", secs / 60, secs % 60)
+    } else {
+        format!("{} sec", secs)
+    };
+    let mut lines = vec![
+        format!("Window     {} \u{2014} {}", app, title),
+        format!("Task       {}", task),
+        format!("Clipboard  {}", clipboard),
+        format!("Keyboard   {:.1} events/min", rate),
+        format!("Session    {}", session),
+    ];
+    if !snapshot.recent_files.is_empty() {
+        lines.push(format!("Files      {} recent events", snapshot.recent_files.len()));
     }
+    if snapshot.visual_context.is_some() {
+        lines.push("Screen     captured (vision context ready)".to_string());
+    }
+    lines.join("\n")
 }
 
 fn format_memory_response(resp: &bus::events::transparency::MemoryResponse) -> String {

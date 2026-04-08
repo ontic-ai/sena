@@ -627,9 +627,10 @@ enum WorkerCommand {
 
 #[cfg(feature = "whisper")]
 fn whisper_worker_loop(model_path: &str, rx: std::sync::mpsc::Receiver<WorkerCommand>) {
-    use whisper_rs::WhisperContext;
+    use whisper_rs::{WhisperContext, WhisperContextParameters};
 
-    let mut context = match WhisperContext::new(model_path) {
+    let ctx_params = WhisperContextParameters::default();
+    let mut context = match WhisperContext::new_with_params(model_path, ctx_params) {
         Ok(ctx) => ctx,
         Err(_) => return,
     };
@@ -665,16 +666,15 @@ fn transcribe_with_whisper(
         .full(params, samples)
         .map_err(|e| SpeechError::TranscriptionFailed(format!("whisper full failed: {}", e)))?;
 
-    let segment_count = state
-        .full_n_segments()
-        .map_err(|e| SpeechError::TranscriptionFailed(format!("segment count failed: {}", e)))?;
+    let segment_count = state.full_n_segments();
 
     let mut text = String::new();
     for i in 0..segment_count {
-        let seg = state
-            .full_get_segment_text(i)
-            .map_err(|e| SpeechError::TranscriptionFailed(format!("segment read failed: {}", e)))?;
-        text.push_str(seg);
+        if let Some(seg) = state.get_segment(i) {
+            if let Ok(seg_text) = seg.to_str() {
+                text.push_str(seg_text);
+            }
+        }
     }
 
     let normalized = text.trim().to_string();

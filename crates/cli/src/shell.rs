@@ -3182,47 +3182,76 @@ fn render_ipc_tui(
                             .fg(Color::LightMagenta)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(&msg.text, Style::default().fg(Color::White)),
+                    Span::styled(msg.text.clone(), Style::default().fg(Color::White)),
                 ]));
                 lines.push(Line::from("")); // spacing
             }
             MessageRole::Sena => {
                 for line in msg.text.lines() {
                     lines.push(Line::from(Span::styled(
-                        line,
+                        line.to_owned(),
                         Style::default().fg(Color::Green),
                     )));
                 }
                 lines.push(Line::from("")); // spacing
             }
             MessageRole::System => {
-                lines.push(Line::from(Span::styled(
-                    &msg.text,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )));
+                // Split on '\n' so multi-line responses (observation, memory) render correctly.
+                for line in msg.text.split('\n') {
+                    lines.push(Line::from(Span::styled(
+                        line.to_owned(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
             }
             MessageRole::Warning => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "\u{26a0} ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&msg.text, Style::default().fg(Color::Yellow)),
-                ]));
+                let mut first = true;
+                for line in msg.text.split('\n') {
+                    if first {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "\u{26a0} ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(line.to_owned(), Style::default().fg(Color::Yellow)),
+                        ]));
+                        first = false;
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            line.to_owned(),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
             }
         }
     }
 
+    // Estimate the actual rendered (visual) line count accounting for word-wrap.
+    // Without this, the auto-scroll-to-bottom undershoots when long lines wrap.
+    let col_width = body_chunks[0].width.saturating_sub(2).max(1) as usize;
     let total_lines = lines.len();
+    let visual_lines: usize = lines
+        .iter()
+        .map(|l| {
+            let char_len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if char_len == 0 {
+                1
+            } else {
+                char_len.div_ceil(col_width)
+            }
+        })
+        .sum();
+    let _ = total_lines; // visual_lines takes precedence for scroll
     let inner_height = body_chunks[0].height.saturating_sub(2) as usize; // subtract borders
     let scroll = if scroll_offset == 0 {
-        total_lines.saturating_sub(inner_height)
+        visual_lines.saturating_sub(inner_height)
     } else {
-        total_lines.saturating_sub(inner_height + scroll_offset)
+        visual_lines.saturating_sub(inner_height + scroll_offset)
     };
 
     let block = Block::default()
