@@ -1,15 +1,11 @@
 //! STT Actor - speech-to-text processing.
 
-#[cfg(feature = "whisper")]
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-#[cfg(feature = "whisper")]
-use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use bus::{Actor, ActorError, Event, EventBus, SpeechEvent, SystemEvent};
 
@@ -136,44 +132,35 @@ impl SttActor {
     }
 
     async fn initialize_backend(&mut self) -> Result<(), SpeechError> {
-        // Keep config field actively referenced in non-whisper builds.
-        let _ = self.whisper_model_path.as_deref();
-
         let handle = match self.backend {
             SttBackend::Mock => SttBackendHandle::Mock,
-            SttBackend::WhisperCpp => self.initialize_whisper_backend().await?,
+            SttBackend::Whisper => self.initialize_candle_backend().await?,
         };
 
         self.backend_handle = Some(handle);
         Ok(())
     }
 
-    async fn initialize_whisper_backend(&self) -> Result<SttBackendHandle, SpeechError> {
-        #[cfg(feature = "whisper")]
-        {
-            let model_path =
-                resolve_model_path(self.model_dir.as_ref(), self.whisper_model_path.as_deref())?;
-            if !Path::new(&model_path).exists() {
-                return Err(SpeechError::SttInitFailed(format!(
-                    "whisper model not found at {}",
-                    model_path
-                )));
-            }
+    async fn initialize_candle_backend(&self) -> Result<SttBackendHandle, SpeechError> {
+        let model_dir = self.model_dir.clone();
+        let model_path = self.whisper_model_path.clone();
 
-            let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WorkerCommand>();
-            tokio::task::spawn_blocking(move || {
-                whisper_worker_loop(&model_path, cmd_rx);
-            });
+        // Load model in spawn_blocking to avoid blocking async
+        let model = tokio::task::spawn_blocking(move || {
+            let dir = model_dir
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new(""));
+            crate::candle_whisper::CandleWhisperModel::load(dir, model_path.as_deref())
+        })
+        .await
+        .map_err(|e| SpeechError::SttInitFailed(format!("spawn_blocking panicked: {}", e)))??;
 
-            Ok(SttBackendHandle::WhisperWorker { tx: cmd_tx })
-        }
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WorkerCommand>();
+        std::thread::spawn(move || {
+            candle_worker_loop(model, cmd_rx);
+        });
 
-        #[cfg(not(feature = "whisper"))]
-        {
-            Err(SpeechError::SttInitFailed(
-                "whisper feature not enabled for speech crate".to_string(),
-            ))
-        }
+        Ok(SttBackendHandle::CandleWhisper { tx: cmd_tx })
     }
 
     fn maybe_start_audio_capture(&mut self) -> Result<(), SpeechError> {
@@ -184,9 +171,9 @@ impl SttActor {
         let config = AudioInputConfig {
             sample_rate: 16_000,
             buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
-            // Pass all audio to SilenceDetector — it handles voice/silence classification.
+            // Pass all audio to SilenceDetector - it handles voice/silence classification.
             // Setting energy_threshold > 0 here would drop silence frames and prevent
-            // the SilenceDetector from ever detecting the speech→silence transition.
+            // the SilenceDetector from ever detecting the speech?silence transition.
             energy_threshold: 0.0,
             device_name: self.microphone_device.clone(),
         };
@@ -213,8 +200,7 @@ impl SttActor {
                     })
                 }
             }
-            #[cfg(feature = "whisper")]
-            Some(SttBackendHandle::WhisperWorker { tx }) => {
+            Some(SttBackendHandle::CandleWhisper { tx }) => {
                 let (reply_tx, reply_rx) = oneshot::channel();
                 tx.send(WorkerCommand::Transcribe {
                     samples: buffer.samples,
@@ -222,13 +208,16 @@ impl SttActor {
                 })
                 .map_err(|e| {
                     SpeechError::TranscriptionFailed(format!(
-                        "whisper worker channel send failed: {}",
+                        "candle worker channel send failed: {}",
                         e
                     ))
                 })?;
 
                 reply_rx.await.map_err(|e| {
-                    SpeechError::TranscriptionFailed(format!("whisper worker reply failed: {}", e))
+                    SpeechError::TranscriptionFailed(format!(
+                        "candle worker reply failed: {}",
+                        e
+                    ))
                 })?
             }
             None => Err(SpeechError::TranscriptionFailed(
@@ -440,14 +429,14 @@ impl Actor for SttActor {
                         }
                         Ok(Event::Speech(SpeechEvent::ListenModeRequested { session_id })) => {
                             if self.listen_session_id.is_some() {
-                                tracing::warn!("listen: new session {} requested while session {:?} active — stopping old session first", session_id, self.listen_session_id);
+                                tracing::warn!("listen: new session {} requested while session {:?} active - stopping old session first", session_id, self.listen_session_id);
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
                             }
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
                                 buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
-                                // Pass all audio to SilenceDetector — it handles
+                                // Pass all audio to SilenceDetector - it handles
                                 // voice/silence classification internally.
                                 energy_threshold: 0.0,
                                 device_name: self.microphone_device.clone(),
@@ -538,14 +527,8 @@ impl Actor for SttActor {
         self.listen_audio_stream = None;
         self.listen_session_id = None;
 
-        #[cfg(feature = "whisper")]
-        if let Some(SttBackendHandle::WhisperWorker { tx }) = self.backend_handle.take() {
+        if let Some(SttBackendHandle::CandleWhisper { tx }) = self.backend_handle.take() {
             let _ = tx.send(WorkerCommand::Shutdown);
-        }
-
-        #[cfg(not(feature = "whisper"))]
-        {
-            self.backend_handle = None;
         }
 
         Ok(())
@@ -554,10 +537,40 @@ impl Actor for SttActor {
 
 enum SttBackendHandle {
     Mock,
-    #[cfg(feature = "whisper")]
-    WhisperWorker {
+    CandleWhisper {
         tx: std::sync::mpsc::Sender<WorkerCommand>,
     },
+}
+
+enum WorkerCommand {
+    Transcribe {
+        samples: Vec<f32>,
+        reply: oneshot::Sender<Result<TranscriptionResult, SpeechError>>,
+    },
+    Shutdown,
+}
+
+fn candle_worker_loop(
+    mut model: crate::candle_whisper::CandleWhisperModel,
+    rx: std::sync::mpsc::Receiver<WorkerCommand>,
+) {
+    while let Ok(command) = rx.recv() {
+        match command {
+            WorkerCommand::Shutdown => break,
+            WorkerCommand::Transcribe { samples, reply } => {
+                let result = model.transcribe(&samples).map(|text| {
+                    let confidence = if text.trim().is_empty() {
+                        0.0
+                    } else {
+                        (crate::silence_detector::calculate_rms(&samples) * 10.0)
+                            .clamp(0.55, 0.99)
+                    };
+                    TranscriptionResult { text, confidence }
+                });
+                let _ = reply.send(result);
+            }
+        }
+    }
 }
 
 struct TranscriptionResult {
@@ -583,111 +596,6 @@ fn decode_audio_samples(bytes: &[u8]) -> Result<Vec<f32>, SpeechError> {
     Err(SpeechError::TranscriptionFailed(
         "unsupported audio byte payload".to_string(),
     ))
-}
-
-#[cfg(feature = "whisper")]
-fn resolve_model_path(
-    model_dir: Option<&PathBuf>,
-    configured: Option<&str>,
-) -> Result<String, SpeechError> {
-    // Priority 1: Check model_dir (where downloaded models live)
-    if let Some(dir) = model_dir {
-        let candidate = dir.join("ggml-base.en.bin");
-        if candidate.exists() {
-            return candidate
-                .to_str()
-                .ok_or_else(|| {
-                    SpeechError::SttInitFailed("model path contains invalid UTF-8".to_string())
-                })
-                .map(|s| s.to_string());
-        }
-    }
-
-    // Priority 2: Configured path from config
-    if let Some(path) = configured {
-        return Ok(path.to_string());
-    }
-
-    // Priority 3: Hardcoded fallback
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| SpeechError::SttInitFailed("cannot determine home directory".to_string()))?;
-
-    Ok(format!("{}/.sena/models/whisper/ggml-base.en.bin", home))
-}
-
-#[cfg(feature = "whisper")]
-enum WorkerCommand {
-    Transcribe {
-        samples: Vec<f32>,
-        reply: oneshot::Sender<Result<TranscriptionResult, SpeechError>>,
-    },
-    Shutdown,
-}
-
-#[cfg(feature = "whisper")]
-fn whisper_worker_loop(model_path: &str, rx: std::sync::mpsc::Receiver<WorkerCommand>) {
-    use whisper_rs::{WhisperContext, WhisperContextParameters};
-
-    let ctx_params = WhisperContextParameters::default();
-    let mut context = match WhisperContext::new_with_params(model_path, ctx_params) {
-        Ok(ctx) => ctx,
-        Err(_) => return,
-    };
-
-    while let Ok(command) = rx.recv() {
-        match command {
-            WorkerCommand::Shutdown => break,
-            WorkerCommand::Transcribe { samples, reply } => {
-                let result = transcribe_with_whisper(&mut context, &samples);
-                let _ = reply.send(result);
-            }
-        }
-    }
-}
-
-#[cfg(feature = "whisper")]
-fn transcribe_with_whisper(
-    context: &mut whisper_rs::WhisperContext,
-    samples: &[f32],
-) -> Result<TranscriptionResult, SpeechError> {
-    use whisper_rs::{FullParams, SamplingStrategy};
-
-    let mut state = context.create_state().map_err(|e| {
-        SpeechError::TranscriptionFailed(format!("create whisper state failed: {}", e))
-    })?;
-
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(4);
-    params.set_translate(false);
-    params.set_language(Some("en"));
-
-    state
-        .full(params, samples)
-        .map_err(|e| SpeechError::TranscriptionFailed(format!("whisper full failed: {}", e)))?;
-
-    let segment_count = state.full_n_segments();
-
-    let mut text = String::new();
-    for i in 0..segment_count {
-        if let Some(seg) = state.get_segment(i) {
-            if let Ok(seg_text) = seg.to_str() {
-                text.push_str(seg_text);
-            }
-        }
-    }
-
-    let normalized = text.trim().to_string();
-    let confidence = if normalized.is_empty() {
-        0.0
-    } else {
-        (crate::silence_detector::calculate_rms(samples) * 10.0).clamp(0.55, 0.99)
-    };
-
-    Ok(TranscriptionResult {
-        text: normalized,
-        confidence,
-    })
 }
 
 #[cfg(test)]

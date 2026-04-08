@@ -10,10 +10,6 @@ repository.workspace = true
 name = "sena"
 path = "src/main.rs"
 
-[features]
-default = ["whisper"]
-whisper = ["runtime/whisper"]
-
 [dependencies]
 runtime = { path = "../runtime" }
 bus = { path = "../bus" }

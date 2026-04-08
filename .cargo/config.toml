@@ -4,13 +4,10 @@ target-dir = "target"
 
 [target.x86_64-pc-windows-msvc]
 # /DEBUG:FASTLINK avoids LNK1318 "PDB LIMIT" errors on large debug builds.
-# /FORCE:MULTIPLE resolves duplicate ggml symbols from whisper-rs-sys and llama-cpp-sys-2.
-# Both crates bundle their own ggml (same ggml project, patch versions 0.9.5 vs 0.9.7).
-# Patch-version ggml is ABI-compatible so deduplication is safe.
-rustflags = ["-C", "link-arg=/DEBUG:FASTLINK", "-C", "link-arg=/FORCE:MULTIPLE"]
+rustflags = ["-C", "link-arg=/DEBUG:FASTLINK"]
 
 [env]
-# Force all cmake builds (whisper-rs-sys, llama-cpp-sys-2) to use the release DLL CRT (/MD).
+# Force all cmake builds (llama-cpp-sys-2) to use the release DLL CRT (/MD).
 # Without this, cmake-rs enters "Debug" cmake mode when Rust opt-level=0, defaulting to
 # /MDd in MSVC. That loads ucrtbased.dll (debug UCRT) which has _osfile(fh)&FOPEN
 # assertions that fire when mixing with fds opened via the release CRT. Setting this

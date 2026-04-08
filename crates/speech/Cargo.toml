@@ -25,15 +25,14 @@ sha2 = "0.10"
 futures-util = "0.3"
 hex = "0.4"
 
-# STT backend (Whisper.cpp)
-# NOTE: whisper-rs requires whisper.cpp C++ library
-# For testing/development without whisper.cpp, use Mock backend
-whisper-rs = { version = "0.16", optional = true }
+# STT backend - Whisper via candle-transformers (pure Rust)
+candle-core = { version = "0.10", default-features = false }
+candle-nn = { version = "0.10", default-features = false }
+candle-transformers = { version = "0.10", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+rand = { workspace = true }
+byteorder = "1"
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
-
-[features]
-default = ["whisper"]
-# Enable real whisper.cpp backend (requires whisper.cpp C++ library)
-whisper = ["whisper-rs"]
