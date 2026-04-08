@@ -64,7 +64,7 @@ impl IpcClient {
         #[cfg(windows)]
         {
             let pipe_name = ipc_endpoint();
-            let client = ClientOptions::new().open(pipe_name).map_err(|e| {
+            let client = ClientOptions::new().open(&pipe_name).map_err(|e| {
                 // ERROR_FILE_NOT_FOUND (2) means the pipe doesn't exist → daemon not running.
                 if e.raw_os_error() == Some(2) {
                     IpcClientError::DaemonNotRunning
@@ -149,8 +149,9 @@ fn ipc_endpoint() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn ipc_endpoint() -> &'static str {
-    r"\\.\pipe\sena_ipc"
+fn ipc_endpoint() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".to_string());
+    format!(r"\\.\pipe\sena_ipc_{}", user)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,7 +188,7 @@ mod tests {
 
         // Windows uses different pipe names, so they are inherently distinct.
         // Single instance: \\.\pipe\sena_single_instance
-        // IPC: \\.\pipe\sena_ipc
+        // IPC: \\.\pipe\sena_ipc_{username}
     }
 
     #[tokio::test]

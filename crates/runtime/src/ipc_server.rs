@@ -146,8 +146,8 @@ impl IpcServer {
 
     #[cfg(windows)]
     async fn start_windows(self: Arc<Self>) -> Result<(), IpcServerError> {
-        let pipe_name = r"\\.\pipe\sena_ipc";
-        self.start_windows_on(pipe_name.to_string()).await
+        let pipe_name = ipc_pipe_name();
+        self.start_windows_on(pipe_name).await
     }
 
     #[cfg(windows)]
@@ -1204,6 +1204,16 @@ fn ipc_socket_path() -> PathBuf {
     std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
 }
 
+/// IPC pipe name — includes current user to restrict access.
+/// On Windows, named pipes with user-specific names prevent other local users
+/// from connecting to the pipe. This is the lightweight security model that
+/// avoids heavyweight DACL manipulation via Windows API.
+#[cfg(windows)]
+fn ipc_pipe_name() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".to_string());
+    format!(r"\\.\pipe\sena_ipc_{}", user)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum IpcServerError {
     #[error("bind failed: {0}")]
@@ -1239,10 +1249,14 @@ mod tests {
         #[cfg(windows)]
         {
             let lock_pipe = r"\\.\pipe\sena_single_instance";
-            let ipc_pipe = r"\\.\pipe\sena_ipc";
+            let ipc_pipe = super::ipc_pipe_name();
             assert_ne!(
                 lock_pipe, ipc_pipe,
                 "IPC server pipe must be different from single-instance lock pipe"
+            );
+            assert!(
+                ipc_pipe.contains("sena_ipc_"),
+                "IPC pipe name must include per-user component"
             );
         }
     }
