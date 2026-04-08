@@ -35,10 +35,7 @@ impl CandleWhisperModel {
     ///
     /// If `model_path_override` is provided, it is used as the exact model file path
     /// instead of scanning `model_dir`.
-    pub fn load(
-        model_dir: &Path,
-        model_path_override: Option<&str>,
-    ) -> Result<Self, SpeechError> {
+    pub fn load(model_dir: &Path, model_path_override: Option<&str>) -> Result<Self, SpeechError> {
         let device = Device::Cpu;
 
         let (config_path, tokenizer_path, model_path, is_quantized) =
@@ -96,7 +93,8 @@ impl CandleWhisperModel {
 
         let model = if is_quantized {
             let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
-                &model_path, &device,
+                &model_path,
+                &device,
             )
             .map_err(|e| SpeechError::SttInitFailed(format!("load quantized model: {}", e)))?;
             WhisperModel::Quantized(
@@ -106,16 +104,14 @@ impl CandleWhisperModel {
             )
         } else {
             let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    &[model_path],
-                    candle_core::DType::F32,
-                    &device,
-                )
-                .map_err(|e| SpeechError::SttInitFailed(format!("load safetensors: {}", e)))?
+                VarBuilder::from_mmaped_safetensors(&[model_path], candle_core::DType::F32, &device)
+                    .map_err(|e| SpeechError::SttInitFailed(format!("load safetensors: {}", e)))?
             };
-            WhisperModel::Normal(m::model::Whisper::load(&vb, config.clone()).map_err(|e| {
-                SpeechError::SttInitFailed(format!("build whisper model: {}", e))
-            })?)
+            WhisperModel::Normal(
+                m::model::Whisper::load(&vb, config.clone()).map_err(|e| {
+                    SpeechError::SttInitFailed(format!("build whisper model: {}", e))
+                })?,
+            )
         };
 
         let language_token = tokenizer.token_to_id("<|en|>");
@@ -131,12 +127,27 @@ impl CandleWhisperModel {
 
     /// Transcribe PCM audio samples (f32 normalized, 16kHz, mono) to text.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String, SpeechError> {
+        // Validate audio input - need at least 1 second of audio for meaningful transcription
+        if samples.len() < SAMPLE_RATE {
+            return Err(SpeechError::TranscriptionFailed(
+                "insufficient audio samples (< 1 second)".to_string(),
+            ));
+        }
+
         let n_fft = 400;
         let n_mels = self.config.num_mel_bins;
         let filters = mel_filters(n_mels, n_fft, SAMPLE_RATE as u32);
 
         let mel = audio::pcm_to_mel(&self.config, samples, &filters);
         let mel_len = mel.len();
+
+        // Validate mel spectrogram has content
+        if mel_len == 0 || mel_len < n_mels {
+            return Err(SpeechError::TranscriptionFailed(
+                "mel spectrogram generation failed or insufficient frames".to_string(),
+            ));
+        }
+
         let mel = Tensor::from_vec(mel, (1, n_mels, mel_len / n_mels), &self.device)
             .map_err(|e| SpeechError::TranscriptionFailed(format!("mel tensor: {}", e)))?;
 
@@ -405,13 +416,14 @@ impl<'a> Decoder<'a> {
             };
 
             tokens.push(next_token);
-            let prob_tensor = candle_nn::ops::softmax(&logits, candle_core::D::Minus1)?
-                .i(next_token as usize)?;
-            let prob = prob_tensor.to_vec1::<f32>()?[0] as f64;
+            let prob_tensor =
+                candle_nn::ops::softmax(&logits, candle_core::D::Minus1)?.i(next_token as usize)?;
+            // Indexing a rank-1 tensor with .i() produces a rank-0 scalar - use to_scalar()
+            let prob = prob_tensor.to_scalar::<f32>()? as f64;
             if i == 0 {
                 let no_speech_tensor = candle_nn::ops::softmax(&logits, candle_core::D::Minus1)?
                     .i(self.no_speech_token as usize)?;
-                no_speech_prob = no_speech_tensor.to_vec1::<f32>()?[0] as f64;
+                no_speech_prob = no_speech_tensor.to_scalar::<f32>()? as f64;
             }
             sum_logprob += prob.ln();
             if next_token == self.eot_token || tokens.len() > model.config().max_target_positions {
@@ -459,8 +471,7 @@ impl<'a> Decoder<'a> {
             let dr = self.decode_with_fallback(&mel_segment)?;
 
             seek += segment_size;
-            if dr.no_speech_prob > m::NO_SPEECH_THRESHOLD && dr.avg_logprob < m::LOGPROB_THRESHOLD
-            {
+            if dr.no_speech_prob > m::NO_SPEECH_THRESHOLD && dr.avg_logprob < m::LOGPROB_THRESHOLD {
                 tracing::debug!("no speech detected, skipping segment");
                 continue;
             }
@@ -482,5 +493,3 @@ impl<'a> Decoder<'a> {
         Ok(segments)
     }
 }
-
-
