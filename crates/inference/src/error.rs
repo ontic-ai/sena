@@ -22,6 +22,12 @@ pub enum InferenceError {
 
     #[error("backend failed: {0}")]
     BackendFailed(String),
+
+    #[error("prompt too large: {prompt_tokens} tokens exceeds context size {context_size} (no room for completion)")]
+    PromptTooLarge {
+        prompt_tokens: usize,
+        context_size: usize,
+    },
 }
 
 impl From<infer::InferError> for InferenceError {
@@ -88,5 +94,17 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
         let err: InferenceError = io_err.into();
         assert!(err.to_string().contains("access denied"));
+    }
+
+    #[test]
+    fn error_display_prompt_too_large() {
+        let err = InferenceError::PromptTooLarge {
+            prompt_tokens: 2100,
+            context_size: 2048,
+        };
+        assert_eq!(
+            err.to_string(),
+            "prompt too large: 2100 tokens exceeds context size 2048 (no room for completion)"
+        );
     }
 }

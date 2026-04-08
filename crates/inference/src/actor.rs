@@ -219,6 +219,64 @@ impl InferenceActor {
         self.registry.as_ref()
     }
 
+    /// Estimate token count from a prompt string using a heuristic.
+    ///
+    /// This is a rough approximation: most LLM tokenizers produce ~4 chars per token.
+    /// For accurate token counting, use the model's tokenizer directly if exposed.
+    fn estimate_token_count(text: &str) -> usize {
+        (text.len() / 4).max(1)
+    }
+
+    /// Calculate adjusted max_tokens to fit within the context window.
+    ///
+    /// Returns `(adjusted_max_tokens, prompt_tokens)` or an error if the prompt
+    /// itself is too large to allow any completion.
+    ///
+    /// # Arguments
+    /// * `prompt` - The full prompt text (after template wrapping)
+    /// * `configured_max_tokens` - The max_tokens from config
+    /// * `context_size` - The model's context window size
+    ///
+    /// # Safety Margin
+    /// Reserves 64 tokens as a safety buffer to account for:
+    /// - Template overhead (system prompts, formatting)
+    /// - Token estimation error (heuristic may undercount)
+    /// - Model-specific requirements
+    fn calculate_adjusted_max_tokens(
+        prompt: &str,
+        configured_max_tokens: usize,
+        context_size: usize,
+    ) -> Result<(usize, usize), crate::InferenceError> {
+        let prompt_tokens = Self::estimate_token_count(prompt);
+        let available_tokens = context_size.saturating_sub(prompt_tokens);
+
+        // Require at least 64 tokens for completion
+        if available_tokens <= 64 {
+            return Err(crate::InferenceError::PromptTooLarge {
+                prompt_tokens,
+                context_size,
+            });
+        }
+
+        // Reserve 64 tokens for safety margin
+        let adjusted_max_tokens = available_tokens.saturating_sub(64);
+        let final_max_tokens = configured_max_tokens.min(adjusted_max_tokens);
+
+        // Log warning if we had to reduce max_tokens
+        if final_max_tokens < configured_max_tokens {
+            tracing::warn!(
+                "Adjusted max_tokens from {} to {} (prompt: {} tokens, context: {}, available: {})",
+                configured_max_tokens,
+                final_max_tokens,
+                prompt_tokens,
+                context_size,
+                available_tokens
+            );
+        }
+
+        Ok((final_max_tokens, prompt_tokens))
+    }
+
     /// Ensure the model is loaded. On first call, loads lazily via spawn_blocking.
     async fn ensure_loaded(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
         {
@@ -379,6 +437,26 @@ impl InferenceActor {
                     .unwrap_or(ChatTemplate::Raw);
                 let wrapped_prompt = template.wrap(&prompt);
 
+                // Calculate adjusted max_tokens to fit within context window
+                let (adjusted_max_tokens, prompt_tokens) = match Self::calculate_adjusted_max_tokens(
+                    &wrapped_prompt,
+                    self.inference_max_tokens,
+                    self.inference_ctx_size as usize,
+                ) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let err = format!("{}", e);
+                        let _ = response_tx.send(Err(err.clone()));
+                        let _ = bus
+                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
+                                request_id,
+                                reason: err,
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+
                 let backend_clone = backend;
                 let prompt_len = prompt.len();
                 let params = InferenceParams {
@@ -386,9 +464,16 @@ impl InferenceActor {
                     prompt: wrapped_prompt,
                     temperature: 0.7,
                     top_p: 0.9,
-                    max_tokens: self.inference_max_tokens,
+                    max_tokens: adjusted_max_tokens,
                     ctx_size: self.inference_ctx_size,
                 };
+                tracing::info!(
+                    "inference: request {} - prompt: {} tokens, max_tokens: {} (configured: {})",
+                    request_id,
+                    prompt_tokens,
+                    adjusted_max_tokens,
+                    self.inference_max_tokens
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     let guard = backend_clone
                         .lock()
@@ -536,15 +621,29 @@ impl InferenceActor {
             .unwrap_or(ChatTemplate::Raw);
         let wrapped_prompt = template.wrap(&prompt);
 
+        // Calculate adjusted max_tokens to fit within context window
+        let (adjusted_max_tokens, prompt_tokens) = Self::calculate_adjusted_max_tokens(
+            &wrapped_prompt,
+            self.inference_max_tokens,
+            self.inference_ctx_size as usize,
+        )
+        .map_err(|e| format!("{}", e))?;
+
         let backend_clone = self.backend.clone();
         let params = InferenceParams {
             request_id: uuid::Uuid::new_v4(),
             prompt: wrapped_prompt,
             temperature: 0.7,
             top_p: 0.9,
-            max_tokens: self.inference_max_tokens,
+            max_tokens: adjusted_max_tokens,
             ctx_size: self.inference_ctx_size,
         };
+        tracing::debug!(
+            "infer_once: prompt {} tokens, max_tokens {} (configured: {})",
+            prompt_tokens,
+            adjusted_max_tokens,
+            self.inference_max_tokens
+        );
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
                 .lock()
@@ -732,6 +831,14 @@ impl InferenceActor {
             .unwrap_or(ChatTemplate::Raw);
         let wrapped_prompt = template.wrap(&enriched_prompt);
 
+        // Calculate adjusted max_tokens to fit within context window
+        let (adjusted_max_tokens, prompt_tokens) = Self::calculate_adjusted_max_tokens(
+            &wrapped_prompt,
+            self.inference_max_tokens,
+            self.inference_ctx_size as usize,
+        )
+        .map_err(|e| format!("{}", e))?;
+
         let backend_clone = self.backend.clone();
         let prompt_len = enriched_prompt.len();
         let params = InferenceParams {
@@ -739,14 +846,16 @@ impl InferenceActor {
             prompt: wrapped_prompt,
             temperature: 0.7,
             top_p: 0.9,
-            max_tokens: self.inference_max_tokens,
+            max_tokens: adjusted_max_tokens,
             ctx_size: self.inference_ctx_size,
         };
         tracing::info!(
-            "inference: calling infer request_id={} prompt_len={} max_tokens={}",
+            "inference: calling infer request_id={} prompt_len={} prompt_tokens={} max_tokens={} (configured: {})",
             request_id,
             prompt_len,
-            params.max_tokens
+            prompt_tokens,
+            adjusted_max_tokens,
+            self.inference_max_tokens
         );
         let result = tokio::task::spawn_blocking(move || {
             let guard = backend_clone
@@ -882,15 +991,30 @@ impl InferenceActor {
             .unwrap_or(ChatTemplate::Raw);
         let wrapped_prompt = template.wrap(&enriched_prompt);
 
+        // Calculate adjusted max_tokens to fit within context window
+        let (adjusted_max_tokens, prompt_tokens) = Self::calculate_adjusted_max_tokens(
+            &wrapped_prompt,
+            self.inference_max_tokens,
+            self.inference_ctx_size as usize,
+        )
+        .map_err(|e| format!("{}", e))?;
+
         let backend_clone = self.backend.clone();
         let params = InferenceParams {
             request_id: uuid::Uuid::new_v4(),
             prompt: wrapped_prompt,
             temperature: 0.7,
             top_p: 0.9,
-            max_tokens: self.inference_max_tokens,
+            max_tokens: adjusted_max_tokens,
             ctx_size: self.inference_ctx_size,
         };
+        tracing::info!(
+            "inference: streaming request {} - prompt: {} tokens, max_tokens: {} (configured: {})",
+            request_id,
+            prompt_tokens,
+            adjusted_max_tokens,
+            self.inference_max_tokens
+        );
 
         // Bridge std::sync::mpsc to tokio::sync::mpsc so we can await in async context.
         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::channel::<String>(256);
