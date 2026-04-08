@@ -318,6 +318,24 @@ struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
+    fn normalize_logits_rank1(logits: Tensor) -> candle_core::Result<Tensor> {
+        match logits.rank() {
+            3 => {
+                let (_, _, vocab) = logits.dims3()?;
+                logits.reshape((vocab,))
+            }
+            2 => {
+                let (_, vocab) = logits.dims2()?;
+                logits.reshape((vocab,))
+            }
+            1 => Ok(logits),
+            rank => Err(candle_core::Error::msg(format!(
+                "unexpected logits rank {}, expected 1/2/3",
+                rank
+            ))),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         model: &'a mut WhisperModel,
@@ -392,10 +410,8 @@ impl<'a> Decoder<'a> {
             let ys = model.decoder_forward(&tokens_t, &audio_features, i == 0)?;
 
             let (_, seq_len, _) = ys.dims3()?;
-            let logits = model
-                .decoder_final_linear(&ys.i((..1, seq_len - 1..))?)?
-                .i(0)?
-                .i(0)?;
+            let logits = model.decoder_final_linear(&ys.i((..1, seq_len - 1..))?)?;
+            let logits = Self::normalize_logits_rank1(logits)?;
             let logits = logits.broadcast_add(&self.suppress_tokens)?;
 
             let next_token = if t > 0f64 {

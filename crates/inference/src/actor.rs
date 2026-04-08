@@ -27,9 +27,17 @@ const DEFAULT_DIRECTED_CAPACITY: usize = 64;
 const ITERATIVE_MAX_HARD_CAP: usize = 6;
 const MEMORY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MEMORY_QUERY_TOKEN_BUDGET: usize = 8;
+const CONTEXT_OVERFLOW_SAFETY_MARGIN: usize = 64;
 /// Timeout for single-round memory queries. 2 seconds allows memory to embed the query
 /// and return results. We process directed events during the wait to avoid deadlock.
 const SINGLE_ROUND_MEMORY_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextOverflowInfo {
+    prompt_tokens: usize,
+    max_tokens: Option<usize>,
+    context_size: usize,
+}
 
 /// Inference actor manages model discovery, lazy loading, and inference requests.
 ///
@@ -259,7 +267,7 @@ impl InferenceActor {
         }
 
         // Reserve 64 tokens for safety margin
-        let adjusted_max_tokens = available_tokens.saturating_sub(64);
+        let adjusted_max_tokens = available_tokens.saturating_sub(CONTEXT_OVERFLOW_SAFETY_MARGIN);
         let final_max_tokens = configured_max_tokens.min(adjusted_max_tokens);
 
         // Log warning if we had to reduce max_tokens
@@ -275,6 +283,126 @@ impl InferenceActor {
         }
 
         Ok((final_max_tokens, prompt_tokens))
+    }
+
+    fn parse_number_in_parens_after(haystack: &str, marker: &str) -> Option<usize> {
+        let marker_pos = haystack.find(marker)?;
+        let after_marker = &haystack[marker_pos + marker.len()..];
+        let open_paren_pos = after_marker.find('(')?;
+        let after_open = &after_marker[open_paren_pos + 1..];
+        let digits: String = after_open
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            return None;
+        }
+        digits.parse::<usize>().ok()
+    }
+
+    fn parse_context_overflow_info(err: &str) -> Option<ContextOverflowInfo> {
+        let lower = err.to_lowercase();
+        if !lower.contains("exceeds context size") {
+            return None;
+        }
+
+        let prompt_tokens = Self::parse_number_in_parens_after(&lower, "prompt")?;
+        let context_size = Self::parse_number_in_parens_after(&lower, "context size")?;
+        let max_tokens = Self::parse_number_in_parens_after(&lower, "max_tokens");
+
+        Some(ContextOverflowInfo {
+            prompt_tokens,
+            max_tokens,
+            context_size,
+        })
+    }
+
+    fn compute_retry_max_tokens(
+        overflow: ContextOverflowInfo,
+        current_max_tokens: usize,
+    ) -> Result<Option<usize>, crate::InferenceError> {
+        let available_tokens = overflow.context_size.saturating_sub(overflow.prompt_tokens);
+        if available_tokens <= CONTEXT_OVERFLOW_SAFETY_MARGIN {
+            return Err(crate::InferenceError::PromptTooLarge {
+                prompt_tokens: overflow.prompt_tokens,
+                context_size: overflow.context_size,
+            });
+        }
+
+        let safe_max_tokens = available_tokens.saturating_sub(CONTEXT_OVERFLOW_SAFETY_MARGIN);
+        let attempted_max_tokens = overflow.max_tokens.unwrap_or(current_max_tokens);
+        let retry_max_tokens = safe_max_tokens.min(attempted_max_tokens);
+
+        if retry_max_tokens < attempted_max_tokens {
+            return Ok(Some(retry_max_tokens));
+        }
+
+        Ok(None)
+    }
+
+    async fn complete_with_overflow_retry(
+        backend: Arc<Mutex<Box<dyn LlmBackend>>>,
+        mut params: InferenceParams,
+    ) -> Result<String, String> {
+        let first_params = InferenceParams {
+            request_id: params.request_id,
+            prompt: params.prompt.clone(),
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            ctx_size: params.ctx_size,
+        };
+        let first_attempt = {
+            let backend_clone = backend.clone();
+            tokio::task::spawn_blocking(move || {
+                let guard = backend_clone
+                    .lock()
+                    .map_err(|e| format!("lock poisoned: {}", e))?;
+                guard.complete(&first_params).map_err(|e| format!("{}", e))
+            })
+            .await
+            .map_err(|e| format!("task panicked: {}", e))?
+        };
+
+        match first_attempt {
+            Ok(text) => Ok(text),
+            Err(err) => {
+                let overflow = match Self::parse_context_overflow_info(&err) {
+                    Some(v) => v,
+                    None => return Err(err),
+                };
+
+                let retry_max_tokens = match Self::compute_retry_max_tokens(overflow, params.max_tokens)
+                {
+                    Ok(Some(v)) => v,
+                    Ok(None) => return Err(err),
+                    Err(e) => return Err(e.to_string()),
+                };
+
+                tracing::warn!(
+                    "inference: context overflow on first attempt; retrying once with max_tokens {} -> {} (prompt={}, context={})",
+                    params.max_tokens,
+                    retry_max_tokens,
+                    overflow.prompt_tokens,
+                    overflow.context_size
+                );
+                params.max_tokens = retry_max_tokens;
+
+                let retry_attempt = {
+                    let backend_clone = backend;
+                    tokio::task::spawn_blocking(move || {
+                        let guard = backend_clone
+                            .lock()
+                            .map_err(|e| format!("lock poisoned: {}", e))?;
+                        guard.complete(&params).map_err(|e| format!("{}", e))
+                    })
+                    .await
+                    .map_err(|e| format!("task panicked: {}", e))?
+                };
+
+                retry_attempt
+            }
+        }
     }
 
     /// Ensure the model is loaded. On first call, loads lazily via spawn_blocking.
@@ -474,16 +602,10 @@ impl InferenceActor {
                     adjusted_max_tokens,
                     self.inference_max_tokens
                 );
-                let result = tokio::task::spawn_blocking(move || {
-                    let guard = backend_clone
-                        .lock()
-                        .map_err(|e| format!("lock poisoned: {}", e))?;
-                    guard.complete(&params).map_err(|e| format!("{}", e))
-                })
-                .await;
+                let result = Self::complete_with_overflow_retry(backend_clone, params).await;
 
                 match result {
-                    Ok(Ok(text)) => {
+                    Ok(text) => {
                         let token_count = text.split_whitespace().count();
                         let _ = response_tx.send(Ok((text.clone(), token_count)));
 
@@ -503,22 +625,12 @@ impl InferenceActor {
                             }))
                             .await;
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         let _ = response_tx.send(Err(e.clone()));
                         let _ = bus
                             .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
                                 request_id,
                                 reason: e,
-                            }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let err = format!("task panicked: {}", e);
-                        let _ = response_tx.send(Err(err.clone()));
-                        let _ = bus
-                            .broadcast(Event::Inference(InferenceEvent::InferenceFailed {
-                                request_id,
-                                reason: err,
                             }))
                             .await;
                     }
@@ -644,16 +756,7 @@ impl InferenceActor {
             adjusted_max_tokens,
             self.inference_max_tokens
         );
-        let result = tokio::task::spawn_blocking(move || {
-            let guard = backend_clone
-                .lock()
-                .map_err(|e| format!("lock poisoned: {}", e))?;
-            guard.complete(&params).map_err(|e| format!("{}", e))
-        })
-        .await
-        .map_err(|e| format!("task panicked: {}", e))?;
-
-        result
+        Self::complete_with_overflow_retry(backend_clone, params).await
     }
 
     /// Build a proactive prompt from a context snapshot.
@@ -857,14 +960,7 @@ impl InferenceActor {
             adjusted_max_tokens,
             self.inference_max_tokens
         );
-        let result = tokio::task::spawn_blocking(move || {
-            let guard = backend_clone
-                .lock()
-                .map_err(|e| format!("lock poisoned: {}", e))?;
-            guard.complete(&params).map_err(|e| format!("{}", e))
-        })
-        .await
-        .map_err(|e| format!("task panicked: {}", e))??;
+        let result = Self::complete_with_overflow_retry(backend_clone, params).await?;
 
         tracing::info!("inference: infer completed request_id={}", request_id);
 
@@ -2561,6 +2657,69 @@ mod tests {
         let data = b"Hello World!";
         let encoded = encode_base64(data);
         assert_eq!(encoded, "SGVsbG8gV29ybGQh");
+    }
+
+    #[test]
+    fn parse_context_overflow_info_extracts_tokens_and_context() {
+        let err = "prompt (1771 tokens) + max_tokens (494) exceeds context size (2048)";
+        let parsed = InferenceActor::parse_context_overflow_info(err)
+            .expect("overflow message should parse");
+
+        assert_eq!(parsed.prompt_tokens, 1771);
+        assert_eq!(parsed.max_tokens, Some(494));
+        assert_eq!(parsed.context_size, 2048);
+    }
+
+    #[test]
+    fn parse_context_overflow_info_supports_missing_max_tokens() {
+        let err = "prompt (1900 tokens) exceeds context size (2048)";
+        let parsed = InferenceActor::parse_context_overflow_info(err)
+            .expect("overflow message should parse without max_tokens");
+
+        assert_eq!(parsed.prompt_tokens, 1900);
+        assert_eq!(parsed.max_tokens, None);
+        assert_eq!(parsed.context_size, 2048);
+    }
+
+    #[test]
+    fn compute_retry_max_tokens_reduces_budget_when_overflow_detected() {
+        let overflow = ContextOverflowInfo {
+            prompt_tokens: 1771,
+            max_tokens: Some(494),
+            context_size: 2048,
+        };
+
+        let retry = InferenceActor::compute_retry_max_tokens(overflow, 512)
+            .expect("should compute retry")
+            .expect("should reduce max tokens");
+
+        assert_eq!(retry, 213);
+    }
+
+    #[test]
+    fn compute_retry_max_tokens_returns_prompt_too_large_when_no_completion_room() {
+        let overflow = ContextOverflowInfo {
+            prompt_tokens: 2040,
+            max_tokens: Some(10),
+            context_size: 2048,
+        };
+
+        let err = InferenceActor::compute_retry_max_tokens(overflow, 10)
+            .expect_err("should fail when prompt already fills context");
+        assert!(matches!(err, crate::InferenceError::PromptTooLarge { .. }));
+    }
+
+    #[test]
+    fn compute_retry_max_tokens_skips_retry_when_already_safe() {
+        let overflow = ContextOverflowInfo {
+            prompt_tokens: 1200,
+            max_tokens: Some(100),
+            context_size: 2048,
+        };
+
+        let retry = InferenceActor::compute_retry_max_tokens(overflow, 100)
+            .expect("computation should succeed");
+        assert!(retry.is_none());
     }
 
     #[tokio::test]
