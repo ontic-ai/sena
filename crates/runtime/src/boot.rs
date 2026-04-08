@@ -137,8 +137,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
     };
 
     // Step 2: Initialize encryption
-    let master_key =
-        init_encryption().map_err(|e| BootError::EncryptionInitFailed(e.to_string()))?;
+    let master_key = init_encryption()
+        .await
+        .map_err(|e| BootError::EncryptionInitFailed(e.to_string()))?;
 
     // Step 3: Initialize EventBus
     let bus = Arc::new(EventBus::new());
@@ -210,7 +211,9 @@ pub async fn boot() -> Result<Runtime, BootError> {
     let config_dir =
         platform::config_dir().map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_dir = config_dir.join("memory");
-    std::fs::create_dir_all(&memory_dir).map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
+    tokio::fs::create_dir_all(&memory_dir)
+        .await
+        .map_err(|e| BootError::MemoryInitFailed(e.to_string()))?;
     let memory_consolidation_interval =
         Duration::from_secs(config.memory_consolidation_interval_secs);
     let memory_idle_threshold = Duration::from_secs(config.memory_consolidation_idle_secs);
@@ -348,7 +351,7 @@ pub async fn boot() -> Result<Runtime, BootError> {
     })
 }
 
-fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
+async fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
     // Case 1: Key already exists in OS keychain (normal subsequent runs).
     if let Ok(key) = crypto::keychain::retrieve_master_key() {
         return Ok(key);
@@ -360,7 +363,7 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
         let salt_path = platform::config_dir()
             .map_err(|e| crypto::CryptoError::IoError(std::io::Error::other(e.to_string())))?
             .join("salt.bin");
-        let salt = load_or_create_salt(&salt_path)?;
+        let salt = load_or_create_salt(&salt_path).await?;
         let key = crypto::argon2_kdf::derive_master_key(&passphrase, &salt)?;
         crypto::keychain::store_master_key(&key)?;
         return Ok(key);
@@ -375,11 +378,13 @@ fn init_encryption() -> Result<MasterKey, crypto::CryptoError> {
     Ok(key)
 }
 
-fn load_or_create_salt(
+async fn load_or_create_salt(
     salt_path: &std::path::Path,
 ) -> Result<crypto::argon2_kdf::Salt, crypto::CryptoError> {
     if salt_path.exists() {
-        let bytes = std::fs::read(salt_path).map_err(crypto::CryptoError::IoError)?;
+        let bytes = tokio::fs::read(salt_path)
+            .await
+            .map_err(crypto::CryptoError::IoError)?;
         if bytes.len() != 16 {
             return Err(crypto::CryptoError::InvalidData(
                 "salt file has invalid length".to_string(),
@@ -391,9 +396,13 @@ fn load_or_create_salt(
     } else {
         let salt = crypto::argon2_kdf::generate_salt();
         if let Some(parent) = salt_path.parent() {
-            std::fs::create_dir_all(parent).map_err(crypto::CryptoError::IoError)?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(crypto::CryptoError::IoError)?;
         }
-        std::fs::write(salt_path, salt.as_bytes()).map_err(crypto::CryptoError::IoError)?;
+        tokio::fs::write(salt_path, salt.as_bytes())
+            .await
+            .map_err(crypto::CryptoError::IoError)?;
         Ok(salt)
     }
 }
