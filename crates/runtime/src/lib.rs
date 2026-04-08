@@ -31,6 +31,16 @@ pub use single_instance::{
 pub use speech::list_input_devices;
 pub use tray::TrayManager;
 
+use platform::PlatformError;
+
+/// Check if this is a first boot by testing for soul.redb.enc existence.
+///
+/// Returns `true` if the Soul database file does not exist (first boot).
+pub fn is_first_boot() -> Result<bool, PlatformError> {
+    let soul_path = platform::config_dir()?.join("soul.redb.enc");
+    Ok(!soul_path.exists())
+}
+
 use std::time::Duration;
 
 /// Unified error type for top-level runtime operations.

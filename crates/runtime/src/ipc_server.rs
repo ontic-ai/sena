@@ -11,6 +11,7 @@
 //! events back to subscribed clients.
 
 use bus::events::inference::{InferenceEvent, Priority};
+use bus::events::soul::SoulEvent;
 use bus::events::speech::SpeechEvent;
 use bus::events::system::SystemEvent;
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
@@ -470,6 +471,30 @@ impl IpcServer {
                     );
                 } else {
                     tracing::info!("IPC ShutdownRequested: shutdown signal dispatched");
+                }
+            }
+            IpcPayload::InitializeName { name } => {
+                // First-boot onboarding: CLI collected user name before daemon started.
+                // Broadcast InitializeWithName so Soul can persist it.
+                if let Err(e) = self
+                    .bus
+                    .broadcast(Event::Soul(SoulEvent::InitializeWithName {
+                        name: name.clone(),
+                    }))
+                    .await
+                {
+                    let _ = tx.send(IpcMessage {
+                        id: msg.id,
+                        payload: IpcPayload::Error {
+                            to_id: msg.id,
+                            reason: format!("Failed to initialize name: {}", e),
+                        },
+                    });
+                } else {
+                    let _ = tx.send(IpcMessage {
+                        id: msg.id,
+                        payload: IpcPayload::Ack { to_id: msg.id },
+                    });
                 }
             }
             _ => {
@@ -1107,7 +1132,10 @@ fn format_observation_response(resp: &bus::events::transparency::ObservationResp
         format!("Session    {}", session),
     ];
     if !snapshot.recent_files.is_empty() {
-        lines.push(format!("Files      {} recent events", snapshot.recent_files.len()));
+        lines.push(format!(
+            "Files      {} recent events",
+            snapshot.recent_files.len()
+        ));
     }
     if snapshot.visual_context.is_some() {
         lines.push("Screen     captured (vision context ready)".to_string());

@@ -23,8 +23,11 @@ pub struct OnboardingResult {
 ///
 /// Blocks until the user has answered all prompts.
 /// Returns OnboardingResult with user choices.
+///
+/// If `bus` is provided, emits `SoulEvent::InitializeWithName` immediately.
+/// If `bus` is None, caller must send the name to Soul separately (e.g., via IPC).
 pub async fn run_wizard(
-    bus: &std::sync::Arc<EventBus>,
+    bus: Option<&std::sync::Arc<EventBus>>,
     models_available: bool,
 ) -> Result<OnboardingResult> {
     eprintln!("[DEBUG] First boot detected — starting onboarding wizard...");
@@ -127,12 +130,14 @@ pub async fn run_wizard(
         clip_trimmed.is_empty() || clip_trimmed == "y" || clip_trimmed == "yes";
     println!();
 
-    // Emit InitializeWithName on the bus so Soul can persist the name
-    bus.broadcast(Event::Soul(SoulEvent::InitializeWithName {
-        name: user_name.clone(),
-    }))
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to send name to Soul: {}", e))?;
+    // Emit InitializeWithName on the bus (only if bus is provided)
+    if let Some(bus) = bus {
+        bus.broadcast(Event::Soul(SoulEvent::InitializeWithName {
+            name: user_name.clone(),
+        }))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to send name to Soul: {}", e))?;
+    }
 
     println!("  ✔  Setup complete! Starting Sena...");
     println!();

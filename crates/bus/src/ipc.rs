@@ -78,6 +78,11 @@ pub enum IpcPayload {
     /// Only sent by a CLI instance that auto-started the daemon (tracked by `cli_started_daemon`).
     /// Must NOT be sent when connecting to a pre-existing daemon.
     ShutdownRequested,
+
+    /// CLI → Daemon: initialize Soul with user name (first-boot onboarding).
+    /// Sent by CLI after collecting onboarding data but before daemon was running.
+    /// Daemon broadcasts `SoulEvent::InitializeWithName` on the bus.
+    InitializeName { name: String },
 }
 
 /// Display hint for CLI rendering.

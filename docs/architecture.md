@@ -222,18 +222,21 @@ This ensures `BootComplete` listeners (like CTP and inference) only activate onc
 ### 4.3 Process Lifetime (Daemon vs CLI Mode)
 
 **CLI design principle — wrapper, not owner:**
-The CLI is a thin wrapper over the daemon's capabilities. All business logic (inference, memory, STT, CTP, Soul writes) lives in the daemon and its actors. The CLI dispatches typed bus events to request work and renders the resulting event stream. It has no actors of its own. In Phase 6, CLI connects to the running daemon over IPC. Before Phase 6 (current state), CLI boots the full runtime as the owner — this is a transitional state. Any code written for CLI must be compatible with the Phase 6 IPC model: if a feature would not work when CLI is a separate process, it is coupling that must be fixed.
+The CLI is a thin wrapper over the daemon's capabilities. All business logic (inference, memory, STT, CTP, Soul writes) lives in the daemon and its actors. The CLI dispatches typed bus events to request work and renders the resulting event stream. It has no actors of its own. In Phase 6+, CLI always connects to the running daemon over IPC. The CLI never boots the runtime in-process — it either connects to an existing daemon or auto-starts one as a background process.
 
 Two entry points, one binary:
 
 | Mode | Invocation | Lifetime owner |
 |---|---|---|
 | Daemon | `sena` (no args) | `runtime::run_background()` → supervision loop |
-| CLI | `sena cli` | Boot → `shell::run_with_runtime()` → TUI → shutdown |
+| CLI | `sena cli` | IPC connection → `shell::run_with_ipc()` → TUI → disconnect |
+
+**CLI mode (Phase 6+ only):**
+- If daemon is running: `sena cli` connects via IPC (`shell::run_with_ipc()`)
+- If daemon is NOT running: `sena cli` auto-starts daemon in background, waits for IPC readiness (30s timeout), then connects
+- The `run_with_runtime()` path (pre-Phase-6 local-only CLI) has been removed as of this unit
 
 In daemon mode, `runtime::run_background()` boots, passes the readiness gate, broadcasts BootComplete, optionally emits TTS greeting, then enters `supervisor::supervision_loop()` which blocks until ShutdownSignal or Ctrl+C.
-
-In CLI mode, `runtime::boot_ready()` handles boot+readiness+BootComplete and returns the live `Runtime` to `main.rs`. The CLI then opens the TUI via `shell::run_with_runtime()`. When the user exits the TUI, shutdown is triggered.
 
 **Open CLI from tray:** The "Open CLI" tray menu item broadcasts `CliAttachRequested`. The supervision loop handles this by calling `open_cli_in_new_terminal()` which spawns a new terminal process running `sena cli`. This keeps the daemon and CLI as independent processes.
 

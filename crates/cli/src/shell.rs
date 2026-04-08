@@ -40,6 +40,10 @@ use crate::{display, model_selector};
 use runtime::boot::Runtime;
 use std::path::PathBuf;
 
+// Local-mode shell implementation retained for potential future offline/testing use.
+// Phase 6+ uses IPC-only mode (run_with_ipc). These types support the local runtime
+// path but are currently unreachable after removal of run_with_runtime().
+#[allow(dead_code)]
 const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Slash-command autocomplete ────────────────────────────────────────────────
@@ -125,6 +129,7 @@ struct SlashDropdown {
     selected: usize,
 }
 
+#[allow(dead_code)]
 struct PendingTransparencyQuery {
     query: TransparencyQuery,
     started_at: Instant,
@@ -188,6 +193,7 @@ impl SlashDropdown {
 
 /// Reason the shell exited — drives the restart loop in main.rs.
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum ShellExitReason {
     /// Close the CLI session, but keep runtime and tray alive.
     Close,
@@ -206,6 +212,7 @@ impl Drop for TerminalGuard {
 }
 
 /// Main TUI shell state.
+#[allow(dead_code)]
 struct Shell {
     /// Event bus for actor communication.
     bus: Arc<bus::EventBus>,
@@ -1959,12 +1966,14 @@ impl Shell {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum DispatchResult {
     Continue,
     Close,
     Shutdown,
 }
 
+#[allow(dead_code)]
 fn exit_command_result(command: &str) -> Option<DispatchResult> {
     match command {
         "/close" | "/quit" | "/exit" | "/q" => Some(DispatchResult::Close),
@@ -1973,6 +1982,7 @@ fn exit_command_result(command: &str) -> Option<DispatchResult> {
     }
 }
 
+#[allow(dead_code)]
 fn is_vision_capable_model(name: &str) -> bool {
     let n = name.to_lowercase();
     n.contains("llava")
@@ -1987,6 +1997,7 @@ fn is_vision_capable_model(name: &str) -> bool {
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
+#[allow(dead_code)]
 pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
     // ── Enter raw mode and alternate screen ───────────────────────────────────
     terminal::enable_raw_mode()?;
@@ -2373,6 +2384,7 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 }
 
 /// Helper to create a centered rect using percentage of the available rect.
+#[allow(dead_code)]
 fn centered_rect(
     percent_x: u16,
     percent_y: u16,
@@ -2398,6 +2410,7 @@ fn centered_rect(
 }
 
 /// Format ObservationResponse for TUI display (no ANSI codes).
+#[allow(dead_code)]
 fn format_observation_tui(resp: &ObservationResponse) -> String {
     let snapshot = &resp.snapshot;
     let app = &snapshot.active_app.app_name;
@@ -2423,6 +2436,7 @@ fn format_observation_tui(resp: &ObservationResponse) -> String {
 }
 
 /// Format MemoryResponse for TUI display (no ANSI codes).
+#[allow(dead_code)]
 fn format_memory_tui(resp: &MemoryResponse) -> String {
     let summary = &resp.soul_summary;
     let patterns = if summary.work_patterns.is_empty() {
@@ -2466,6 +2480,7 @@ fn format_memory_tui(resp: &MemoryResponse) -> String {
 }
 
 /// Format InferenceExplanationResponse for TUI display (no ANSI codes).
+#[allow(dead_code)]
 fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
     let request = if resp.request_context.chars().count() > 200 {
         let truncated: String = resp.request_context.chars().take(200).collect();
@@ -2503,6 +2518,7 @@ fn format_explanation_tui(resp: &InferenceExplanationResponse) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn empty_memory_message_tui(
     summary: &bus::events::transparency::SoulSummaryForTransparency,
 ) -> &'static str {
@@ -2517,6 +2533,7 @@ fn empty_memory_message_tui(
     }
 }
 
+#[allow(dead_code)]
 fn transparency_timeout_message(query: &TransparencyQuery) -> String {
     match query {
         TransparencyQuery::CurrentObservation => {
@@ -2535,6 +2552,7 @@ fn transparency_timeout_message(query: &TransparencyQuery) -> String {
 }
 
 /// Format bus events for verbose mode.
+#[allow(dead_code)]
 fn verbose_format(ev: &Event) -> Option<String> {
     match ev {
         Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => {
@@ -3539,70 +3557,6 @@ fn render_slash_dropdown_overlay(
     let mut state = ListState::default();
     state.select(Some(dd.selected));
     frame.render_stateful_widget(list, popup_area, &mut state);
-}
-
-/// Boot the runtime and run the application. This is the main entry point
-/// for both CLI and headless (tray) modes.
-/// Open a CLI TUI session with an already-booted runtime.
-///
-/// Handles onboarding if needed, then runs the TUI. After the user exits,
-/// triggers graceful shutdown of all actors.
-///
-/// NOTE: In Phase 6+, this function is not actively used by `sena cli` (which uses IPC mode instead).
-/// It is kept for future testing or fallback scenarios.
-#[allow(dead_code)]
-pub async fn run_with_runtime(
-    runtime: runtime::Runtime,
-    needs_onboarding_flag: bool,
-) -> anyhow::Result<()> {
-    crate::display::banner();
-    crate::display::success("Sena is ready.");
-
-    let runtime_arc = Arc::new(runtime);
-    let mut needs_onboarding = needs_onboarding_flag;
-
-    run_onboarding_if_needed(&runtime_arc, &mut needs_onboarding).await?;
-
-    let exit_reason = run(Arc::clone(&runtime_arc)).await;
-
-    // Recover the Runtime from the Arc for shutdown.
-    drop(exit_reason);
-    let runtime = Arc::try_unwrap(runtime_arc)
-        .map_err(|_| anyhow::anyhow!("runtime still referenced at CLI exit"))?;
-    let timeout = Duration::from_secs(runtime.config.shutdown_timeout_secs);
-    runtime::shutdown(runtime, timeout).await?;
-    crate::display::success("Sena stopped cleanly.");
-    Ok(())
-}
-
-async fn run_onboarding_if_needed(
-    runtime: &Arc<Runtime>,
-    needs_onboarding: &mut bool,
-) -> anyhow::Result<()> {
-    if !*needs_onboarding {
-        return Ok(());
-    }
-
-    let models_available = runtime::ollama_models_dir()
-        .ok()
-        .and_then(|d| runtime::discover_models(&d).ok())
-        .map(|r| !r.is_empty())
-        .unwrap_or(false);
-
-    let result = crate::onboarding::run_wizard(&runtime.bus, models_available).await?;
-
-    let user_name = result.user_name.clone();
-    let mut updated_config = runtime.config.clone();
-    updated_config.file_watch_paths = result.file_watch_paths;
-    updated_config.clipboard_observation_enabled = result.clipboard_observation_enabled;
-    runtime::save_config(&updated_config).await?;
-    crate::display::success(&format!("Onboarding saved for {}.", user_name));
-    if let Ok(path) = runtime::config::config_path() {
-        crate::display::info(&format!("Config file: {}", path.display()));
-    }
-    *needs_onboarding = false;
-
-    Ok(())
 }
 
 #[cfg(test)]

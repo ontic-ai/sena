@@ -130,6 +130,45 @@ async fn main() -> Result<()> {
             // otherwise corrupt ratatui's alternate screen buffer.
             runtime::suppress_llama_logs();
 
+            // G3: Check for first boot before auto-starting daemon.
+            // If first boot, run onboarding wizard to collect user preferences.
+            let is_first_boot = runtime::is_first_boot().unwrap_or(false);
+            let onboarding_user_name = if is_first_boot {
+                tracing::info!("First boot detected — running onboarding wizard");
+
+                let models_available = runtime::ollama_models_dir()
+                    .ok()
+                    .and_then(|d| runtime::discover_models(&d).ok())
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false);
+
+                // Run onboarding wizard standalone (no bus yet — daemon not started).
+                let onboarding_result = match onboarding::run_wizard(None, models_available).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Onboarding failed: {}", e);
+                        pause_before_exit();
+                        std::process::exit(1);
+                    }
+                };
+
+                // Save config with onboarding preferences.
+                let mut config = runtime::config::load_or_create_config().await?;
+                config.file_watch_paths = onboarding_result.file_watch_paths;
+                config.clipboard_observation_enabled =
+                    onboarding_result.clipboard_observation_enabled;
+                if let Err(e) = runtime::save_config(&config).await {
+                    eprintln!("Failed to save config: {}", e);
+                    pause_before_exit();
+                    std::process::exit(1);
+                }
+
+                tracing::info!("Onboarding complete — config saved");
+                Some(onboarding_result.user_name)
+            } else {
+                None
+            };
+
             // Phase 6: CLI connects to running daemon over IPC.
             // If daemon is not running, auto-start it and shut it down on exit.
             let cli_started_daemon = if !runtime::is_daemon_running() {
@@ -160,6 +199,26 @@ async fn main() -> Result<()> {
             } else {
                 false
             };
+
+            // If first boot, send InitializeName to Soul via IPC now that daemon is up.
+            if let Some(user_name) = onboarding_user_name {
+                tracing::info!("Sending InitializeName to Soul via IPC");
+                if let Ok(mut client) = ipc_client::IpcClient::connect().await {
+                    if let Err(e) = client
+                        .send(bus::IpcPayload::InitializeName {
+                            name: user_name.clone(),
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to send InitializeName via IPC: {}", e);
+                        eprintln!("Warning: Failed to set user name in Soul: {}", e);
+                    } else {
+                        tracing::info!("InitializeName sent successfully");
+                    }
+                } else {
+                    tracing::warn!("Failed to connect to IPC after daemon start");
+                }
+            }
 
             // Connect to daemon IPC and run TUI in IPC mode.
             let result = shell::run_with_ipc().await;
