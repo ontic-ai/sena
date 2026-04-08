@@ -1,5 +1,6 @@
 //! TUI state management — session stats, conversation log, editor state.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Status of an actor in the system.
@@ -149,6 +150,94 @@ impl EditorState {
 }
 
 impl Default for EditorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Unified TUI state shared between standalone Shell and IPC-connected shell.
+///
+/// This struct contains all stateful UI elements that were previously duplicated
+/// between the Shell struct and run_with_ipc() local variables. Extracting this
+/// eliminates redundancy and ensures both modes have identical rendering state.
+pub struct ShellState<T> {
+    /// Conversation log messages.
+    pub messages: Vec<Message>,
+    /// Input line editor with history.
+    pub editor: EditorState,
+    /// Session statistics.
+    pub stats: SessionStats,
+    /// Scroll offset from bottom (0 = at bottom, autoscroll).
+    pub scroll_offset: usize,
+    /// First Ctrl+C press timestamp for double-press detection.
+    pub ctrl_c_first_press: Option<Instant>,
+    /// Slash-command autocomplete dropdown (visible when input starts with '/').
+    pub slash_dropdown: Option<T>,
+    /// Loop states: loop_name → enabled.
+    pub loop_states: HashMap<String, bool>,
+    /// Actor health status tracking.
+    pub actor_health: HashMap<&'static str, ActorStatus>,
+    /// Currently loaded model name.
+    pub current_model: Option<String>,
+    /// Model selector popup (visible when not None).
+    pub model_popup: Option<crate::model_selector::ModelSelectorPopup>,
+    /// Pending model directory input flag.
+    pub pending_model_dir_input: bool,
+    /// Are we waiting for an inference response?
+    pub waiting_for_inference: bool,
+    /// True while continuous listen mode is active in this CLI session.
+    pub listen_mode_active: bool,
+    /// Session ID of the currently active listen session (0 when inactive).
+    pub listen_session_id: u64,
+}
+
+impl<T> ShellState<T> {
+    /// Create a new ShellState with default initialization.
+    pub fn new() -> Self {
+        // Initialize loop states - all loops enabled by default
+        let mut loop_states: HashMap<String, bool> = HashMap::new();
+        loop_states.insert("ctp".to_string(), true);
+        loop_states.insert("memory_consolidation".to_string(), true);
+        loop_states.insert("platform_polling".to_string(), true);
+        loop_states.insert("screen_capture".to_string(), true);
+        loop_states.insert("speech".to_string(), true);
+
+        // Initialize actor health - all actors assumed Ready
+        let mut actor_health: HashMap<&'static str, ActorStatus> = HashMap::new();
+        actor_health.insert("Platform", ActorStatus::Ready);
+        actor_health.insert("Inference", ActorStatus::Ready);
+        actor_health.insert("CTP", ActorStatus::Ready);
+        actor_health.insert("Memory", ActorStatus::Ready);
+        actor_health.insert("Soul", ActorStatus::Ready);
+
+        Self {
+            messages: Vec::new(),
+            editor: EditorState::new(),
+            stats: SessionStats::new(),
+            scroll_offset: 0,
+            ctrl_c_first_press: None,
+            slash_dropdown: None,
+            loop_states,
+            actor_health,
+            current_model: None,
+            model_popup: None,
+            pending_model_dir_input: false,
+            waiting_for_inference: false,
+            listen_mode_active: false,
+            listen_session_id: 0,
+        }
+    }
+
+    /// Add a welcome message to the conversation log.
+    pub fn add_welcome_message(&mut self, text: &str) {
+        self.messages.push(Message::new(
+            MessageRole::System,
+            text.to_string(),
+        ));
+    }
+}
+
+impl<T> Default for ShellState<T> {
     fn default() -> Self {
         Self::new()
     }

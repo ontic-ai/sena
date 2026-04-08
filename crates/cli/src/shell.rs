@@ -35,7 +35,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::tui_state::{ActorStatus, EditorState, Message, MessageRole, SessionStats};
+use crate::tui_state::{ActorStatus, Message, MessageRole};
 use crate::{display, model_selector};
 use runtime::boot::Runtime;
 use std::path::PathBuf;
@@ -216,109 +216,50 @@ impl Drop for TerminalGuard {
 struct Shell {
     /// Event bus for actor communication.
     bus: Arc<bus::EventBus>,
-    /// Input line editor with history.
-    editor: EditorState,
-    /// Conversation log messages.
-    messages: Vec<Message>,
-    /// Scroll offset from bottom (0 = at bottom, autoscroll).
-    scroll_offset: usize,
-    /// Session statistics.
-    stats: SessionStats,
-    /// First Ctrl+C press timestamp for double-press detection.
-    ctrl_c_first_press: Option<Instant>,
-    /// Are we waiting for an inference response?
-    waiting_for_inference: bool,
+    /// Shared TUI state (messages, editor, stats, model, loops, actors, etc.)
+    state: crate::tui_state::ShellState<SlashDropdown>,
     /// Request ID of the pending inference (if any).
     pending_inference_id: Option<u64>,
     /// Verbose mode: show all actor events.
     verbose: bool,
-    /// Currently loaded model name.
-    current_model: Option<String>,
-    /// Model selector popup (visible when not None).
-    model_popup: Option<model_selector::ModelSelectorPopup>,
-    /// Actor health status tracking.
-    actor_health: HashMap<&'static str, ActorStatus>,
     /// Actors health popup visibility flag.
     actors_popup_visible: bool,
-    /// Slash-command autocomplete dropdown (visible when input starts with '/').
-    slash_dropdown: Option<SlashDropdown>,
     /// True while waiting for a transparency query response on the bus.
     transparency_loading: bool,
     /// The currently pending transparency query, if any.
     pending_transparency: Option<PendingTransparencyQuery>,
-    /// Pending model directory input flag.
-    pending_model_dir_input: bool,
     /// Runtime reference for config access.
     runtime: Arc<Runtime>,
     /// Shell-local voice UX state (does not persist config).
     voice_enabled: bool,
     /// Last emitted download-progress bucket (0..=10) keyed by request ID.
     download_progress: HashMap<u64, u64>,
-    /// True while continuous listen mode is active in this CLI session.
-    listen_mode_active: bool,
-    /// Session ID of the currently active listen session (0 when inactive).
-    listen_session_id: u64,
-    /// Loop states: loop_name → enabled
-    loop_states: HashMap<String, bool>,
 }
 
 impl Shell {
     /// Create a new Shell instance.
     fn new(runtime: Arc<Runtime>) -> Self {
         let voice_enabled = runtime.config.speech_enabled;
-        let messages = vec![
-            Message::new(
-                MessageRole::System,
-                "Welcome to Sena — local-first ambient AI".to_string(),
-            ),
-            Message::new(
-                MessageRole::System,
-                "Type /help for commands, or chat freely.".to_string(),
-            ),
-        ];
-
-        // Pre-populate actor health — all actors are confirmed Ready by the time
-        // Shell::new() is called (boot_ready() waits for ActorReady from every actor
-        // before returning the Runtime). Only transitions to Failed on ActorFailed bus events.
-        let mut actor_health = HashMap::new();
-        actor_health.insert("Platform", ActorStatus::Ready);
-        actor_health.insert("Inference", ActorStatus::Ready);
-        actor_health.insert("CTP", ActorStatus::Ready);
-        actor_health.insert("Memory", ActorStatus::Ready);
-        // Initialize loop states - all loops enabled by default
-        let mut loop_states = HashMap::new();
-        loop_states.insert("ctp".to_string(), true);
-        loop_states.insert("memory_consolidation".to_string(), true);
-        loop_states.insert("platform_polling".to_string(), true);
-        loop_states.insert("screen_capture".to_string(), true);
-        loop_states.insert("speech".to_string(), true);
-
-        actor_health.insert("Soul", ActorStatus::Ready);
+        
+        // Initialize shared state with welcome messages.
+        let mut state = crate::tui_state::ShellState::new();
+        state.add_welcome_message("Welcome to Sena — local-first ambient AI");
+        state.add_welcome_message("Type /help for commands, or chat freely.");
+        
+        // Seed current_model from runtime config.
+        state.current_model = runtime.config.preferred_model.clone();
 
         Self {
             bus: runtime.bus.clone(),
-            editor: EditorState::new(),
-            messages,
-            scroll_offset: 0,
-            stats: SessionStats::new(),
-            ctrl_c_first_press: None,
-            waiting_for_inference: false,
+            state,
             pending_inference_id: None,
             verbose: false,
-            current_model: runtime.config.preferred_model.clone(),
-            model_popup: None,
-            actor_health,
             actors_popup_visible: false,
-            slash_dropdown: None,
-            loop_states,
             transparency_loading: false,
             pending_transparency: None,
-            pending_model_dir_input: false,
             runtime,
             voice_enabled,
             download_progress: HashMap::new(),
-            listen_mode_active: false,
-            listen_session_id: 0,
         }
     }
 
@@ -346,10 +287,10 @@ impl Shell {
         self.render_input(frame, main_chunks[2]);
 
         // ── Overlays ──────────────────────────────────────────────────────────
-        if let Some(popup) = &self.model_popup {
+        if let Some(popup) = &self.state.model_popup {
             model_selector::render_popup(popup, frame);
         }
-        if self.model_popup.is_none() && !self.actors_popup_visible {
+        if self.state.model_popup.is_none() && !self.actors_popup_visible {
             self.render_slash_dropdown(frame, main_chunks[2]);
         }
         if self.actors_popup_visible {
@@ -359,7 +300,7 @@ impl Shell {
 
     /// Render the compact header bar.
     fn render_header(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let elapsed = self.stats.elapsed_formatted();
+        let elapsed = self.state.stats.elapsed_formatted();
         let voice_indicator = if !self.runtime.config.speech_enabled {
             Span::styled("voice: off", Style::default().fg(Color::DarkGray))
         } else if self.voice_enabled {
@@ -399,7 +340,7 @@ impl Shell {
     fn render_conversation(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let mut lines = Vec::new();
 
-        for msg in &self.messages {
+        for msg in &self.state.messages {
             match msg.role {
                 MessageRole::User => {
                     lines.push(Line::from(vec![
@@ -447,10 +388,10 @@ impl Shell {
         // Calculate scroll position
         let total_lines = lines.len();
         let inner_height = area.height.saturating_sub(2) as usize; // subtract borders
-        let scroll = if self.scroll_offset == 0 {
+        let scroll = if self.state.scroll_offset == 0 {
             total_lines.saturating_sub(inner_height)
         } else {
-            total_lines.saturating_sub(inner_height + self.scroll_offset)
+            total_lines.saturating_sub(inner_height + self.state.scroll_offset)
         };
 
         let block = Block::default()
@@ -474,7 +415,7 @@ impl Shell {
     /// Render the input area — bordered frame with prompt, status, and key hints.
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         // Border color reflects current state
-        let border_color = if self.waiting_for_inference || self.transparency_loading {
+        let border_color = if self.state.waiting_for_inference || self.transparency_loading {
             Color::Yellow
         } else {
             Color::Magenta
@@ -489,12 +430,12 @@ impl Shell {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("\u{203a} ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&self.editor.input),
+            Span::raw(&self.state.editor.input),
             Span::styled("\u{258c}", Style::default().fg(Color::LightMagenta)),
         ]);
 
         // ── Line 2: status ────────────────────────────────────────────────────
-        let status_line = if let Some(first_press) = self.ctrl_c_first_press {
+        let status_line = if let Some(first_press) = self.state.ctrl_c_first_press {
             if first_press.elapsed() < Duration::from_secs(3) {
                 Line::from(Span::styled(
                     " Press Ctrl+C again to exit",
@@ -510,7 +451,7 @@ impl Shell {
                 " \u{22ef} Loading...",
                 Style::default().fg(Color::Yellow),
             ))
-        } else if self.waiting_for_inference {
+        } else if self.state.waiting_for_inference {
             Line::from(Span::styled(
                 " \u{22ef} Thinking...",
                 Style::default().fg(Color::Yellow),
@@ -544,6 +485,7 @@ impl Shell {
     /// Generate the normal status line.
     fn status_line_normal(&self) -> Line<'static> {
         let model_part = self
+            .state
             .current_model
             .as_deref()
             .map(|m| {
@@ -567,7 +509,7 @@ impl Shell {
                 .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         )));
-        let model = self.current_model.as_deref().unwrap_or("(selecting...)");
+        let model = self.state.current_model.as_deref().unwrap_or("(selecting...)");
         let inner_w = area.width.saturating_sub(4) as usize;
         let display_model = if model.len() > inner_w {
             &model[..inner_w]
@@ -590,12 +532,12 @@ impl Shell {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                self.stats.messages_sent.to_string(),
+                self.state.stats.messages_sent.to_string(),
                 Style::default().fg(Color::White),
             ),
             Span::styled(" messages  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                self.stats.tokens_received.to_string(),
+                self.state.stats.tokens_received.to_string(),
                 Style::default().fg(Color::White),
             ),
             Span::styled(" tokens", Style::default().fg(Color::DarkGray)),
@@ -612,6 +554,7 @@ impl Shell {
         let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
         for name in &actor_names {
             let status = self
+                .state
                 .actor_health
                 .get(name)
                 .unwrap_or(&ActorStatus::Starting);
@@ -673,7 +616,7 @@ impl Shell {
             ("speech", "Speech"),
         ];
         for (loop_name, display_name) in &loop_order {
-            let enabled = self.loop_states.get(*loop_name).copied().unwrap_or(true);
+            let enabled = self.state.loop_states.get(*loop_name).copied().unwrap_or(true);
             let (dot, color) = if enabled {
                 ("\u{25cf}", Color::Green)
             } else {
@@ -716,6 +659,7 @@ impl Shell {
 
         for name in &actor_names {
             let status = self
+                .state
                 .actor_health
                 .get(name)
                 .unwrap_or(&ActorStatus::Starting);
@@ -769,7 +713,7 @@ impl Shell {
     fn render_slash_dropdown(&self, frame: &mut ratatui::Frame, input_area: ratatui::layout::Rect) {
         use ratatui::widgets::Clear;
 
-        let Some(ref dd) = self.slash_dropdown else {
+        let Some(ref dd) = self.state.slash_dropdown else {
             return;
         };
         if dd.is_empty() {
@@ -829,9 +773,9 @@ impl Shell {
 
     /// Add a message to the conversation log.
     fn add_message(&mut self, role: MessageRole, text: String) {
-        self.messages.push(Message::new(role, text));
+        self.state.messages.push(Message::new(role, text));
         // Auto-scroll to bottom when new message arrives (unless user scrolled up)
-        if self.scroll_offset == 0 {
+        if self.state.scroll_offset == 0 {
             // Already at bottom, stay there
         }
     }
@@ -840,7 +784,7 @@ impl Shell {
     async fn handle_bus_event(&mut self, event: Event) {
         match event {
             Event::System(bus::events::SystemEvent::ActorReady { actor_name }) => {
-                if let Some(status) = self.actor_health.get_mut(actor_name) {
+                if let Some(status) = self.state.actor_health.get_mut(actor_name) {
                     *status = ActorStatus::Ready;
                 }
                 if self.verbose {
@@ -857,7 +801,7 @@ impl Shell {
                 ..
             }) if self.pending_inference_id == Some(request_id) => {
                 self.pending_inference_id = None;
-                self.waiting_for_inference = false;
+                self.state.waiting_for_inference = false;
                 if text.trim().is_empty() {
                     self.add_message(
                         MessageRole::Warning,
@@ -865,27 +809,27 @@ impl Shell {
                     );
                 } else {
                     self.add_message(MessageRole::Sena, text);
-                    self.stats.tokens_received += token_count;
+                    self.state.stats.tokens_received += token_count;
                 }
             }
             Event::Inference(InferenceEvent::InferenceFailed { request_id, reason })
                 if self.pending_inference_id == Some(request_id) =>
             {
                 self.pending_inference_id = None;
-                self.waiting_for_inference = false;
+                self.state.waiting_for_inference = false;
                 self.add_message(
                     MessageRole::Warning,
                     format!("Inference failed: {}", reason),
                 );
             }
             Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
-                if self.verbose || self.waiting_for_inference {
+                if self.verbose || self.state.waiting_for_inference {
                     self.add_message(
                         MessageRole::System,
                         format!("Model loaded: {} ({})", name, backend),
                     );
                 }
-                self.current_model = Some(name);
+                self.state.current_model = Some(name);
             }
             Event::Inference(InferenceEvent::BackendMismatchWarning { detected, compiled }) => {
                 self.add_message(
@@ -911,7 +855,7 @@ impl Shell {
                     MessageRole::Warning,
                     format!("Actor '{}' failed: {}", info.actor_name, info.error_msg),
                 );
-                if let Some(status) = self.actor_health.get_mut(info.actor_name) {
+                if let Some(status) = self.state.actor_health.get_mut(info.actor_name) {
                     *status = ActorStatus::Failed(info.error_msg.clone());
                 }
             }
@@ -961,17 +905,18 @@ impl Shell {
             }
             Event::System(bus::events::SystemEvent::TrayMenuClicked(item)) => match item {
                 bus::events::TrayMenuItem::ShowStatus => {
-                    let model = self.current_model.as_deref().unwrap_or("(unknown)");
+                    let model = self.state.current_model.as_deref().unwrap_or("(unknown)");
                     self.add_message(
                         MessageRole::System,
                         format!(
                             "Status: ready • model={} • messages={} • tokens={}",
-                            model, self.stats.messages_sent, self.stats.tokens_received
+                            model, self.state.stats.messages_sent, self.state.stats.tokens_received
                         ),
                     );
                 }
                 bus::events::TrayMenuItem::ShowLastThought => {
                     if let Some(last_text) = self
+                        .state
                         .messages
                         .iter()
                         .rev()
@@ -1113,7 +1058,7 @@ impl Shell {
                 );
             }
             Event::Speech(SpeechEvent::WakewordDetected { confidence }) => {
-                if !self.listen_mode_active {
+                if !self.state.listen_mode_active {
                     self.add_message(
                         MessageRole::System,
                         format!("[speech] Wakeword detected (confidence: {:.2})", confidence),
@@ -1158,7 +1103,7 @@ impl Shell {
                 is_final,
                 confidence,
                 session_id,
-            }) if session_id == self.listen_session_id => {
+            }) if session_id == self.state.listen_session_id => {
                 if confidence < 0.6 {
                     self.add_message(
                         MessageRole::Warning,
@@ -1171,7 +1116,7 @@ impl Shell {
                 }
             }
             Event::System(bus::events::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
-                self.loop_states.insert(loop_name.clone(), enabled);
+                self.state.loop_states.insert(loop_name.clone(), enabled);
                 if self.verbose {
                     let status = if enabled { "enabled" } else { "disabled" };
                     self.add_message(
@@ -1181,9 +1126,9 @@ impl Shell {
                 }
             }
             Event::Speech(SpeechEvent::ListenModeStopped { session_id })
-                if session_id == self.listen_session_id =>
+                if session_id == self.state.listen_session_id =>
             {
-                self.listen_mode_active = false;
+                self.state.listen_mode_active = false;
                 self.add_message(
                     MessageRole::System,
                     "\u{1f3a4} Listen mode stopped.".to_string(),
@@ -1201,8 +1146,8 @@ impl Shell {
     /// Dispatch user input (command or chat).
     async fn dispatch_line(&mut self, line: String) -> DispatchResult {
         // Handle pending model directory input
-        if self.pending_model_dir_input {
-            self.pending_model_dir_input = false;
+        if self.state.pending_model_dir_input {
+            self.state.pending_model_dir_input = false;
             return self.handle_model_dir_input(line).await;
         }
 
@@ -1244,7 +1189,7 @@ impl Shell {
                     .and_then(model_selector::discover_models_at)
                 {
                     Ok(models) => {
-                        self.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                        self.state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                     }
                     Err(e) => {
                         self.add_message(
@@ -1284,10 +1229,10 @@ impl Shell {
                 DispatchResult::Continue
             }
             "/listen" => {
-                if self.listen_mode_active {
+                if self.state.listen_mode_active {
                     // Toggle off — stop the active session.
-                    let session_id = self.listen_session_id;
-                    self.listen_mode_active = false;
+                    let session_id = self.state.listen_session_id;
+                    self.state.listen_mode_active = false;
                     if let Err(e) = self
                         .bus
                         .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
@@ -1313,13 +1258,13 @@ impl Shell {
                         return DispatchResult::Continue;
                     }
                     // Derive a monotonically increasing session ID from message count.
-                    self.listen_session_id = self.stats.messages_sent as u64
+                    self.state.listen_session_id = self.state.stats.messages_sent as u64
                         + std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                    self.listen_mode_active = true;
-                    let session_id = self.listen_session_id;
+                    self.state.listen_mode_active = true;
+                    let session_id = self.state.listen_session_id;
                     if let Err(e) = self
                         .bus
                         .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
@@ -1327,7 +1272,7 @@ impl Shell {
                         }))
                         .await
                     {
-                        self.listen_mode_active = false;
+                        self.state.listen_mode_active = false;
                         self.add_message(
                             MessageRole::Warning,
                             format!("[listen] Failed to start: {}", e),
@@ -1454,8 +1399,8 @@ impl Shell {
                     .lock()
                     .map(|frame| if frame.is_some() { "yes" } else { "no" })
                     .unwrap_or("unknown");
-                let active_model = self.current_model.as_deref().unwrap_or("unknown");
-                let vision_status = match self.current_model.as_deref() {
+                let active_model = self.state.current_model.as_deref().unwrap_or("unknown");
+                let vision_status = match self.state.current_model.as_deref() {
                     Some(model_name) => {
                         if is_vision_capable_model(model_name) {
                             "yes"
@@ -1591,9 +1536,9 @@ impl Shell {
         self.add_message(MessageRole::User, displayed_prompt);
 
         self.add_message(MessageRole::System, "Thinking...".to_string());
-        self.waiting_for_inference = true;
+        self.state.waiting_for_inference = true;
         self.pending_inference_id = Some(request_id);
-        self.stats.messages_sent += 1;
+        self.state.stats.messages_sent += 1;
 
         tracing::info!(
             "cli: dispatching chat request_id={} prompt_len={}",
@@ -1615,7 +1560,7 @@ impl Shell {
             .await
         {
             tracing::error!("cli: directed send to inference actor failed: {}", e);
-            self.waiting_for_inference = false;
+            self.state.waiting_for_inference = false;
             self.pending_inference_id = None;
             self.add_message(
                 MessageRole::Warning,
@@ -1873,6 +1818,7 @@ impl Shell {
     /// Copy the most recent Sena response to the system clipboard.
     fn copy_last_response(&mut self) {
         let last_response = self
+            .state
             .messages
             .iter()
             .rev()
@@ -1929,7 +1875,7 @@ impl Shell {
                                 model_count
                             ),
                         );
-                        self.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                        self.state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                     }
                     Err(e) => {
                         self.add_message(
@@ -2032,9 +1978,9 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
         }
 
         // Check for Ctrl+C timeout (reset if 3 seconds passed)
-        if let Some(first_press) = shell.ctrl_c_first_press {
+        if let Some(first_press) = shell.state.ctrl_c_first_press {
             if first_press.elapsed() > Duration::from_secs(3) {
-                shell.ctrl_c_first_press = None;
+                shell.state.ctrl_c_first_press = None;
             }
         }
 
@@ -2043,13 +1989,13 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
             // Ctrl-C signal
             _ = shutdown_rx.changed() => {
-                if let Some(first_press) = shell.ctrl_c_first_press {
+                if let Some(first_press) = shell.state.ctrl_c_first_press {
                     if first_press.elapsed() < Duration::from_secs(3) {
                         // Second Ctrl+C within 3 seconds
                         break;
                     }
                 } else {
-                    shell.ctrl_c_first_press = Some(Instant::now());
+                    shell.state.ctrl_c_first_press = Some(Instant::now());
                 }
             }
 
@@ -2103,13 +2049,13 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                     Ok(event::Event::Mouse(mouse)) => {
                         match mouse.kind {
                             event::MouseEventKind::ScrollUp => {
-                                shell.scroll_offset = shell.scroll_offset.saturating_add(3);
+                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_add(3);
                             }
                             event::MouseEventKind::ScrollDown => {
-                                shell.scroll_offset = shell.scroll_offset.saturating_sub(3);
+                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_sub(3);
                                 // Snap to bottom when at bottom
-                                if shell.scroll_offset == 0 {
-                                    shell.scroll_offset = 0;
+                                if shell.state.scroll_offset == 0 {
+                                    shell.state.scroll_offset = 0;
                                 }
                             }
                             _ => {}
@@ -2133,12 +2079,12 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
                             // Ctrl+C handled via shutdown signal above
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                if let Some(first_press) = shell.ctrl_c_first_press {
+                                if let Some(first_press) = shell.state.ctrl_c_first_press {
                                     if first_press.elapsed() < Duration::from_secs(3) {
                                         break;
                                     }
                                 } else {
-                                    shell.ctrl_c_first_press = Some(Instant::now());
+                                    shell.state.ctrl_c_first_press = Some(Instant::now());
                                 }
                             }
 
@@ -2154,22 +2100,22 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
                             // ── Model Popup Key Handlers ──────────────────────────────
                             // When popup is visible, intercept navigation keys
-                            (KeyCode::Up, _) if shell.model_popup.is_some() => {
-                                if let Some(popup) = &mut shell.model_popup {
+                            (KeyCode::Up, _) if shell.state.model_popup.is_some() => {
+                                if let Some(popup) = &mut shell.state.model_popup {
                                     popup.prev();
                                 }
                             }
-                            (KeyCode::Down, _) if shell.model_popup.is_some() => {
-                                if let Some(popup) = &mut shell.model_popup {
+                            (KeyCode::Down, _) if shell.state.model_popup.is_some() => {
+                                if let Some(popup) = &mut shell.state.model_popup {
                                     popup.next();
                                 }
                             }
-                            (KeyCode::Enter, _) if shell.model_popup.is_some() => {
+                            (KeyCode::Enter, _) if shell.state.model_popup.is_some() => {
                                 // Apply selection
-                                if let Some(popup) = shell.model_popup.take() {
+                                if let Some(popup) = shell.state.model_popup.take() {
                                     if popup.is_change_dir_selected() {
                                         // Prompt for directory path
-                                        shell.pending_model_dir_input = true;
+                                        shell.state.pending_model_dir_input = true;
                                         shell.add_message(
                                             MessageRole::System,
                                             "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
@@ -2200,9 +2146,9 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                                     }
                                 }
                             }
-                            (KeyCode::Esc, _) if shell.model_popup.is_some() => {
+                            (KeyCode::Esc, _) if shell.state.model_popup.is_some() => {
                                 // Cancel popup
-                                shell.model_popup = None;
+                                shell.state.model_popup = None;
                                 shell.add_message(
                                     MessageRole::System,
                                     "Model selection cancelled.".to_string(),
@@ -2211,35 +2157,35 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
 
                             // ── Actors Popup Key Handlers ─────────────────────────────
                             // Any key dismisses the actors health popup
-                            _ if shell.actors_popup_visible && shell.model_popup.is_none() => {
+                            _ if shell.actors_popup_visible && shell.state.model_popup.is_none() => {
                                 shell.actors_popup_visible = false;
                             }
 
                             // ── Slash Dropdown Key Handlers ───────────────────────────
-                            (KeyCode::Up, _) if shell.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut shell.slash_dropdown {
+                            (KeyCode::Up, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                if let Some(dd) = &mut shell.state.slash_dropdown {
                                     dd.prev();
                                 }
                             }
-                            (KeyCode::Down, _) if shell.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                if let Some(dd) = &mut shell.slash_dropdown {
+                            (KeyCode::Down, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                if let Some(dd) = &mut shell.state.slash_dropdown {
                                     dd.next();
                                 }
                             }
-                            (KeyCode::Tab, _) if shell.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                            (KeyCode::Tab, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
                                 // Complete the command into the input
-                                if let Some(cmd) = shell.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                    shell.editor.input = cmd.to_string();
-                                    shell.slash_dropdown = None;
+                                if let Some(cmd) = shell.state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                    shell.state.editor.input = cmd.to_string();
+                                    shell.state.slash_dropdown = None;
                                 }
                             }
-                            (KeyCode::Enter, _) if shell.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                            (KeyCode::Enter, _) if shell.state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
                                 // Complete and immediately submit
-                                if let Some(cmd) = shell.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                if let Some(cmd) = shell.state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
                                     let line = cmd.to_string();
-                                    shell.editor.input.clear();
-                                    shell.slash_dropdown = None;
-                                    shell.editor.push_history(&line);
+                                    shell.state.editor.input.clear();
+                                    shell.state.slash_dropdown = None;
+                                    shell.state.editor.push_history(&line);
                                     let result = shell.dispatch_line(line).await;
                                     match result {
                                         DispatchResult::Continue => {}
@@ -2254,18 +2200,18 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                                     }
                                 }
                             }
-                            (KeyCode::Esc, _) if shell.slash_dropdown.is_some() => {
-                                shell.slash_dropdown = None;
+                            (KeyCode::Esc, _) if shell.state.slash_dropdown.is_some() => {
+                                shell.state.slash_dropdown = None;
                             }
 
                             // ── Normal Key Handlers (when popup is NOT visible) ──────
                             // Enter — submit line
                             (KeyCode::Enter, _) => {
-                                let line = shell.editor.input.trim().to_string();
-                                shell.editor.input.clear();
-                                shell.slash_dropdown = None;
+                                let line = shell.state.editor.input.trim().to_string();
+                                shell.state.editor.input.clear();
+                                shell.state.slash_dropdown = None;
                                 if !line.is_empty() {
-                                    shell.editor.push_history(&line);
+                                    shell.state.editor.push_history(&line);
                                     let result = shell.dispatch_line(line).await;
                                     match result {
                                         DispatchResult::Continue => {}
@@ -2282,72 +2228,72 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
                             }
 
                             // Backspace
-                            (KeyCode::Backspace, _) if shell.model_popup.is_none() => {
-                                shell.editor.input.pop();
+                            (KeyCode::Backspace, _) if shell.state.model_popup.is_none() => {
+                                shell.state.editor.input.pop();
                                 // Update slash dropdown after backspace
-                                if shell.editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut shell.slash_dropdown {
-                                        dd.update(&shell.editor.input);
+                                if shell.state.editor.input.starts_with('/') {
+                                    if let Some(dd) = &mut shell.state.slash_dropdown {
+                                        dd.update(&shell.state.editor.input);
                                         if dd.is_empty() {
-                                            shell.slash_dropdown = None;
+                                            shell.state.slash_dropdown = None;
                                         }
                                     } else {
-                                        let dd = SlashDropdown::from_prefix(&shell.editor.input);
+                                        let dd = SlashDropdown::from_prefix(&shell.state.editor.input);
                                         if !dd.is_empty() {
-                                            shell.slash_dropdown = Some(dd);
+                                            shell.state.slash_dropdown = Some(dd);
                                         }
                                     }
                                 } else {
-                                    shell.slash_dropdown = None;
+                                    shell.state.slash_dropdown = None;
                                 }
                             }
 
                             // Arrow Up — history prev (only when dropdown not active)
-                            (KeyCode::Up, _) if shell.model_popup.is_none() && shell.slash_dropdown.is_none() => {
-                                shell.editor.history_prev();
+                            (KeyCode::Up, _) if shell.state.model_popup.is_none() && shell.state.slash_dropdown.is_none() => {
+                                shell.state.editor.history_prev();
                             }
 
                             // Arrow Down — history next (only when dropdown not active)
-                            (KeyCode::Down, _) if shell.model_popup.is_none() && shell.slash_dropdown.is_none() => {
-                                shell.editor.history_next();
+                            (KeyCode::Down, _) if shell.state.model_popup.is_none() && shell.state.slash_dropdown.is_none() => {
+                                shell.state.editor.history_next();
                             }
 
                             // Page Up — scroll up
-                            (KeyCode::PageUp, _) if shell.model_popup.is_none() => {
-                                shell.scroll_offset = shell.scroll_offset.saturating_add(10);
+                            (KeyCode::PageUp, _) if shell.state.model_popup.is_none() => {
+                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_add(10);
                             }
 
                             // Page Down — scroll down
-                            (KeyCode::PageDown, _) if shell.model_popup.is_none() => {
-                                shell.scroll_offset = shell.scroll_offset.saturating_sub(10);
+                            (KeyCode::PageDown, _) if shell.state.model_popup.is_none() => {
+                                shell.state.scroll_offset = shell.state.scroll_offset.saturating_sub(10);
                             }
 
                             // Escape — clear input and close dropdown
-                            (KeyCode::Esc, _) if shell.model_popup.is_none() => {
-                                shell.editor.input.clear();
-                                shell.slash_dropdown = None;
+                            (KeyCode::Esc, _) if shell.state.model_popup.is_none() => {
+                                shell.state.editor.input.clear();
+                                shell.state.slash_dropdown = None;
                             }
 
                             // Regular character
-                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) && shell.model_popup.is_none() => {
-                                shell.editor.input.push(c);
+                            (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) && shell.state.model_popup.is_none() => {
+                                shell.state.editor.input.push(c);
                                 // Reset Ctrl+C first press if user is typing
-                                shell.ctrl_c_first_press = None;
+                                shell.state.ctrl_c_first_press = None;
                                 // Update slash dropdown on every character typed
-                                if shell.editor.input.starts_with('/') {
-                                    if let Some(dd) = &mut shell.slash_dropdown {
-                                        dd.update(&shell.editor.input);
+                                if shell.state.editor.input.starts_with('/') {
+                                    if let Some(dd) = &mut shell.state.slash_dropdown {
+                                        dd.update(&shell.state.editor.input);
                                         if dd.is_empty() {
-                                            shell.slash_dropdown = None;
+                                            shell.state.slash_dropdown = None;
                                         }
                                     } else {
-                                        let dd = SlashDropdown::from_prefix(&shell.editor.input);
+                                        let dd = SlashDropdown::from_prefix(&shell.state.editor.input);
                                         if !dd.is_empty() {
-                                            shell.slash_dropdown = Some(dd);
+                                            shell.state.slash_dropdown = Some(dd);
                                         }
                                     }
                                 } else {
-                                    shell.slash_dropdown = None;
+                                    shell.state.slash_dropdown = None;
                                 }
                             }
 
@@ -2366,7 +2312,7 @@ pub async fn run(runtime: Arc<Runtime>) -> Result<ShellExitReason> {
     drop(terminal); // Drop terminal before printing to stdout
 
     // Extract stats before dropping shell
-    let stats = shell.stats.clone();
+    let stats = shell.state.stats.clone();
 
     // Drop shell to release Arc<Runtime> reference
     drop(shell);
@@ -2622,53 +2568,13 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    // ── Initialize simplified IPC shell state ─────────────────────────────────
-    let mut messages: Vec<Message> = vec![
-        Message::new(
-            MessageRole::System,
-            "Connected to Sena daemon — local-first ambient AI".to_string(),
-        ),
-        Message::new(
-            MessageRole::System,
-            "Type /help for commands, or chat freely.".to_string(),
-        ),
-    ];
-    let mut editor = EditorState::new();
-    let mut stats = SessionStats::new();
-    let mut scroll_offset = 0usize;
-    let mut ctrl_c_first_press: Option<Instant> = None;
-    let mut slash_dropdown: Option<SlashDropdown> = None;
-
-    // Initialize loop states - all loops enabled by default
-    let mut loop_states: HashMap<String, bool> = HashMap::new();
-    loop_states.insert("ctp".to_string(), true);
-    loop_states.insert("memory_consolidation".to_string(), true);
-    loop_states.insert("platform_polling".to_string(), true);
-    loop_states.insert("screen_capture".to_string(), true);
-    loop_states.insert("speech".to_string(), true);
-
-    // Initialize actor health - all actors assumed Ready if we connected to daemon
-    let mut actor_health: HashMap<&'static str, ActorStatus> = HashMap::new();
-    actor_health.insert("Platform", ActorStatus::Ready);
-    actor_health.insert("Inference", ActorStatus::Ready);
-    actor_health.insert("CTP", ActorStatus::Ready);
-    actor_health.insert("Memory", ActorStatus::Ready);
-    actor_health.insert("Soul", ActorStatus::Ready);
-
-    // Current model name — seeded from SessionReady, updated when ModelLoaded fires
-    let mut current_model: Option<String> = initial_model;
-
-    // Model selector popup state (mirrors standalone Shell behaviour)
-    let mut model_popup: Option<model_selector::ModelSelectorPopup> = None;
-    let mut pending_model_dir_input = false;
-
-    // ── Inference and listen state ────────────────────────────────────────────
-    // True while we're waiting for an inference response from the daemon.
-    let mut waiting_for_inference = false;
-    // True while continuous listen mode is active in this CLI session.
-    let mut listen_mode_active = false;
-    // Session ID for the currently active listen session (0 when inactive).
-    let mut listen_session_id: u64 = 0;
+    // ── Initialize simplified IPC shell state using ShellState ───────────────
+    let mut state = crate::tui_state::ShellState::new();
+    state.add_welcome_message("Connected to Sena daemon — local-first ambient AI");
+    state.add_welcome_message("Type /help for commands, or chat freely.");
+    
+    // Seed current_model from SessionReady handshake.
+    state.current_model = initial_model;
 
     // ── Main event loop ───────────────────────────────────────────────────────
     'main: loop {
@@ -2676,27 +2582,16 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
         if let Err(e) = terminal.draw(|f| {
             render_ipc_tui(
                 f,
-                &messages,
-                &editor,
-                &stats,
-                scroll_offset,
-                ctrl_c_first_press,
-                slash_dropdown.as_ref(),
-                &loop_states,
-                &actor_health,
-                current_model.as_deref(),
-                model_popup.as_ref(),
-                waiting_for_inference,
-                listen_mode_active,
+                &state,
             )
         }) {
             tracing::error!("TUI render error: {}", e);
         }
 
         // Check for Ctrl+C timeout (reset if 3 seconds passed).
-        if let Some(first_press) = ctrl_c_first_press {
+        if let Some(first_press) = state.ctrl_c_first_press {
             if first_press.elapsed() > Duration::from_secs(3) {
-                ctrl_c_first_press = None;
+                state.ctrl_c_first_press = None;
             }
         }
 
@@ -2711,7 +2606,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             IpcPayload::DisplayLine { content, style } => {
                                 // Clear thinking state when inference response arrives.
                                 if matches!(style, LineStyle::Inference) {
-                                    waiting_for_inference = false;
+                                    state.waiting_for_inference = false;
                                 }
                                 let role = match style {
                                     LineStyle::Error => MessageRole::Warning,
@@ -2722,10 +2617,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                     LineStyle::Dimmed => MessageRole::System,
                                     LineStyle::SystemNotice => MessageRole::System,
                                 };
-                                messages.push(Message::new(role, content));
+                                state.messages.push(Message::new(role, content));
                             }
                             IpcPayload::DaemonShutdown => {
-                                messages.push(Message::new(
+                                state.messages.push(Message::new(
                                     MessageRole::Warning,
                                     "Daemon is shutting down — CLI will exit.".to_string(),
                                 ));
@@ -2740,14 +2635,14 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             }
                             IpcPayload::Error { reason, .. } => {
                                 // An IPC error clears the thinking state.
-                                waiting_for_inference = false;
-                                messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                                state.waiting_for_inference = false;
+                                state.messages.push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
                             }
                             IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
-                                loop_states.insert(loop_name, enabled);
+                                state.loop_states.insert(loop_name, enabled);
                             }
                             IpcPayload::ModelStatusUpdate { name } => {
-                                current_model = Some(name);
+                                state.current_model = Some(name);
                             }
                             _ => {
                                 tracing::warn!("unexpected IPC payload: {:?}", msg);
@@ -2755,7 +2650,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                         }
                     }
                     None => {
-                        messages.push(Message::new(
+                        state.messages.push(Message::new(
                             MessageRole::Warning,
                             "Daemon disconnected.".to_string(),
                         ));
@@ -2782,10 +2677,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                         Ok(event::Event::Mouse(mouse)) => {
                             match mouse.kind {
                                 event::MouseEventKind::ScrollUp => {
-                                    scroll_offset = scroll_offset.saturating_add(3);
+                                    state.scroll_offset = state.scroll_offset.saturating_add(3);
                                 }
                                 event::MouseEventKind::ScrollDown => {
-                                    scroll_offset = scroll_offset.saturating_sub(3);
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(3);
                                 }
                                 _ => {}
                             }
@@ -2800,12 +2695,12 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                             match (key.code, key.modifiers) {
                                 // Ctrl+C
                                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                    if let Some(first_press) = ctrl_c_first_press {
+                                    if let Some(first_press) = state.ctrl_c_first_press {
                                         if first_press.elapsed() < Duration::from_secs(3) {
                                             break 'main;
                                         }
                                     } else {
-                                        ctrl_c_first_press = Some(Instant::now());
+                                        state.ctrl_c_first_press = Some(Instant::now());
                                     }
                                 }
 
@@ -2815,21 +2710,21 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                 }
 
                                 // ── Model popup key handlers ──────────────────────────────
-                                (KeyCode::Up, _) if model_popup.is_some() => {
-                                    if let Some(popup) = &mut model_popup {
+                                (KeyCode::Up, _) if state.model_popup.is_some() => {
+                                    if let Some(popup) = &mut state.model_popup {
                                         popup.prev();
                                     }
                                 }
-                                (KeyCode::Down, _) if model_popup.is_some() => {
-                                    if let Some(popup) = &mut model_popup {
+                                (KeyCode::Down, _) if state.model_popup.is_some() => {
+                                    if let Some(popup) = &mut state.model_popup {
                                         popup.next();
                                     }
                                 }
-                                (KeyCode::Enter, _) if model_popup.is_some() => {
-                                    if let Some(popup) = model_popup.take() {
+                                (KeyCode::Enter, _) if state.model_popup.is_some() => {
+                                    if let Some(popup) = state.model_popup.take() {
                                         if popup.is_change_dir_selected() {
-                                            pending_model_dir_input = true;
-                                            messages.push(Message::new(
+                                            state.pending_model_dir_input = true;
+                                            state.messages.push(Message::new(
                                                 MessageRole::System,
                                                 "Enter the full path to your model directory (Enter on empty input to cancel):".to_string(),
                                             ));
@@ -2837,45 +2732,45 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                             let model_name = selected.name.clone();
                                             let cmd = format!("/config set preferred_model {}", model_name);
                                             let _ = ipc_client.send(IpcPayload::SlashCommand { line: cmd }).await;
-                                            messages.push(Message::new(
+                                            state.messages.push(Message::new(
                                                 MessageRole::System,
                                                 format!("Selected model: {} — change takes effect after daemon restart.", model_name),
                                             ));
-                                            current_model = Some(model_name);
+                                            state.current_model = Some(model_name);
                                         }
                                     }
                                 }
-                                (KeyCode::Esc, _) if model_popup.is_some() => {
-                                    model_popup = None;
-                                    messages.push(Message::new(
+                                (KeyCode::Esc, _) if state.model_popup.is_some() => {
+                                    state.model_popup = None;
+                                    state.messages.push(Message::new(
                                         MessageRole::System,
                                         "Model selection cancelled.".to_string(),
                                     ));
                                 }
 
                                 // ── Slash Dropdown Key Handlers ───────────────────────────
-                                (KeyCode::Up, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(dd) = &mut slash_dropdown {
+                                (KeyCode::Up, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut state.slash_dropdown {
                                         dd.prev();
                                     }
                                 }
-                                (KeyCode::Down, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(dd) = &mut slash_dropdown {
+                                (KeyCode::Down, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(dd) = &mut state.slash_dropdown {
                                         dd.next();
                                     }
                                 }
-                                (KeyCode::Tab, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
-                                        editor.input = cmd.to_string();
-                                        slash_dropdown = None;
+                                (KeyCode::Tab, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                        state.editor.input = cmd.to_string();
+                                        state.slash_dropdown = None;
                                     }
                                 }
-                                (KeyCode::Enter, _) if slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
-                                    if let Some(cmd) = slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
+                                (KeyCode::Enter, _) if state.slash_dropdown.as_ref().is_some_and(|d| !d.is_empty()) => {
+                                    if let Some(cmd) = state.slash_dropdown.as_ref().and_then(|d| d.selected_command()) {
                                         let line = cmd.to_string();
-                                        editor.input.clear();
-                                        slash_dropdown = None;
-                                        editor.push_history(&line);
+                                        state.editor.input.clear();
+                                        state.slash_dropdown = None;
+                                        state.editor.push_history(&line);
 
                                         if line == "/models" {
                                             let models_dir = runtime::ollama_models_dir().ok();
@@ -2885,10 +2780,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                                 .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
                                             {
                                                 Ok(models) => {
-                                                    model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                    state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                                                 }
                                                 Err(e) => {
-                                                    messages.push(Message::new(
+                                                    state.messages.push(Message::new(
                                                         MessageRole::Warning,
                                                         format!("Model discovery failed: {}", e),
                                                     ));
@@ -2897,39 +2792,37 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                         } else if line == "/listen" {
                                             handle_listen_toggle_ipc(
                                                 &mut ipc_client,
-                                                &mut listen_mode_active,
-                                                &mut listen_session_id,
-                                                &mut messages,
+                                                &mut state,
                                             ).await;
                                         } else if line == "/close" || line == "/quit" {
                                             break 'main;
                                         } else if line.starts_with('/') {
                                             let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
                                         } else {
-                                            messages.push(Message::new(MessageRole::User, line.clone()));
+                                            state.messages.push(Message::new(MessageRole::User, line.clone()));
                                             let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                            waiting_for_inference = true;
-                                            stats.messages_sent += 1;
+                                            state.waiting_for_inference = true;
+                                            state.stats.messages_sent += 1;
                                         }
                                     }
                                 }
-                                (KeyCode::Esc, _) if slash_dropdown.is_some() => {
-                                    slash_dropdown = None;
+                                (KeyCode::Esc, _) if state.slash_dropdown.is_some() => {
+                                    state.slash_dropdown = None;
                                 }
 
                                 // ── Normal Key Handlers ───────────────────────────────────
                                 // Enter — submit line
                                 (KeyCode::Enter, _) => {
-                                    let line = editor.input.trim().to_string();
-                                    editor.input.clear();
-                                    slash_dropdown = None;
+                                    let line = state.editor.input.trim().to_string();
+                                    state.editor.input.clear();
+                                    state.slash_dropdown = None;
                                     if !line.is_empty() {
-                                        editor.push_history(&line);
+                                        state.editor.push_history(&line);
 
-                                        if pending_model_dir_input {
-                                            pending_model_dir_input = false;
+                                        if state.pending_model_dir_input {
+                                            state.pending_model_dir_input = false;
                                             if line.is_empty() {
-                                                messages.push(Message::new(
+                                                state.messages.push(Message::new(
                                                     MessageRole::System,
                                                     "Model directory change cancelled.".to_string(),
                                                 ));
@@ -2937,16 +2830,16 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                                 let path = std::path::PathBuf::from(&line);
                                                 match model_selector::discover_models_at(&path) {
                                                     Ok(models) if !models.is_empty() => {
-                                                        model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                        state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                                                     }
                                                     Ok(_) => {
-                                                        messages.push(Message::new(
+                                                        state.messages.push(Message::new(
                                                             MessageRole::Warning,
                                                             format!("No models found in: {}", line),
                                                         ));
                                                     }
                                                     Err(e) => {
-                                                        messages.push(Message::new(
+                                                        state.messages.push(Message::new(
                                                             MessageRole::Warning,
                                                             format!("Model discovery failed: {}", e),
                                                         ));
@@ -2961,10 +2854,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                                 .and_then(|p| model_selector::discover_models_at(p).map_err(|e| anyhow::anyhow!("{}", e)))
                                             {
                                                 Ok(models) => {
-                                                    model_popup = Some(model_selector::ModelSelectorPopup::new(models));
+                                                    state.model_popup = Some(model_selector::ModelSelectorPopup::new(models));
                                                 }
                                                 Err(e) => {
-                                                    messages.push(Message::new(
+                                                    state.messages.push(Message::new(
                                                         MessageRole::Warning,
                                                         format!("Model discovery failed: {}", e),
                                                     ));
@@ -2973,9 +2866,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                         } else if line == "/listen" {
                                             handle_listen_toggle_ipc(
                                                 &mut ipc_client,
-                                                &mut listen_mode_active,
-                                                &mut listen_session_id,
-                                                &mut messages,
+                                                &mut state,
                                             ).await;
                                         } else if line.starts_with('/') {
                                             if line == "/close" || line == "/quit" {
@@ -2984,78 +2875,78 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
                                             let _ = ipc_client.send(IpcPayload::SlashCommand { line }).await;
                                         } else {
                                             // Chat message
-                                            messages.push(Message::new(MessageRole::User, line.clone()));
+                                            state.messages.push(Message::new(MessageRole::User, line.clone()));
                                             let _ = ipc_client.send(IpcPayload::Chat { text: line }).await;
-                                            waiting_for_inference = true;
-                                            stats.messages_sent += 1;
+                                            state.waiting_for_inference = true;
+                                            state.stats.messages_sent += 1;
                                         }
                                     }
                                 }
 
                                 // Backspace
                                 (KeyCode::Backspace, _) => {
-                                    editor.input.pop();
-                                    if editor.input.starts_with('/') {
-                                        if let Some(dd) = &mut slash_dropdown {
-                                            dd.update(&editor.input);
+                                    state.editor.input.pop();
+                                    if state.editor.input.starts_with('/') {
+                                        if let Some(dd) = &mut state.slash_dropdown {
+                                            dd.update(&state.editor.input);
                                             if dd.is_empty() {
-                                                slash_dropdown = None;
+                                                state.slash_dropdown = None;
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&editor.input);
+                                            let dd = SlashDropdown::from_prefix(&state.editor.input);
                                             if !dd.is_empty() {
-                                                slash_dropdown = Some(dd);
+                                                state.slash_dropdown = Some(dd);
                                             }
                                         }
                                     } else {
-                                        slash_dropdown = None;
+                                        state.slash_dropdown = None;
                                     }
                                 }
 
                                 // Arrow Up — history prev
-                                (KeyCode::Up, _) if slash_dropdown.is_none() => {
-                                    editor.history_prev();
+                                (KeyCode::Up, _) if state.slash_dropdown.is_none() => {
+                                    state.editor.history_prev();
                                 }
 
                                 // Arrow Down — history next
-                                (KeyCode::Down, _) if slash_dropdown.is_none() => {
-                                    editor.history_next();
+                                (KeyCode::Down, _) if state.slash_dropdown.is_none() => {
+                                    state.editor.history_next();
                                 }
 
                                 // Page Up — scroll up
                                 (KeyCode::PageUp, _) => {
-                                    scroll_offset = scroll_offset.saturating_add(10);
+                                    state.scroll_offset = state.scroll_offset.saturating_add(10);
                                 }
 
                                 // Page Down — scroll down
                                 (KeyCode::PageDown, _) => {
-                                    scroll_offset = scroll_offset.saturating_sub(10);
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(10);
                                 }
 
                                 // Escape — clear input and close dropdown
                                 (KeyCode::Esc, _) => {
-                                    editor.input.clear();
-                                    slash_dropdown = None;
+                                    state.editor.input.clear();
+                                    state.slash_dropdown = None;
                                 }
 
                                 // Regular character
                                 (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                                    editor.input.push(c);
-                                    ctrl_c_first_press = None;
-                                    if editor.input.starts_with('/') {
-                                        if let Some(dd) = &mut slash_dropdown {
-                                            dd.update(&editor.input);
+                                    state.editor.input.push(c);
+                                    state.ctrl_c_first_press = None;
+                                    if state.editor.input.starts_with('/') {
+                                        if let Some(dd) = &mut state.slash_dropdown {
+                                            dd.update(&state.editor.input);
                                             if dd.is_empty() {
-                                                slash_dropdown = None;
+                                                state.slash_dropdown = None;
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&editor.input);
+                                            let dd = SlashDropdown::from_prefix(&state.editor.input);
                                             if !dd.is_empty() {
-                                                slash_dropdown = Some(dd);
+                                                state.slash_dropdown = Some(dd);
                                             }
                                         }
                                     } else {
-                                        slash_dropdown = None;
+                                        state.slash_dropdown = None;
                                     }
                                 }
 
@@ -3074,7 +2965,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     drop(_guard); // Restore terminal
     drop(terminal); // Drop terminal before printing to stdout
 
-    display::print_session_summary(&stats);
+    display::print_session_summary(&state.stats);
 
     Ok(())
 }
@@ -3083,47 +2974,45 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 /// to the daemon and updates the local tracking state.
 async fn handle_listen_toggle_ipc(
     ipc_client: &mut crate::ipc_client::IpcClient,
-    listen_mode_active: &mut bool,
-    listen_session_id: &mut u64,
-    messages: &mut Vec<Message>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
 ) {
-    if *listen_mode_active {
+    if state.listen_mode_active {
         // Already active — stop it.
-        *listen_mode_active = false;
-        let stop_cmd = format!("/listen stop {}", *listen_session_id);
+        state.listen_mode_active = false;
+        let stop_cmd = format!("/listen stop {}", state.listen_session_id);
         if let Err(e) = ipc_client
             .send(bus::IpcPayload::SlashCommand { line: stop_cmd })
             .await
         {
-            messages.push(Message::new(
+            state.messages.push(Message::new(
                 MessageRole::Warning,
                 format!("[listen] Failed to send stop: {}", e),
             ));
         } else {
-            messages.push(Message::new(
+            state.messages.push(Message::new(
                 MessageRole::System,
                 "\u{1f3a4} Stopping listen mode...".to_string(),
             ));
         }
     } else {
         // Start a new session.
-        *listen_session_id = SystemTime::now()
+        state.listen_session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(1);
-        *listen_mode_active = true;
-        let start_cmd = format!("/listen start {}", *listen_session_id);
+        state.listen_mode_active = true;
+        let start_cmd = format!("/listen start {}", state.listen_session_id);
         if let Err(e) = ipc_client
             .send(bus::IpcPayload::SlashCommand { line: start_cmd })
             .await
         {
-            *listen_mode_active = false;
-            messages.push(Message::new(
+            state.listen_mode_active = false;
+            state.messages.push(Message::new(
                 MessageRole::Warning,
                 format!("[listen] Failed to start: {}", e),
             ));
         } else {
-            messages.push(Message::new(
+            state.messages.push(Message::new(
                 MessageRole::System,
                 "\u{1f3a4} Listen mode started — type /listen again to stop.".to_string(),
             ));
@@ -3132,21 +3021,9 @@ async fn handle_listen_toggle_ipc(
 }
 
 /// Simplified TUI rendering for IPC mode.
-#[allow(clippy::too_many_arguments)]
 fn render_ipc_tui(
     frame: &mut ratatui::Frame,
-    messages: &[Message],
-    editor: &EditorState,
-    stats: &SessionStats,
-    scroll_offset: usize,
-    ctrl_c_first_press: Option<Instant>,
-    slash_dropdown: Option<&SlashDropdown>,
-    loop_states: &HashMap<String, bool>,
-    actor_health: &HashMap<&'static str, ActorStatus>,
-    current_model: Option<&str>,
-    model_popup: Option<&model_selector::ModelSelectorPopup>,
-    waiting_for_inference: bool,
-    listen_mode_active: bool,
+    state: &crate::tui_state::ShellState<SlashDropdown>,
 ) {
     // ── Vertical layout: header / body / input ────────────────────────────────
     let main_chunks = Layout::default()
@@ -3165,7 +3042,7 @@ fn render_ipc_tui(
         .split(main_chunks[1]);
 
     // Header
-    let elapsed = stats.elapsed_formatted();
+    let elapsed = state.stats.elapsed_formatted();
     let header_line = Line::from(vec![
         Span::styled(
             " \u{25c6} SENA",
@@ -3190,7 +3067,7 @@ fn render_ipc_tui(
 
     // Conversation
     let mut lines = Vec::new();
-    for msg in messages {
+    for msg in &state.messages {
         match msg.role {
             MessageRole::User => {
                 lines.push(Line::from(vec![
@@ -3266,10 +3143,10 @@ fn render_ipc_tui(
         .sum();
     let _ = total_lines; // visual_lines takes precedence for scroll
     let inner_height = body_chunks[0].height.saturating_sub(2) as usize; // subtract borders
-    let scroll = if scroll_offset == 0 {
+    let scroll = if state.scroll_offset == 0 {
         visual_lines.saturating_sub(inner_height)
     } else {
-        visual_lines.saturating_sub(inner_height + scroll_offset)
+        visual_lines.saturating_sub(inner_height + state.scroll_offset)
     };
 
     let block = Block::default()
@@ -3291,10 +3168,7 @@ fn render_ipc_tui(
     render_ipc_sidebar(
         frame,
         body_chunks[1],
-        loop_states,
-        actor_health,
-        current_model,
-        stats,
+        state,
     );
 
     // Input area
@@ -3306,11 +3180,11 @@ fn render_ipc_tui(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("\u{203a} ", Style::default().fg(Color::DarkGray)),
-        Span::raw(&editor.input),
+        Span::raw(&state.editor.input),
         Span::styled("\u{258c}", Style::default().fg(Color::LightMagenta)),
     ]);
 
-    let status_line = if let Some(first_press) = ctrl_c_first_press {
+    let status_line = if let Some(first_press) = state.ctrl_c_first_press {
         if first_press.elapsed() < Duration::from_secs(3) {
             Line::from(Span::styled(
                 " Press Ctrl+C again to exit",
@@ -3318,12 +3192,12 @@ fn render_ipc_tui(
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ))
-        } else if waiting_for_inference {
+        } else if state.waiting_for_inference {
             Line::from(Span::styled(
                 " \u{22ef} Thinking...",
                 Style::default().fg(Color::Yellow),
             ))
-        } else if listen_mode_active {
+        } else if state.listen_mode_active {
             Line::from(Span::styled(
                 " \u{1f3a4} Listening... (type /listen to stop)",
                 Style::default().fg(Color::Green),
@@ -3331,12 +3205,12 @@ fn render_ipc_tui(
         } else {
             Line::from(Span::styled(" Ready", Style::default().fg(Color::DarkGray)))
         }
-    } else if waiting_for_inference {
+    } else if state.waiting_for_inference {
         Line::from(Span::styled(
             " \u{22ef} Thinking...",
             Style::default().fg(Color::Yellow),
         ))
-    } else if listen_mode_active {
+    } else if state.listen_mode_active {
         Line::from(Span::styled(
             " \u{1f3a4} Listening... (type /listen to stop)",
             Style::default().fg(Color::Green),
@@ -3352,9 +3226,9 @@ fn render_ipc_tui(
             .add_modifier(Modifier::DIM),
     ));
 
-    let input_border_color = if waiting_for_inference {
+    let input_border_color = if state.waiting_for_inference {
         Color::Yellow
-    } else if listen_mode_active {
+    } else if state.listen_mode_active {
         Color::Green
     } else {
         Color::Magenta
@@ -3374,14 +3248,14 @@ fn render_ipc_tui(
     frame.render_widget(input_widget, main_chunks[2]);
 
     // Slash dropdown overlay
-    if let Some(dd) = slash_dropdown {
-        if !dd.is_empty() && model_popup.is_none() {
+    if let Some(ref dd) = state.slash_dropdown {
+        if !dd.is_empty() && state.model_popup.is_none() {
             render_slash_dropdown_overlay(frame, dd, main_chunks[2]);
         }
     }
 
     // Model selector popup overlay
-    if let Some(popup) = model_popup {
+    if let Some(ref popup) = state.model_popup {
         model_selector::render_popup(popup, frame);
     }
 }
@@ -3390,10 +3264,7 @@ fn render_ipc_tui(
 fn render_ipc_sidebar(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
-    loop_states: &HashMap<String, bool>,
-    actor_health: &HashMap<&'static str, ActorStatus>,
-    current_model: Option<&str>,
-    stats: &SessionStats,
+    state: &crate::tui_state::ShellState<SlashDropdown>,
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -3404,7 +3275,7 @@ fn render_ipc_sidebar(
             .fg(Color::LightMagenta)
             .add_modifier(Modifier::BOLD),
     )));
-    let model = current_model.unwrap_or("(selecting...)");
+    let model = state.current_model.as_deref().unwrap_or("(selecting...)");
     let inner_w = area.width.saturating_sub(4) as usize;
     let display_model = if model.len() > inner_w {
         &model[..inner_w]
@@ -3427,12 +3298,12 @@ fn render_ipc_sidebar(
     lines.push(Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(
-            stats.messages_sent.to_string(),
+            state.stats.messages_sent.to_string(),
             Style::default().fg(Color::White),
         ),
         Span::styled(" messages  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            stats.tokens_received.to_string(),
+            state.stats.tokens_received.to_string(),
             Style::default().fg(Color::White),
         ),
         Span::styled(" tokens", Style::default().fg(Color::DarkGray)),
@@ -3448,7 +3319,7 @@ fn render_ipc_sidebar(
     )));
     let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
     for name in &actor_names {
-        let status = actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
         let (dot, color, label) = match status {
             ActorStatus::Ready => ("\u{25cf}", Color::Green, "Ready"),
             ActorStatus::Starting => ("\u{25cb}", Color::Yellow, "Starting"),
@@ -3477,7 +3348,7 @@ fn render_ipc_sidebar(
         ("speech", "Speech"),
     ];
     for (loop_name, display_name) in &loop_order {
-        let enabled = loop_states.get(*loop_name).copied().unwrap_or(true);
+        let enabled = state.loop_states.get(*loop_name).copied().unwrap_or(true);
         let color = if enabled { Color::Green } else { Color::Red };
         lines.push(Line::from(vec![
             Span::styled(format!("  {} ", "\u{25cf}"), Style::default().fg(color)),
