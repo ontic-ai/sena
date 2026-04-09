@@ -51,6 +51,7 @@ impl PromptComposer {
         fn priority(seg: &PromptSegment) -> u8 {
             match seg {
                 PromptSegment::SoulContext(_) => 0,
+                PromptSegment::RichSoulContext(_) => 0,
                 PromptSegment::CurrentContext(_) => 1,
                 PromptSegment::LongTermMemory(_) => 2,
                 PromptSegment::WorkingMemorySnippets(_) => 3,
@@ -238,5 +239,41 @@ mod tests {
             .unwrap();
         assert!(result.contains("\n\n"));
         assert!(result.contains("soul") && result.contains("work"));
+    }
+
+    #[test]
+    fn budget_includes_rich_soul_context_first() {
+        use bus::events::soul::{RichSoulSummary, SoulSection, SoulSectionType};
+
+        let composer = PromptComposer::new();
+
+        let section = SoulSection {
+            section_type: SoulSectionType::RecentEvents,
+            content: "Recent event content".to_string(),
+            relevance_score: 0.9,
+        };
+        let rich_summary = RichSoulSummary {
+            sections: vec![section],
+            token_count: 10,
+            request_id: 1,
+        };
+
+        let working_memory = vec!["work snippet".to_string()];
+
+        // Budget allows only ~10 words, RichSoulContext should be included due to priority 0
+        let result = composer
+            .assemble_with_budget(
+                &[
+                    PromptSegment::RichSoulContext(rich_summary),
+                    PromptSegment::WorkingMemorySnippets(working_memory),
+                ],
+                10,
+            )
+            .unwrap();
+
+        // RichSoulContext (priority 0) should be included
+        assert!(result.contains("Recent Activity"));
+        // WorkingMemorySnippets (priority 3) should be excluded due to budget
+        assert!(!result.contains("work snippet"));
     }
 }
