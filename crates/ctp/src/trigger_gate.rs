@@ -2,13 +2,15 @@
 
 use std::time::{Duration, Instant};
 
-use bus::events::ctp::ContextSnapshot;
+use bus::events::ctp::{ContextSnapshot, SignalPattern, SignalPatternType};
 
 /// Context-aware trigger gate for CTP thought events.
 ///
-/// Phase 3 implementation combines:
+/// Phase 3+ implementation combines:
 /// - periodic reflection interval fallback
 /// - context-diff score between snapshots
+/// - significance bonuses from detected patterns
+/// - memory relevance weighting
 ///
 /// Lower sensitivity means a higher diff score is required.
 pub struct TriggerGate {
@@ -42,10 +44,23 @@ impl TriggerGate {
         self.sensitivity = sensitivity.clamp(0.0, 1.0);
     }
 
-    /// Check if enough time has passed since last trigger.
+    /// Check if enough time has passed since last trigger with significance scoring.
     ///
     /// Returns true if a ThoughtEvent should be emitted.
     /// Updates internal state to mark the trigger time.
+    ///
+    /// # Arguments
+    /// * `snapshot` - Current context snapshot
+    /// * `patterns` - Detected signal patterns for significance adjustment
+    /// * `memory_relevance` - Memory relevance score (0.0 to 1.0)
+    ///
+    /// # Significance Scoring
+    /// - Base: context_diff_score
+    /// - +0.20 for Frustration pattern
+    /// - +0.15 for Anomaly pattern
+    /// - +0.10 if context_switch_cost >= 60
+    /// - +0.10 * memory_relevance
+    /// - +0.05 per 30 min since last trigger (caps at +0.15)
     ///
     /// # Warm-up behaviour
     /// The first call always returns `false` and records the current time as the
@@ -54,37 +69,78 @@ impl TriggerGate {
     /// inference within milliseconds of boot before the inference backend or
     /// any models are loaded — an early call into llama.cpp C FFI can crash
     /// the process with STATUS_ACCESS_VIOLATION (exit 0xC0000005).
-    pub fn should_trigger(&mut self, snapshot: &ContextSnapshot) -> bool {
+    pub fn should_trigger(
+        &mut self,
+        snapshot: &ContextSnapshot,
+        patterns: &[SignalPattern],
+        memory_relevance: f64,
+    ) -> bool {
         let now = Instant::now();
-        let periodic_trigger = match self.last_trigger {
+
+        // Periodic fallback with time-based bonus
+        let time_since_last = match self.last_trigger {
             None => {
                 // First call: record baseline, do NOT fire.
                 self.last_trigger = Some(now);
-                false
+                self.last_snapshot = Some(snapshot.clone());
+                return false;
             }
-            Some(last) if now.duration_since(last) >= self.interval => {
-                self.last_trigger = Some(now);
-                true
-            }
-            _ => false,
+            Some(last) => now.duration_since(last),
         };
 
-        let diff_trigger = self
+        let periodic_trigger = time_since_last >= self.interval;
+
+        // Calculate periodic bonus: +0.05 per 30 min, capped at +0.15
+        let minutes_since_last = time_since_last.as_secs() as f64 / 60.0;
+        let periodic_bonus = ((minutes_since_last / 30.0) * 0.05).min(0.15);
+
+        // Calculate context diff score
+        let base_score = self
             .last_snapshot
             .as_ref()
-            .map(|prev| {
-                let score = context_diff_score(prev, snapshot);
-                score >= diff_threshold(self.sensitivity)
-            })
-            .unwrap_or(false);
+            .map(|prev| context_diff_score(prev, snapshot))
+            .unwrap_or(0.0);
 
-        self.last_snapshot = Some(snapshot.clone());
+        // Calculate significance bonuses
+        let mut significance = 0.0;
 
-        if diff_trigger {
-            self.last_trigger = Some(now);
+        // Pattern-based bonuses
+        for pattern in patterns {
+            match pattern.pattern_type {
+                SignalPatternType::Frustration => significance += 0.20,
+                SignalPatternType::Anomaly => significance += 0.15,
+                _ => {}
+            }
         }
 
-        periodic_trigger || diff_trigger
+        // User state bonus: high context switch cost
+        if let Some(ref user_state) = snapshot.user_state {
+            if user_state.context_switch_cost >= 60 {
+                significance += 0.10;
+            }
+        }
+
+        // Memory relevance bonus
+        significance += 0.10 * memory_relevance;
+
+        // Add periodic bonus
+        significance += periodic_bonus;
+
+        // Calculate total score
+        let total_score = base_score + significance;
+        let threshold = diff_threshold(self.sensitivity);
+
+        let significance_trigger = total_score >= threshold;
+
+        // Update state if triggered
+        if periodic_trigger || significance_trigger {
+            self.last_trigger = Some(now);
+            self.last_snapshot = Some(snapshot.clone());
+            true
+        } else {
+            self.last_snapshot = Some(snapshot.clone());
+            false
+        }
     }
 
     /// Reset the trigger timer so the next call to `should_trigger()` fires immediately.
@@ -179,7 +235,7 @@ mod tests {
         // loaded, which crashes the process via STATUS_ACCESS_VIOLATION in
         // llama.cpp C FFI (exit 0xC0000005).
         let mut gate = TriggerGate::new(Duration::from_secs(5));
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
     }
 
     #[test]
@@ -187,10 +243,10 @@ mod tests {
         let mut gate = TriggerGate::new(Duration::from_secs(1));
 
         // First call: warm-up, no trigger.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
 
         // Immediate second check should not trigger either.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
     }
 
     #[test]
@@ -198,13 +254,13 @@ mod tests {
         let mut gate = TriggerGate::new(Duration::from_millis(100));
 
         // Warm-up call: does not trigger, records baseline.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
 
         // Wait for interval to pass.
         sleep(Duration::from_millis(150));
 
         // Should trigger now that the interval has elapsed.
-        assert!(gate.should_trigger(&snapshot("Code")));
+        assert!(gate.should_trigger(&snapshot("Code"), &[], 0.0));
     }
 
     #[test]
@@ -212,16 +268,16 @@ mod tests {
         let mut gate = TriggerGate::new(Duration::from_secs(10));
 
         // Warm-up: no trigger.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
 
         // Within interval: no trigger.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
 
         // Reset sets the baseline to a past time so the interval is already elapsed.
         gate.reset();
 
         // Should trigger immediately after reset.
-        assert!(gate.should_trigger(&snapshot("Code")));
+        assert!(gate.should_trigger(&snapshot("Code"), &[], 0.0));
     }
 
     #[test]
@@ -229,9 +285,9 @@ mod tests {
         // With a huge interval, a context switch (score 0.55 >= threshold 0.50) fires.
         let mut gate = TriggerGate::new(Duration::from_secs(9999));
         // Warm-up call — no trigger, but records "Code" as previous snapshot.
-        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code"), &[], 0.0));
         // Context diff: app changed → score 0.55 → diff_trigger fires.
-        assert!(gate.should_trigger(&snapshot("Browser")));
+        assert!(gate.should_trigger(&snapshot("Browser"), &[], 0.0));
     }
 
     #[test]
@@ -251,8 +307,8 @@ mod tests {
         });
 
         // Warm-up with first snapshot — no trigger.
-        assert!(!gate.should_trigger(&first));
+        assert!(!gate.should_trigger(&first, &[], 0.0));
         // Task changed: score += 0.30, threshold at sensitivity=1.0 is 0.25 → fires.
-        assert!(gate.should_trigger(&second));
+        assert!(gate.should_trigger(&second, &[], 0.0));
     }
 }

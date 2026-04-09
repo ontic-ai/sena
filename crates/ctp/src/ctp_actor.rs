@@ -14,9 +14,12 @@ use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
 use bus::{Actor, ActorError, Event, EventBus};
 
 use crate::context_assembler::ContextAssembler;
+use crate::pattern_engine::PatternEngine;
 use crate::signal_buffer::SignalBuffer;
+use crate::task_inference::TaskInferenceEngine;
 use crate::transparency_query::handle_current_observation;
 use crate::trigger_gate::TriggerGate;
+use crate::user_state::UserStateClassifier;
 
 /// CTP Actor — orchestrates context assembly and thought triggering.
 ///
@@ -25,6 +28,9 @@ pub struct CTPActor {
     buffer: SignalBuffer,
     assembler: ContextAssembler,
     gate: TriggerGate,
+    pattern_engine: PatternEngine,
+    state_classifier: UserStateClassifier,
+    task_engine: TaskInferenceEngine,
     screen_capture_enabled: bool,
     latest_snapshot: Option<ContextSnapshot>,
     session_start: Instant,
@@ -54,6 +60,9 @@ impl CTPActor {
             buffer: SignalBuffer::new(buffer_window),
             assembler: ContextAssembler::new(),
             gate: TriggerGate::new(trigger_interval),
+            pattern_engine: PatternEngine::new(),
+            state_classifier: UserStateClassifier::new(),
+            task_engine: TaskInferenceEngine,
             screen_capture_enabled: false,
             latest_snapshot: None,
             session_start: Instant::now(),
@@ -180,7 +189,31 @@ impl Actor for CTPActor {
                         continue;
                     }
 
-                    let snapshot = self.refresh_snapshot();
+                    let mut snapshot = self.refresh_snapshot();
+
+                    // Step 1: Detect signal patterns
+                    let patterns = self.pattern_engine.detect(&self.buffer, &snapshot);
+
+                    // Step 2: Classify user state from patterns and context
+                    let user_state = self.state_classifier.classify(&snapshot, &patterns);
+                    snapshot.user_state = Some(user_state.clone());
+
+                    // Step 3: Infer rich task description
+                    if let Some(task) = self.task_engine.infer(&snapshot) {
+                        snapshot.inferred_task = Some(task);
+                    }
+
+                    // Step 4: Broadcast detected patterns
+                    for pattern in &patterns {
+                        if let Err(e) = bus.broadcast(Event::CTP(Box::new(CTPEvent::SignalPatternDetected(pattern.clone())))).await {
+                            tracing::warn!("Failed to broadcast SignalPatternDetected: {}", e);
+                        }
+                    }
+
+                    // Step 5: Broadcast user state
+                    if let Err(e) = bus.broadcast(Event::CTP(Box::new(CTPEvent::UserStateComputed(user_state.clone())))).await {
+                        tracing::warn!("Failed to broadcast UserStateComputed: {}", e);
+                    }
 
                     // Emit ContextSnapshotReady event on each tick so downstream
                     // actors can observe context evolution even when no trigger fires.
@@ -188,8 +221,10 @@ impl Actor for CTPActor {
                         .await
                         .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ContextSnapshotReady: {}", e)))?;
 
-                    // Check if we should trigger
-                    if self.boot_complete && self.gate.should_trigger(&snapshot) {
+                    // Step 6: Check if we should trigger with significance scoring
+                    // TODO: Phase 7A Unit 8+11 — wire pre-trigger memory query
+                    let memory_relevance = 0.0; // Default until memory integration
+                    if self.boot_complete && self.gate.should_trigger(&snapshot, &patterns, memory_relevance) {
                         // Emit ThoughtEventTriggered event
                         bus.broadcast(Event::CTP(Box::new(CTPEvent::ThoughtEventTriggered(snapshot))))
                             .await
