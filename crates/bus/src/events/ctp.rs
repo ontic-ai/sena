@@ -32,6 +32,59 @@ pub struct TaskHint {
     pub confidence: f32,
 }
 
+/// Enriched inferred task with semantic description.
+/// Replacement for TaskHint with richer context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnrichedInferredTask {
+    /// Task category (e.g., "coding", "writing", "research").
+    pub category: String,
+    /// Semantic description of what the user appears to be doing.
+    pub semantic_description: String,
+    /// Confidence level for the inference (0.0 to 1.0).
+    pub confidence: f32,
+}
+
+impl From<TaskHint> for EnrichedInferredTask {
+    fn from(hint: TaskHint) -> Self {
+        EnrichedInferredTask {
+            category: hint.category.clone(),
+            semantic_description: hint.category,
+            confidence: hint.confidence,
+        }
+    }
+}
+
+/// User cognitive state derived from behavioral signals.
+#[derive(Debug, Clone)]
+pub struct UserState {
+    /// Frustration level (0-100).
+    pub frustration_level: u8,
+    /// Whether the user is in a flow state.
+    pub flow_detected: bool,
+    /// Cost of context switching (0-100).
+    pub context_switch_cost: u8,
+}
+
+/// Type of signal pattern detected.
+#[derive(Debug, Clone)]
+pub enum SignalPatternType {
+    Frustration,
+    Repetition,
+    FlowState,
+    Anomaly,
+}
+
+/// Detected signal pattern from multi-modal signal analysis.
+#[derive(Debug, Clone)]
+pub struct SignalPattern {
+    /// Type of pattern detected.
+    pub pattern_type: SignalPatternType,
+    /// Confidence in the pattern detection (0.0 to 1.0).
+    pub confidence: f32,
+    /// Human-readable description of the pattern.
+    pub description: String,
+}
+
 /// Structured capture of user's computing context at a moment in time.
 ///
 /// This is the typed output of the CTP Context Assembler.
@@ -49,7 +102,9 @@ pub struct ContextSnapshot {
     /// Duration of the current session.
     pub session_duration: Duration,
     /// Inferred task, if any.
-    pub inferred_task: Option<TaskHint>,
+    pub inferred_task: Option<EnrichedInferredTask>,
+    /// User cognitive state, if computed.
+    pub user_state: Option<UserState>,
     /// Visual context from screen capture, if recent and enabled.
     pub visual_context: Option<VisualContext>,
     /// When this snapshot was captured.
@@ -63,6 +118,10 @@ pub enum CTPEvent {
     ContextSnapshotReady(ContextSnapshot),
     /// A thought event has been triggered based on a context snapshot.
     ThoughtEventTriggered(ContextSnapshot),
+    /// User cognitive state has been computed.
+    UserStateComputed(UserState),
+    /// A signal pattern has been detected.
+    SignalPatternDetected(SignalPattern),
 }
 
 #[cfg(test)]
@@ -107,8 +166,9 @@ mod tests {
             timestamp: now,
         };
 
-        let task_hint = TaskHint {
+        let task = EnrichedInferredTask {
             category: "coding".to_string(),
+            semantic_description: "Editing Rust code in VSCode".to_string(),
             confidence: 0.92,
         };
 
@@ -118,7 +178,8 @@ mod tests {
             clipboard_digest: Some("sha256:abcdef1234567890".to_string()),
             keystroke_cadence,
             session_duration: Duration::from_secs(3600),
-            inferred_task: Some(task_hint),
+            inferred_task: Some(task),
+            user_state: None,
             visual_context: None,
             timestamp: now,
         };
@@ -133,9 +194,9 @@ mod tests {
         assert_eq!(snapshot.keystroke_cadence.events_per_minute, 180.5);
         assert_eq!(snapshot.session_duration, Duration::from_secs(3600));
         assert!(snapshot.inferred_task.is_some());
-        if let Some(hint) = &snapshot.inferred_task {
-            assert_eq!(hint.category, "coding");
-            assert_eq!(hint.confidence, 0.92);
+        if let Some(task) = &snapshot.inferred_task {
+            assert_eq!(task.category, "coding");
+            assert_eq!(task.confidence, 0.92);
         }
     }
 
@@ -160,6 +221,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(1800),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: now,
         };
@@ -240,6 +302,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: now,
         }

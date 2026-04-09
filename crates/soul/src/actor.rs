@@ -346,6 +346,20 @@ impl SoulActor {
             CTPEvent::ThoughtEventTriggered(_) => {
                 self.increment_identity_counter("ctp::thought_trigger_count", 1)?;
             }
+            CTPEvent::UserStateComputed(user_state) => {
+                // Absorb user state signals for behavioral pattern analysis
+                if user_state.flow_detected {
+                    self.increment_identity_counter("user_state::flow_state_count", 1)?;
+                }
+                if user_state.frustration_level > 70 {
+                    self.increment_identity_counter("user_state::high_frustration_count", 1)?;
+                }
+            }
+            CTPEvent::SignalPatternDetected(pattern) => {
+                // Absorb detected signal patterns for identity distillation
+                let key = format!("pattern::{:?}", pattern.pattern_type).to_lowercase();
+                self.increment_identity_counter(&key, 1)?;
+            }
         }
         Ok(())
     }
@@ -617,7 +631,7 @@ impl Actor for SoulActor {
                             let _ = self.absorb_platform_signal(platform_event);
                         }
                         Ok(Event::CTP(ctp_event)) => {
-                            let _ = self.absorb_ctp_signal(ctp_event);
+                            let _ = self.absorb_ctp_signal(*ctp_event);
                         }
                         Ok(Event::Inference(inference_event)) => {
                             let _ = self.absorb_inference_signal(inference_event);
