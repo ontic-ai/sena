@@ -63,6 +63,8 @@ impl PatternEngine {
             patterns.push(anomaly);
         }
 
+        self.last_app_name = Some(snapshot.active_app.app_name.clone());
+
         patterns
     }
 
@@ -93,12 +95,13 @@ impl PatternEngine {
         }
 
         // Check for sustained app usage (>=2 minutes in same app)
-        let same_app_sustained = if let Some(ref last_app) = self.last_app_name {
-            last_app == &snapshot.active_app.app_name && buffer.window_events_count() >= 4
-        // Heuristic for 2+ min
-        } else {
-            false
-        };
+        let same_app_sustained = buffer.window_events_count() >= 4
+            && buffer
+                .all_windows()
+                .iter()
+                .rev()
+                .take(4)
+                .all(|window| window.app_name == snapshot.active_app.app_name);
 
         // High cadence burst (>=160 EPM)
         let high_cadence = snapshot.keystroke_cadence.events_per_minute >= 160.0;

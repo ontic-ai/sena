@@ -8,6 +8,7 @@ use bus::events::ctp::ContextSnapshot;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
+use bus::events::memory::{ContextMemoryQueryRequest, MemoryEvent};
 use bus::events::platform_vision::{PlatformVisionEvent, ScreenCaptureEvent};
 use bus::events::transparency::TransparencyQuery;
 use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
@@ -42,6 +43,9 @@ pub struct CTPActor {
     boot_complete: bool,
     /// Whether the CTP loop is enabled (pause/resume via LoopControlRequested).
     loop_enabled: bool,
+    /// Cached memory relevance score from most recent ContextQueryCompleted.
+    /// Used for trigger gate evaluation on each tick.
+    cached_memory_relevance: f64,
 }
 
 impl CTPActor {
@@ -71,6 +75,7 @@ impl CTPActor {
             poll_interval,
             boot_complete: false,
             loop_enabled: true,
+            cached_memory_relevance: 0.0,
         }
     }
 
@@ -163,6 +168,16 @@ impl Actor for CTPActor {
                                         }))
                                         .await;
                                 }
+                                // Handle memory query responses to update cached relevance
+                                Event::Memory(MemoryEvent::ContextQueryCompleted(response)) => {
+                                    self.cached_memory_relevance = response.relevance_score;
+                                    if self.loop_enabled {
+                                        tracing::debug!(
+                                            "CTP: updated memory relevance cache to {:.3}",
+                                            response.relevance_score
+                                        );
+                                    }
+                                }
                                 // Handle shutdown signal
                                 Event::System(SystemEvent::ShutdownSignal) => {
                                     break;
@@ -221,9 +236,26 @@ impl Actor for CTPActor {
                         .await
                         .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ContextSnapshotReady: {}", e)))?;
 
-                    // Step 6: Check if we should trigger with significance scoring
-                    // TODO: Phase 7A Unit 8+11 — wire pre-trigger memory query
-                    let memory_relevance = 0.0; // Default until memory integration
+                    // Step 6a: Emit memory query for next tick (if inferred task available)
+                    if let Some(task) = &snapshot.inferred_task {
+                        let request_id = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+
+                        let req = ContextMemoryQueryRequest {
+                            context_description: task.semantic_description.clone(),
+                            max_chunks: 5,
+                            request_id,
+                        };
+
+                        let _ = bus
+                            .broadcast(Event::Memory(MemoryEvent::ContextQueryRequested(req)))
+                            .await;
+                    }
+
+                    // Step 6b: Check if we should trigger with cached memory relevance
+                    let memory_relevance = self.cached_memory_relevance;
                     if self.boot_complete && self.gate.should_trigger(&snapshot, &patterns, memory_relevance) {
                         // Emit ThoughtEventTriggered event
                         bus.broadcast(Event::CTP(Box::new(CTPEvent::ThoughtEventTriggered(snapshot))))

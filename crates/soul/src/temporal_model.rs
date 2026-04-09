@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 /// Temporal model that tracks event frequency by hour-of-day and day-of-week.
-pub(crate) struct TemporalModel {
+pub struct TemporalModel {
     /// Event counts bucketed by (hour, day_of_week, category).
     buckets: HashMap<TemporalKey, u32>,
 }
@@ -18,14 +18,14 @@ struct TemporalKey {
 }
 
 impl TemporalModel {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             buckets: HashMap::new(),
         }
     }
 
     /// Record an event at the given timestamp with a category label.
-    pub(crate) fn record_event(&mut self, timestamp: SystemTime, category: &str) {
+    pub fn record_event(&mut self, timestamp: SystemTime, category: &str) {
         let (hour, day_of_week) = match extract_time_components(timestamp) {
             Some(t) => t,
             None => return, // Invalid timestamp, skip
@@ -41,7 +41,7 @@ impl TemporalModel {
     }
 
     /// Get the top N temporal patterns sorted by frequency (descending).
-    pub(crate) fn top_patterns(&self, limit: usize) -> Vec<TemporalBehaviorPattern> {
+    pub fn top_patterns(&self, limit: usize) -> Vec<TemporalBehaviorPattern> {
         let mut patterns: Vec<_> = self
             .buckets
             .iter()
@@ -56,6 +56,12 @@ impl TemporalModel {
         patterns.sort_by(|a, b| b.frequency.cmp(&a.frequency));
         patterns.truncate(limit);
         patterns
+    }
+}
+
+impl Default for TemporalModel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

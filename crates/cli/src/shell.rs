@@ -463,6 +463,11 @@ impl Shell {
 
     /// Render the input area — bordered frame with prompt, status, and key hints.
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        // Calculate input length for char counter (Unit 20)
+        let input_len = self.state.editor.input.chars().count();
+        let threshold = (MAX_INPUT_LENGTH as f64 * 0.8) as usize;
+        let show_char_counter = input_len > threshold;
+
         // Border color reflects current state
         let border_color = if self.state.waiting_for_inference || self.transparency_loading {
             Color::Yellow
@@ -517,11 +522,18 @@ impl Shell {
                 .add_modifier(Modifier::DIM),
         ));
 
+        // Title with optional char counter
+        let title = if show_char_counter {
+            format!(" Input [{}/{}] ", input_len, MAX_INPUT_LENGTH)
+        } else {
+            " Input ".to_string()
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
-                " Input ",
+                title,
                 Style::default()
                     .fg(border_color)
                     .add_modifier(Modifier::BOLD),
@@ -1094,6 +1106,15 @@ impl Shell {
                 self.add_message(
                     MessageRole::Warning,
                     format!("Voice transcription failed: {}", reason),
+                );
+            }
+            Event::Speech(SpeechEvent::LowConfidenceTranscription { confidence, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "Speech detected but confidence too low ({:.0}%). Please try again.",
+                        confidence * 100.0
+                    ),
                 );
             }
             Event::Download(DownloadEvent::Started {
@@ -2149,25 +2170,55 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
 }
 
 fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
-    for line in [
-        "━━  Commands",
-        "/observation or /obs   What are you observing right now?",
-        "/memory or /mem        What do you remember about me?",
-        "/explanation or /why   Why did you say that?",
-        "/models                Select which model to use",
-        "/voice                 Toggle voice input in this CLI session",
-        "/speech                View speech configuration and status",
-        "/listen                Start/stop continuous live transcription",
-        "/microphone            List microphones or select one (/microphone select <index>)",
-        "/loops                 List all background loops and their status",
-        "/loops <name>          Toggle a loop on/off",
-        "/loops <name> on|off   Explicitly enable or disable a loop",
-        "/help                  Show this message",
-        "/close or /quit        Close the CLI session",
-        "/shutdown              Shut down Sena completely",
-        "/copy                  Copy last response to clipboard",
+    add_message(state, MessageRole::System, "━━  Commands");
+
+    for category in [
+        CommandCategory::Chat,
+        CommandCategory::Transparency,
+        CommandCategory::Audio,
+        CommandCategory::System,
     ] {
-        add_message(state, MessageRole::System, line);
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("{}:", category.label()),
+        );
+
+        for cmd in SLASH_COMMANDS.iter().filter(|cmd| cmd.category == category) {
+            add_message(
+                state,
+                MessageRole::System,
+                &format!("  {:<20} {}", cmd.command, cmd.description),
+            );
+        }
+
+        if category == CommandCategory::Transparency {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /observation or /obs  Alias for /observation",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /memory or /mem       Alias for /memory",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /explanation or /why  Alias for /explanation",
+            );
+        }
+
+        if category == CommandCategory::System {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /close or /quit       Alias to close the CLI session",
+            );
+        }
+
+        add_message(state, MessageRole::System, "");
     }
 }
 

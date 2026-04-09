@@ -42,3 +42,4 @@ sysinfo = "0.32"
 soul = { path = "../soul" }
 bus = { path = "../bus" }
 crypto = { path = "../crypto" }
+prompt = { path = "../prompt" }

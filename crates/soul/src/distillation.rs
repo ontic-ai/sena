@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 /// Distillation engine that watches identity signal counters and extracts
 /// persistent patterns when significance thresholds are crossed.
-pub(crate) struct DistillationEngine {
+pub struct DistillationEngine {
     /// Accumulated observations: signal_key -> count.
     observations: HashMap<String, u64>,
     /// Total event count for computing proportions.
@@ -15,7 +15,7 @@ pub(crate) struct DistillationEngine {
 }
 
 impl DistillationEngine {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             observations: HashMap::new(),
             total_events: 0,
@@ -24,7 +24,7 @@ impl DistillationEngine {
     }
 
     /// Feed an identity signal observation to the engine.
-    pub(crate) fn observe_identity_signal(&mut self, key: &str, value: &str) {
+    pub fn observe_identity_signal(&mut self, key: &str, value: &str) {
         // Only accumulate numeric counter values (these are the counters we distill)
         if let Ok(count) = value.parse::<u64>() {
             self.observations.insert(key.to_string(), count);
@@ -36,7 +36,7 @@ impl DistillationEngine {
     ///
     /// Returns signals ready to persist and broadcast.
     /// Clears internal state after harvest (signals are now owned by caller).
-    pub(crate) fn harvest(&mut self) -> Vec<DistilledIdentitySignal> {
+    pub fn harvest(&mut self) -> Vec<DistilledIdentitySignal> {
         if self.total_events == 0 {
             return Vec::new();
         }
@@ -102,6 +102,12 @@ impl DistillationEngine {
         self.total_events = 0;
 
         signals
+    }
+}
+
+impl Default for DistillationEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
