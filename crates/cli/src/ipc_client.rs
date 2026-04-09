@@ -9,8 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
 use tokio::net::UnixStream;
 
 #[cfg(windows)]
@@ -64,7 +62,7 @@ impl IpcClient {
         #[cfg(windows)]
         {
             let pipe_name = ipc_endpoint();
-            let client = ClientOptions::new().open(pipe_name).map_err(|e| {
+            let client = ClientOptions::new().open(&pipe_name).map_err(|e| {
                 // ERROR_FILE_NOT_FOUND (2) means the pipe doesn't exist → daemon not running.
                 if e.raw_os_error() == Some(2) {
                     IpcClientError::DaemonNotRunning
@@ -143,14 +141,13 @@ impl IpcClient {
 }
 
 #[cfg(unix)]
-fn ipc_endpoint() -> PathBuf {
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
+fn ipc_endpoint() -> std::path::PathBuf {
+    runtime::ipc_server::ipc_socket_path()
 }
 
 #[cfg(windows)]
-fn ipc_endpoint() -> &'static str {
-    r"\\.\pipe\sena_ipc"
+fn ipc_endpoint() -> String {
+    runtime::ipc_server::ipc_pipe_name()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,7 +184,7 @@ mod tests {
 
         // Windows uses different pipe names, so they are inherently distinct.
         // Single instance: \\.\pipe\sena_single_instance
-        // IPC: \\.\pipe\sena_ipc
+        // IPC: \\.\pipe\sena_ipc_{username}
     }
 
     #[tokio::test]
