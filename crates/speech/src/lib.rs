@@ -15,6 +15,7 @@ mod candle_whisper;
 pub mod download;
 pub mod error;
 pub mod onboarding;
+mod sherpa_stt;
 mod silence_detector;
 pub mod stt_actor;
 pub mod tts_actor;

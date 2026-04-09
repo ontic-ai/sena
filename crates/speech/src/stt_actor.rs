@@ -18,6 +18,15 @@ const DEFAULT_BUFFER_DURATION_SECS: f32 = 3.0;
 /// Audio chunk duration for Whisper fake-streaming /listen sessions (1s for responsiveness).
 const LISTEN_WHISPER_BUFFER_DURATION_SECS: f32 = 1.0;
 
+/// Audio chunk duration for sherpa-onnx Zipformer listen sessions (200ms for responsiveness).
+const LISTEN_SHERPA_BUFFER_DURATION_SECS: f32 = 0.2;
+
+/// How often to run sherpa decode on the growing listen buffer.
+const LISTEN_SHERPA_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Maximum audio retained for sherpa growing-window decode (8s at 16kHz).
+const LISTEN_SHERPA_MAX_SAMPLES: usize = 16_000 * 8;
+
 /// Maximum rolling audio retained for listen-mode interim transcriptions (6 seconds at 16kHz).
 const LISTEN_ROLLING_MAX_SAMPLES: usize = 16_000 * 3;
 
@@ -69,6 +78,12 @@ pub struct SttActor {
     listen_rolling_samples: Vec<f32>,
     /// Time of last interim Whisper transcription in listen mode.
     listen_last_interim: Option<std::time::Instant>,
+    /// Sender to the sherpa worker thread. Some when sherpa is active for listen mode.
+    sherpa_worker_tx: Option<std::sync::mpsc::Sender<SherpaCmd>>,
+    /// True while sherpa is the active STT for the current listen session.
+    sherpa_listen_active: bool,
+    /// Time of last sherpa decode in the current listen session.
+    listen_last_sherpa: Option<std::time::Instant>,
 }
 
 impl SttActor {
@@ -109,6 +124,9 @@ impl SttActor {
             speech_loop_enabled: true,
             listen_rolling_samples: Vec::new(),
             listen_last_interim: None,
+            sherpa_worker_tx: None,
+            sherpa_listen_active: false,
+            listen_last_sherpa: None,
         }
     }
 
@@ -141,6 +159,48 @@ impl SttActor {
     pub fn with_confidence_threshold(mut self, threshold: f32) -> Self {
         self.confidence_threshold = threshold.clamp(0.0, 1.0);
         self
+    }
+
+    async fn init_sherpa_backend(
+        &self,
+        model_dir: &std::path::Path,
+    ) -> Option<std::sync::mpsc::Sender<SherpaCmd>> {
+        let encoder = model_dir
+            .join("sherpa_encoder.onnx")
+            .to_string_lossy()
+            .into_owned();
+        let decoder = model_dir
+            .join("sherpa_decoder.onnx")
+            .to_string_lossy()
+            .into_owned();
+        let joiner = model_dir
+            .join("sherpa_joiner.onnx")
+            .to_string_lossy()
+            .into_owned();
+        let tokens = model_dir
+            .join("sherpa_tokens.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        match tokio::task::spawn_blocking(move || {
+            crate::sherpa_stt::SherpaZipformerStt::load(&encoder, &decoder, &joiner, &tokens)
+        })
+        .await
+        {
+            Ok(Ok(model)) => {
+                let (tx, rx) = std::sync::mpsc::channel::<SherpaCmd>();
+                std::thread::spawn(move || sherpa_worker_loop(model, rx));
+                Some(tx)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("listen: sherpa init failed, falling back to whisper: {}", e);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("listen: sherpa spawn_blocking panicked: {}", e);
+                None
+            }
+        }
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -288,80 +348,160 @@ impl SttActor {
 
     /// Handle an audio buffer for continuous listen mode.
     ///
-    /// Implements Whisper fake-streaming via a sliding window:
-    /// - Every 1.5s, runs Whisper on the accumulated rolling audio → emits `is_final=false`
-    /// - When VAD detects end-of-speech, runs Whisper once more → emits `is_final=true`
+    /// Sherpa primary path: growing-window decode every 200ms — returns text every ~200ms.
+    /// Whisper fallback: rolling buffer + interim every 1500ms (original fake-streaming).
     async fn handle_listen_audio_buffer(
         &mut self,
         buffer: AudioBuffer,
         session_id: u64,
         bus: &Arc<EventBus>,
     ) {
-        // Accumulate samples in rolling buffer (max 6s at 16kHz).
-        self.listen_rolling_samples
-            .extend_from_slice(&buffer.samples);
-        if self.listen_rolling_samples.len() > LISTEN_ROLLING_MAX_SAMPLES {
-            let excess = self.listen_rolling_samples.len() - LISTEN_ROLLING_MAX_SAMPLES;
-            self.listen_rolling_samples.drain(..excess);
-        }
-
-        // Emit interim (non-final) transcription every LISTEN_INTERIM_INTERVAL
-        // once at least 2s of audio has accumulated AND audio is not silent.
-        let enough_audio = self.listen_rolling_samples.len() >= LISTEN_INTERIM_MIN_SAMPLES;
-        let interval_elapsed = self
-            .listen_last_interim
-            .map(|t| t.elapsed() >= LISTEN_INTERIM_INTERVAL)
-            .unwrap_or(true);
-        // Gate: skip if rolling buffer is mostly silence (avoids Whisper hallucinations).
-        let rolling_rms = crate::silence_detector::calculate_rms(&self.listen_rolling_samples);
-        let has_speech = rolling_rms > self.stt_energy_threshold;
-
-        if enough_audio && interval_elapsed && has_speech {
-            let interim_buf = AudioBuffer {
-                samples: self.listen_rolling_samples.clone(),
-                sample_rate: buffer.sample_rate,
-                channels: buffer.channels,
-            };
-            self.listen_last_interim = Some(std::time::Instant::now());
-            match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(interim_buf)).await {
-                Ok(Ok(result)) if !result.text.trim().is_empty() => {
-                    let _ = bus
-                        .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                            text: result.text,
-                            is_final: false,
-                            confidence: result.confidence,
-                            session_id,
-                        }))
-                        .await;
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!("listen[interim]: error: {}", e),
-                Err(_) => tracing::warn!("listen[interim]: timeout"),
+        if self.sherpa_listen_active {
+            // ── Sherpa path ──────────────────────────────────────────────────────────
+            // Grow the rolling buffer (cap at 8s).
+            self.listen_rolling_samples
+                .extend_from_slice(&buffer.samples);
+            if self.listen_rolling_samples.len() > LISTEN_SHERPA_MAX_SAMPLES {
+                let excess = self.listen_rolling_samples.len() - LISTEN_SHERPA_MAX_SAMPLES;
+                self.listen_rolling_samples.drain(..excess);
             }
-        }
 
-        // VAD for final speech-end detection.
-        if let Some(ready_buffer) = self
-            .listen_mode_vad
-            .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
-        {
-            match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(ready_buffer)).await {
-                Ok(Ok(result)) if !result.text.trim().is_empty() => {
-                    let _ = bus
-                        .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                            text: result.text,
-                            is_final: true,
-                            confidence: result.confidence,
-                            session_id,
-                        }))
-                        .await;
-                    // Reset rolling state for next utterance.
-                    self.listen_rolling_samples.clear();
-                    self.listen_last_interim = None;
+            let interval_elapsed = self
+                .listen_last_sherpa
+                .map(|t| t.elapsed() >= LISTEN_SHERPA_INTERVAL)
+                .unwrap_or(true);
+
+            if interval_elapsed && !self.listen_rolling_samples.is_empty() {
+                if let Some(tx) = &self.sherpa_worker_tx {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let samples = self.listen_rolling_samples.clone();
+                    let _ = tx.send(SherpaCmd::Decode {
+                        samples,
+                        reply: reply_tx,
+                    });
+                    self.listen_last_sherpa = Some(std::time::Instant::now());
+
+                    match tokio::time::timeout(Duration::from_millis(500), reply_rx).await {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                    text: text.trim().to_string(),
+                                    is_final: false,
+                                    confidence: 0.9,
+                                    session_id,
+                                }))
+                                .await;
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => tracing::warn!("listen[sherpa]: worker channel closed"),
+                        Err(_) => tracing::warn!("listen[sherpa]: decode timeout"),
+                    }
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!("listen[whisper]: transcription error: {}", e),
-                Err(_) => tracing::warn!("listen[whisper]: transcription timeout"),
+            }
+
+            // VAD for final speech-end detection.
+            if let Some(_ready_buffer) =
+                self.listen_mode_vad
+                    .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+            {
+                // Emit final transcription of the accumulated rolling buffer.
+                if let Some(tx) = &self.sherpa_worker_tx {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let samples = self.listen_rolling_samples.clone();
+                    let _ = tx.send(SherpaCmd::Decode {
+                        samples,
+                        reply: reply_tx,
+                    });
+
+                    match tokio::time::timeout(Duration::from_millis(1000), reply_rx).await {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                    text: text.trim().to_string(),
+                                    is_final: true,
+                                    confidence: 0.9,
+                                    session_id,
+                                }))
+                                .await;
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => tracing::warn!("listen[sherpa]: worker closed on final"),
+                        Err(_) => tracing::warn!("listen[sherpa]: final decode timeout"),
+                    }
+                }
+                // Reset rolling buffer for next utterance.
+                self.listen_rolling_samples.clear();
+                self.listen_last_sherpa = None;
+            }
+        } else {
+            // ── Whisper fallback path ─────────────────────────────────────────────────
+            // Accumulate samples in rolling buffer (max 3s at 16kHz).
+            self.listen_rolling_samples
+                .extend_from_slice(&buffer.samples);
+            if self.listen_rolling_samples.len() > LISTEN_ROLLING_MAX_SAMPLES {
+                let excess = self.listen_rolling_samples.len() - LISTEN_ROLLING_MAX_SAMPLES;
+                self.listen_rolling_samples.drain(..excess);
+            }
+
+            // Emit interim transcription every LISTEN_INTERIM_INTERVAL once we have enough audio.
+            let enough_audio = self.listen_rolling_samples.len() >= LISTEN_INTERIM_MIN_SAMPLES;
+            let interval_elapsed = self
+                .listen_last_interim
+                .map(|t| t.elapsed() >= LISTEN_INTERIM_INTERVAL)
+                .unwrap_or(true);
+            let rolling_rms = crate::silence_detector::calculate_rms(&self.listen_rolling_samples);
+            let has_speech = rolling_rms > self.stt_energy_threshold;
+
+            if enough_audio && interval_elapsed && has_speech {
+                let interim_buf = AudioBuffer {
+                    samples: self.listen_rolling_samples.clone(),
+                    sample_rate: buffer.sample_rate,
+                    channels: buffer.channels,
+                };
+                self.listen_last_interim = Some(std::time::Instant::now());
+                match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(interim_buf))
+                    .await
+                {
+                    Ok(Ok(result)) if !result.text.trim().is_empty() => {
+                        let _ = bus
+                            .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                text: result.text,
+                                is_final: false,
+                                confidence: result.confidence,
+                                session_id,
+                            }))
+                            .await;
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!("listen[whisper/interim]: error: {}", e),
+                    Err(_) => tracing::warn!("listen[whisper/interim]: timeout"),
+                }
+            }
+
+            // VAD for final speech-end detection.
+            if let Some(ready_buffer) =
+                self.listen_mode_vad
+                    .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+            {
+                match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(ready_buffer))
+                    .await
+                {
+                    Ok(Ok(result)) if !result.text.trim().is_empty() => {
+                        let _ = bus
+                            .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                text: result.text,
+                                is_final: true,
+                                confidence: result.confidence,
+                                session_id,
+                            }))
+                            .await;
+                        self.listen_rolling_samples.clear();
+                        self.listen_last_interim = None;
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!("listen[whisper]: transcription error: {}", e),
+                    Err(_) => tracing::warn!("listen[whisper]: transcription timeout"),
+                }
             }
         }
     }
@@ -492,15 +632,44 @@ impl Actor for SttActor {
                         }
                         Ok(Event::Speech(SpeechEvent::ListenModeRequested { session_id })) => {
                             if self.listen_session_id.is_some() {
-                                tracing::warn!("listen: new session {} requested while session {:?} active - stopping old session first", session_id, self.listen_session_id);
+                                tracing::warn!(
+                                    "listen: new session {} requested while session {:?} active - stopping old session first",
+                                    session_id,
+                                    self.listen_session_id
+                                );
+                                // Shut down the previous sherpa worker if any.
+                                if let Some(old_tx) = self.sherpa_worker_tx.take() {
+                                    let _ = old_tx.send(SherpaCmd::Shutdown);
+                                }
+                                self.sherpa_listen_active = false;
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
                             }
+
+                            // Try to initialise sherpa if models are present.
+                            let sherpa_worker = if let Some(ref dir) = self.model_dir.clone() {
+                                if crate::sherpa_stt::SherpaZipformerStt::models_present(dir) {
+                                    self.init_sherpa_backend(dir).await
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            let (buffer_duration, backend_label) = if sherpa_worker.is_some() {
+                                (LISTEN_SHERPA_BUFFER_DURATION_SECS, "sherpa-onnx")
+                            } else {
+                                (LISTEN_WHISPER_BUFFER_DURATION_SECS, "whisper fake-streaming")
+                            };
+
+                            self.sherpa_worker_tx = sherpa_worker;
+                            self.sherpa_listen_active = self.sherpa_worker_tx.is_some();
+                            self.listen_last_sherpa = None;
+
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
-                                buffer_duration_secs: LISTEN_WHISPER_BUFFER_DURATION_SECS,
-                                // Pass all audio to SilenceDetector - it handles
-                                // voice/silence classification internally.
+                                buffer_duration_secs: buffer_duration,
                                 energy_threshold: 0.0,
                                 device_name: self.microphone_device.clone(),
                             };
@@ -509,19 +678,20 @@ impl Actor for SttActor {
                                     self.listen_session_id = Some(session_id);
                                     self.listen_audio_stream = Some(stream);
                                     self.listen_audio_rx = Some(rx);
-                                    // Suppress always-on STT while listen mode is active to
-                                    // prevent conflicting TranscriptionCompleted events and
-                                    // unintended inference calls.
                                     self.listen_mode_active = true;
                                     self.always_listening_vad.reset();
-                                    // Reset listen mode VAD and rolling buffer for a clean session.
                                     self.listen_mode_vad.reset();
                                     self.listen_rolling_samples.clear();
                                     self.listen_last_interim = None;
-                                    tracing::info!("listen: session {} started (whisper fake-streaming)", session_id);
+                                    tracing::info!("listen: session {} started ({})", session_id, backend_label);
                                 }
                                 Err(e) => {
                                     tracing::error!("listen: failed to start audio capture: {}", e);
+                                    // Clean up sherpa worker if audio failed.
+                                    if let Some(tx) = self.sherpa_worker_tx.take() {
+                                        let _ = tx.send(SherpaCmd::Shutdown);
+                                    }
+                                    self.sherpa_listen_active = false;
                                     let _ = bus
                                         .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
                                             session_id,
@@ -532,6 +702,12 @@ impl Actor for SttActor {
                         }
                         Ok(Event::Speech(SpeechEvent::ListenModeStopRequested { session_id })) => {
                             if self.listen_session_id == Some(session_id) {
+                                // Shut down sherpa worker if active.
+                                if let Some(tx) = self.sherpa_worker_tx.take() {
+                                    let _ = tx.send(SherpaCmd::Shutdown);
+                                }
+                                self.sherpa_listen_active = false;
+                                self.listen_last_sherpa = None;
                                 self.listen_session_id = None;
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
@@ -588,6 +764,10 @@ impl Actor for SttActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
+        // Shut down sherpa worker if running.
+        if let Some(tx) = self.sherpa_worker_tx.take() {
+            let _ = tx.send(SherpaCmd::Shutdown);
+        }
         self.audio_rx = None;
         self.audio_stream = None;
         self.listen_audio_rx = None;
@@ -634,6 +814,31 @@ fn candle_worker_loop(
                     TranscriptionResult { text, confidence }
                 });
                 let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+/// Commands for the sherpa-onnx worker thread.
+enum SherpaCmd {
+    Decode {
+        samples: Vec<f32>,
+        reply: oneshot::Sender<String>,
+    },
+    Shutdown,
+}
+
+/// Worker loop for blocking sherpa-onnx decode calls.
+fn sherpa_worker_loop(
+    mut model: crate::sherpa_stt::SherpaZipformerStt,
+    rx: std::sync::mpsc::Receiver<SherpaCmd>,
+) {
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            SherpaCmd::Shutdown => break,
+            SherpaCmd::Decode { samples, reply } => {
+                let text = model.decode_chunk(samples);
+                let _ = reply.send(text);
             }
         }
     }

@@ -27,6 +27,8 @@ pub enum ModelType {
     PiperTts,
     /// OpenWakeWord model for wakeword detection.
     OpenWakeWord,
+    /// Sherpa-onnx Zipformer model for STT.
+    SherpaZipformerStt,
 }
 
 /// Speech model information.
@@ -127,6 +129,54 @@ impl ModelManifest {
         }
     }
 
+    /// Returns the Zipformer encoder (int8 quantized, ~15MB).
+    pub fn sherpa_zipformer_encoder() -> ModelInfo {
+        ModelInfo {
+            name: "sherpa-zipformer-en-encoder-int8".to_string(),
+            filename: "sherpa_encoder.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/encoder-epoch-99-avg-1.int8.onnx".to_string(),
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 15_000_000,
+            model_type: ModelType::SherpaZipformerStt,
+        }
+    }
+
+    /// Returns the Zipformer decoder (int8 quantized, ~2MB).
+    pub fn sherpa_zipformer_decoder() -> ModelInfo {
+        ModelInfo {
+            name: "sherpa-zipformer-en-decoder-int8".to_string(),
+            filename: "sherpa_decoder.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/decoder-epoch-99-avg-1.int8.onnx".to_string(),
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 2_000_000,
+            model_type: ModelType::SherpaZipformerStt,
+        }
+    }
+
+    /// Returns the Zipformer joiner (int8 quantized, ~1MB).
+    pub fn sherpa_zipformer_joiner() -> ModelInfo {
+        ModelInfo {
+            name: "sherpa-zipformer-en-joiner-int8".to_string(),
+            filename: "sherpa_joiner.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/joiner-epoch-99-avg-1.int8.onnx".to_string(),
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 1_000_000,
+            model_type: ModelType::SherpaZipformerStt,
+        }
+    }
+
+    /// Returns the Zipformer token vocabulary (~10KB).
+    pub fn sherpa_zipformer_tokens() -> ModelInfo {
+        ModelInfo {
+            name: "sherpa-zipformer-en-tokens".to_string(),
+            filename: "sherpa_tokens.txt".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/tokens.txt".to_string(),
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 10_000,
+            model_type: ModelType::SherpaZipformerStt,
+        }
+    }
+
     /// Returns all known models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
@@ -135,6 +185,10 @@ impl ModelManifest {
             Self::whisper_tokenizer(),
             Self::piper_voice(),
             Self::open_wakeword(),
+            Self::sherpa_zipformer_encoder(),
+            Self::sherpa_zipformer_decoder(),
+            Self::sherpa_zipformer_joiner(),
+            Self::sherpa_zipformer_tokens(),
         ]
     }
 }
@@ -415,7 +469,7 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 5);
+        assert_eq!(models.len(), 9);
 
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
