@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use bus::{Event, EventBus, SoulEvent};
 
+use crate::display::{BOLD, RESET, YELLOW};
+
 /// Result of the onboarding wizard.
 pub struct OnboardingResult {
     /// User's chosen name.
@@ -45,7 +47,7 @@ pub async fn run_wizard(
 
     // Check models first
     if !models_available {
-        println!("  ⚠  No AI models found.");
+        println!("  \u{26a0}  {BOLD}{YELLOW}No AI models found.{RESET}");
         println!();
         println!("  Sena requires a local GGUF model to function.");
         println!("  To install Ollama and download a model:");
@@ -54,7 +56,19 @@ pub async fn run_wizard(
         println!("    2. Run:  ollama pull llama3.2:3b");
         println!("    3. Re-launch Sena");
         println!();
-        println!("  (Continuing setup — you can run Sena without inference for now)");
+        // Unit 21: Enhanced warning listing what works and what doesn't
+        println!("  {BOLD}Without a model, the following will NOT work:{RESET}");
+        println!("    \u{00d7} Chat inference (no responses to your messages)");
+        println!("    \u{00d7} Proactive thoughts (CTP will not generate insights)");
+        println!("    \u{00d7} /explanation and /memory responses");
+        println!();
+        println!("  {BOLD}These features WILL still work:{RESET}");
+        println!("    \u{2713} Observation (/observation to see what Sena is tracking)");
+        println!("    \u{2713} File, clipboard, and window monitoring");
+        println!("    \u{2713} Soul event logging and session tracking");
+        println!("    \u{2713} Configuration and system management");
+        println!();
+        println!("  (Continuing setup \u{2014} you can run Sena without inference for now)");
         println!();
     }
 
