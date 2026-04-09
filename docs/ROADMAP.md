@@ -552,7 +552,7 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Prompt renders rich soul context and enhanced snapshots
 - [x] CLI /help is grouped, input is length-limited, onboarding is informative
 - [x] Speech handles low-confidence gracefully, TTS overflow is visible, wakeword debounces
-- [x] 538+ tests pass across the workspace
+- [x] 536+ tests pass across the workspace (2 ignored: OS keychain integration and 72h longevity — both pre-existing)
 - [x] Architecture docs reflect all new subsystems
 - [x] All previous exit gate conditions still hold
 

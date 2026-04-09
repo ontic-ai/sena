@@ -366,7 +366,7 @@ Detects behavioral patterns from the signal buffer using rule-based detection (n
 | **FlowState** | Sustained keystroke cadence in narrow variance band, no app switches for >10 minutes, low idle periods |
 | **Anomaly** | Out-of-hours activity, unusual app combination, rapid task switching (>5 context switches in 2 minutes) |
 
-All thresholds must be tunable via config (`ctp.pattern_thresholds`).
+All thresholds are currently compile-time constants, with config-driven tuning planned for a future phase.
 
 **User State Classifier** (`crates/ctp/src/user_state.rs`):
 
@@ -622,7 +622,7 @@ Example signals:
 - Active project contexts (frequent directory patterns)
 - Communication style (preferred tone from feedback)
 
-Thresholds: `soul.distillation_min_occurrences` (default 5), `soul.distillation_window_days` (default 7).
+Thresholds are currently compile-time constants (min occurrences: 5, window: 7 days), configurable in a future phase.
 
 **Temporal Model** (`crates/soul/src/temporal_model.rs`):
 
@@ -663,7 +663,7 @@ The prompt actor can selectively include high-relevance sections based on token 
 
 **Harvest cycle:**
 
-Every 50 absorbed events (configurable via `soul.harvest_event_threshold`), the soul actor triggers:
+Every 50 absorbed events (compile-time constant, configurable in a future phase), the soul actor triggers:
 1. Distillation: check identity signal counters, distill new patterns
 2. Temporal update: bucket recent events by time, update temporal model
 3. Preference check: if >20 feedback events exist, recompute preferences
