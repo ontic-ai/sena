@@ -1002,7 +1002,12 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 style: LineStyle::Error,
             },
         }),
-        Event::CTP(bus::events::ctp::CTPEvent::ThoughtEventTriggered(_thought)) => {
+        Event::CTP(ctp_event)
+            if matches!(
+                **ctp_event,
+                bus::events::ctp::CTPEvent::ThoughtEventTriggered(_)
+            ) =>
+        {
             // Only show in verbose mode (CLI-managed state).
             None
         }

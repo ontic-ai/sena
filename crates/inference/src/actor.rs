@@ -372,12 +372,12 @@ impl InferenceActor {
                     None => return Err(err),
                 };
 
-                let retry_max_tokens = match Self::compute_retry_max_tokens(overflow, params.max_tokens)
-                {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(err),
-                    Err(e) => return Err(e.to_string()),
-                };
+                let retry_max_tokens =
+                    match Self::compute_retry_max_tokens(overflow, params.max_tokens) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => return Err(err),
+                        Err(e) => return Err(e.to_string()),
+                    };
 
                 tracing::warn!(
                     "inference: context overflow on first attempt; retrying once with max_tokens {} -> {} (prompt={}, context={})",
@@ -1651,13 +1651,14 @@ impl Actor for InferenceActor {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             return Ok(());
                         }
-                        Ok(Event::CTP(CTPEvent::ContextSnapshotReady(snapshot))) => {
-                            self.last_snapshot = Some(snapshot);
-                        }
-                        Ok(Event::CTP(CTPEvent::ThoughtEventTriggered(snapshot))) => {
-                            // Proactive inference: CTP determined context is worth reasoning about.
-                            // Compose a context-derived prompt and run inference.
-                            self.last_snapshot = Some(snapshot.clone());
+                        Ok(Event::CTP(ctp_event)) => match *ctp_event {
+                            CTPEvent::ContextSnapshotReady(snapshot) => {
+                                self.last_snapshot = Some(snapshot);
+                            }
+                            CTPEvent::ThoughtEventTriggered(snapshot) => {
+                                // Proactive inference: CTP determined context is worth reasoning about.
+                                // Compose a context-derived prompt and run inference.
+                                self.last_snapshot = Some(snapshot.clone());
 
                             // Guard: only run proactive inference if the model is already loaded.
                             // Never call ensure_loaded() proactively — model loading is an
@@ -1717,7 +1718,9 @@ impl Actor for InferenceActor {
                                         .await;
                                 }
                             }
-                        }
+                            }
+                            _ => {} // Ignore other CTPEvent variants
+                        },
                         Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
                             text,
                             confidence: _,
@@ -2565,6 +2568,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(3600),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
         };
@@ -2601,6 +2605,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(1200),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
         };

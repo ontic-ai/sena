@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use bus::events::ctp::{ContextSnapshot, TaskHint};
+use bus::events::ctp::{ContextSnapshot, EnrichedInferredTask};
 use bus::events::platform::{KeystrokeCadence, WindowContext};
 
 use crate::signal_buffer::SignalBuffer;
@@ -97,6 +97,7 @@ impl ContextAssembler {
             keystroke_cadence,
             session_duration,
             inferred_task,
+            user_state: None,
             visual_context,
             timestamp: now,
         }
@@ -107,7 +108,7 @@ fn infer_task_hint(
     app_name: &str,
     window_title: Option<&str>,
     cadence: &KeystrokeCadence,
-) -> Option<TaskHint> {
+) -> Option<EnrichedInferredTask> {
     let app = app_name.to_lowercase();
     let title = window_title.unwrap_or_default().to_lowercase();
 
@@ -142,8 +143,17 @@ fn infer_task_hint(
         confidence += 0.05;
     }
 
-    Some(TaskHint {
+    let semantic_description = match category {
+        "coding" => format!("Writing code in {}", app_name),
+        "research" => format!("Researching in {}", app_name),
+        "writing" => format!("Writing in {}", app_name),
+        "operations" => format!("Running commands in {}", app_name),
+        _ => format!("Working in {}", app_name),
+    };
+
+    Some(EnrichedInferredTask {
         category: category.to_owned(),
+        semantic_description,
         confidence: confidence.min(0.95) as f32,
     })
 }
@@ -157,7 +167,7 @@ impl Default for ContextAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus::events::ctp::TaskHint;
+    use bus::events::ctp::EnrichedInferredTask;
     use bus::events::platform::{ClipboardDigest, FileEvent, FileEventKind, WindowContext};
     use std::path::PathBuf;
     use std::thread::sleep;
@@ -288,10 +298,12 @@ mod tests {
                 timestamp: Instant::now(),
             },
             session_duration: Duration::from_secs(30),
-            inferred_task: Some(TaskHint {
+            inferred_task: Some(EnrichedInferredTask {
                 category: "coding".to_string(),
+                semantic_description: "Writing code".to_string(),
                 confidence: 0.8,
             }),
+            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
         };

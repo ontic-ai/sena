@@ -143,7 +143,7 @@ fn context_diff_score(prev: &ContextSnapshot, current: &ContextSnapshot) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus::events::ctp::TaskHint;
+    use bus::events::ctp::EnrichedInferredTask;
     use bus::events::platform::{KeystrokeCadence, WindowContext};
     use std::thread::sleep;
 
@@ -166,6 +166,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(10),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: now,
         }
@@ -237,13 +238,15 @@ mod tests {
     fn task_change_contributes_to_diff_score() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999)).with_sensitivity(1.0);
         let mut first = snapshot("Code");
-        first.inferred_task = Some(TaskHint {
+        first.inferred_task = Some(EnrichedInferredTask {
             category: "coding".to_owned(),
+            semantic_description: "Writing code".to_string(),
             confidence: 0.8,
         });
         let mut second = snapshot("Code");
-        second.inferred_task = Some(TaskHint {
+        second.inferred_task = Some(EnrichedInferredTask {
             category: "research".to_owned(),
+            semantic_description: "Reading documentation".to_string(),
             confidence: 0.7,
         });
 
