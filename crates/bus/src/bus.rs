@@ -19,7 +19,7 @@ pub enum Event {
     /// Platform vision events (screen capture digests, visual context).
     PlatformVision(PlatformVisionEvent),
     /// CTP (Continuous Thought Processing) events.
-    CTP(CTPEvent),
+    CTP(Box<CTPEvent>),
     /// Inference-layer events (model discovery, inference requests/responses).
     Inference(InferenceEvent),
     /// Memory subsystem events (write/query requests and responses).

@@ -11,7 +11,7 @@
 //! - Server resilience to client disconnect
 
 use bus::ipc::{IpcMessage, IpcPayload};
-use bus::EventBus;
+use bus::{Event, EventBus, SystemEvent};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -357,6 +357,51 @@ async fn ipc_slash_config_returns_display_line() {
         "/config produced no DisplayLine messages"
     );
     assert!(ack_received, "No Ack received for /config");
+
+    cleanup_socket(&path);
+}
+
+#[tokio::test]
+async fn ipc_slash_config_reload_broadcasts_reload_requested_event() {
+    let (path, bus) = start_test_server().await;
+    let mut bus_rx = bus.subscribe_broadcast();
+
+    let mut client = TestClient::connect(&path).await.expect("connect failed");
+    assert!(client.subscribe_and_wait_ready().await, "subscribe failed");
+
+    let _reload_id = client
+        .send_msg(IpcPayload::SlashCommand {
+            line: "/config reload".to_string(),
+        })
+        .await
+        .expect("send /config reload failed");
+
+    // Drain IPC responses until Ack for this command arrives.
+    let mut ack_received = false;
+    for _ in 0..20 {
+        if let Some(msg) = client.recv_msg().await {
+            if matches!(msg.payload, IpcPayload::Ack { .. }) {
+                ack_received = true;
+                break;
+            }
+        }
+    }
+    assert!(ack_received, "No Ack received for /config reload");
+
+    // Verify the command emitted the bus event consumed by supervisor.
+    let seen = timeout(Duration::from_secs(2), async {
+        loop {
+            match bus_rx.recv().await {
+                Ok(Event::System(SystemEvent::ConfigReloadRequested)) => return true,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(seen, "ConfigReloadRequested event was not broadcast");
 
     cleanup_socket(&path);
 }

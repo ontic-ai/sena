@@ -80,6 +80,90 @@ pub struct PersonalityUpdated {
     pub verbosity: u8,
 }
 
+/// Distilled identity signal extracted from behavioral patterns.
+#[derive(Debug, Clone)]
+pub struct DistilledIdentitySignal {
+    /// The signal's semantic key (e.g., "preferred_editor", "work_start_time").
+    pub signal_key: String,
+    /// The signal's value (e.g., "vscode", "09:00").
+    pub signal_value: String,
+    /// Confidence in this signal's accuracy (0.0 to 1.0).
+    pub confidence: f32,
+    /// Number of source events that contributed to this signal.
+    pub source_event_count: u32,
+}
+
+/// Temporal behavior pattern derived from event log analysis.
+#[derive(Debug, Clone)]
+pub struct TemporalBehaviorPattern {
+    /// Hour of day (0-23), if time-of-day is relevant.
+    pub hour_of_day: Option<u8>,
+    /// Day of week (0=Monday, 6=Sunday), if day-of-week is relevant.
+    pub day_of_week: Option<u8>,
+    /// Semantic category of the behavior (e.g., "deep_work", "meetings").
+    pub behavior_category: String,
+    /// How often this pattern occurs (event count).
+    pub frequency: u32,
+}
+
+/// User engagement signal in response to Sena's proactive inference.
+#[derive(Debug, Clone)]
+pub enum EngagementSignal {
+    /// User explicitly accepted or acted on the response.
+    Accepted,
+    /// User ignored the response (no interaction within timeout).
+    Ignored,
+    /// User interrupted or dismissed the response.
+    Interrupted,
+    /// User asked a follow-up question.
+    FollowUpQuery,
+}
+
+/// Type of Soul content section in a rich summary.
+#[derive(Debug, Clone)]
+pub enum SoulSectionType {
+    /// Recent event log entries.
+    RecentEvents,
+    /// Distilled identity signals.
+    IdentitySignals,
+    /// Temporal habit patterns.
+    TemporalHabits,
+    /// User preferences.
+    Preferences,
+}
+
+/// A single section of a rich Soul summary.
+#[derive(Debug, Clone)]
+pub struct SoulSection {
+    /// Type of content in this section.
+    pub section_type: SoulSectionType,
+    /// The actual content text.
+    pub content: String,
+    /// Relevance score for prompt prioritization (0.0 to 1.0).
+    pub relevance_score: f32,
+}
+
+/// Rich structured summary of Soul state for prompt composition.
+#[derive(Clone)]
+pub struct RichSoulSummary {
+    /// Ordered sections (highest relevance first).
+    pub sections: Vec<SoulSection>,
+    /// Total token count (approximate).
+    pub token_count: usize,
+    /// Request ID for correlation.
+    pub request_id: u64,
+}
+
+impl std::fmt::Debug for RichSoulSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RichSoulSummary")
+            .field("sections", &format!("{} sections", self.sections.len()))
+            .field("token_count", &self.token_count)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
 /// Request for a transparency view of the Soul state for transparency queries.
 #[derive(Debug, Clone)]
 pub struct SoulReadRequest {
@@ -130,6 +214,26 @@ pub enum SoulEvent {
         /// Failure reason.
         reason: String,
     },
+    /// A distilled identity signal has been extracted.
+    IdentitySignalDistilled(DistilledIdentitySignal),
+    /// A temporal behavior pattern has been detected.
+    TemporalPatternDetected(TemporalBehaviorPattern),
+    /// User engagement signal in response to a proactive inference.
+    PreferenceLearningUpdate {
+        /// ID of the response that triggered this signal.
+        response_id: u64,
+        /// The engagement signal type.
+        signal: EngagementSignal,
+    },
+    /// Request for a rich, structured Soul summary.
+    RichSummaryRequested {
+        /// Token budget for the summary.
+        token_budget: usize,
+        /// Request ID for correlation.
+        request_id: u64,
+    },
+    /// Rich summary is ready.
+    RichSummaryReady(RichSoulSummary),
 }
 
 #[cfg(test)]

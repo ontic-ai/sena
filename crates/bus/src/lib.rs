@@ -45,6 +45,7 @@ mod integration_tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: now,
         }

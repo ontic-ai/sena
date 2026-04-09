@@ -48,89 +48,146 @@ const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Slash-command autocomplete ────────────────────────────────────────────────
 
+/// Maximum input length in characters (Unit 20)
+const MAX_INPUT_LENGTH: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandCategory {
+    Chat,
+    Transparency,
+    Audio,
+    System,
+}
+
+impl CommandCategory {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Transparency => "Transparency",
+            Self::Audio => "Audio",
+            Self::System => "System",
+        }
+    }
+}
+
 struct SlashCommand {
     command: &'static str,
     description: &'static str,
+    category: CommandCategory,
 }
 
 const SLASH_COMMANDS: &[SlashCommand] = &[
+    // Chat category
     SlashCommand {
-        command: "/observation",
-        description: "What are you observing right now?",
-    },
-    SlashCommand {
-        command: "/memory",
-        description: "What do you remember about me?",
-    },
-    SlashCommand {
-        command: "/explanation",
-        description: "Why did you say that?",
-    },
-    SlashCommand {
-        command: "/models",
-        description: "Select which model to use",
+        command: "/help",
+        description: "Show all commands",
+        category: CommandCategory::Chat,
     },
     SlashCommand {
         command: "/copy",
         description: "Copy the last response to clipboard",
+        category: CommandCategory::Chat,
+    },
+    SlashCommand {
+        command: "/models",
+        description: "Select which model to use",
+        category: CommandCategory::Chat,
+    },
+    SlashCommand {
+        command: "/config",
+        description: "Show settings (/config set <key> <value> or /config reload)",
+        category: CommandCategory::Chat,
+    },
+    SlashCommand {
+        command: "/reload",
+        description: "Reload config from disk",
+        category: CommandCategory::System,
+    },
+    // Transparency category
+    SlashCommand {
+        command: "/observation",
+        description: "What are you observing right now?",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/memory",
+        description: "What do you remember about me?",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/explanation",
+        description: "Why did you say that?",
+        category: CommandCategory::Transparency,
     },
     SlashCommand {
         command: "/actors",
         description: "Show actor health status",
+        category: CommandCategory::Transparency,
     },
     SlashCommand {
         command: "/verbose",
         description: "Toggle verbose logging",
+        category: CommandCategory::Transparency,
     },
+    // Audio category
     SlashCommand {
         command: "/voice",
         description: "Toggle voice input in this CLI session",
+        category: CommandCategory::Audio,
     },
     SlashCommand {
         command: "/speech",
         description: "View speech configuration and status",
+        category: CommandCategory::Audio,
     },
     SlashCommand {
         command: "/listen",
         description: "Start/stop continuous live transcription",
+        category: CommandCategory::Audio,
     },
     SlashCommand {
         command: "/microphone",
         description: "List microphones or select one (/microphone select <index>)",
+        category: CommandCategory::Audio,
     },
+    // System category
     SlashCommand {
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
-    },
-    SlashCommand {
-        command: "/config",
-        description: "Show settings (/config set <key> <value> to edit)",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/loops",
         description: "List/toggle background loops",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/status",
         description: "Show system status overview",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/help",
         description: "Show all commands",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/close",
         description: "Close CLI (keep tray/runtime alive)",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/shutdown",
         description: "Shut down Sena completely",
+        category: CommandCategory::System,
     },
 ];
 
 struct SlashDropdown {
     filtered: Vec<usize>,
     selected: usize,
+    /// True if the current prefix matches no commands (Unit 20)
+    no_matches: bool,
 }
 
 #[allow(dead_code)]
@@ -148,9 +205,11 @@ impl SlashDropdown {
             .filter(|(_, c)| c.command.starts_with(lower.as_str()))
             .map(|(i, _)| i)
             .collect();
+        let no_matches = filtered.is_empty() && !prefix.is_empty() && prefix != "/";
         Self {
             filtered,
             selected: 0,
+            no_matches,
         }
     }
 
@@ -163,6 +222,7 @@ impl SlashDropdown {
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.no_matches = self.filtered.is_empty() && !prefix.is_empty() && prefix != "/";
     }
 
     fn prev(&mut self) {
@@ -244,12 +304,12 @@ impl Shell {
     /// Create a new Shell instance.
     fn new(runtime: Arc<Runtime>) -> Self {
         let voice_enabled = runtime.config.speech_enabled;
-        
+
         // Initialize shared state with welcome messages.
         let mut state = crate::tui_state::ShellState::new();
         state.add_welcome_message("Welcome to Sena — local-first ambient AI");
         state.add_welcome_message("Type /help for commands, or chat freely.");
-        
+
         // Seed current_model from runtime config.
         state.current_model = runtime.config.preferred_model.clone();
 
@@ -418,6 +478,11 @@ impl Shell {
 
     /// Render the input area — bordered frame with prompt, status, and key hints.
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        // Calculate input length for char counter (Unit 20)
+        let input_len = self.state.editor.input.chars().count();
+        let threshold = (MAX_INPUT_LENGTH as f64 * 0.8) as usize;
+        let show_char_counter = input_len > threshold;
+
         // Border color reflects current state
         let border_color = if self.state.waiting_for_inference || self.transparency_loading {
             Color::Yellow
@@ -472,11 +537,18 @@ impl Shell {
                 .add_modifier(Modifier::DIM),
         ));
 
+        // Title with optional char counter
+        let title = if show_char_counter {
+            format!(" Input [{}/{}] ", input_len, MAX_INPUT_LENGTH)
+        } else {
+            " Input ".to_string()
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
-                " Input ",
+                title,
                 Style::default()
                     .fg(border_color)
                     .add_modifier(Modifier::BOLD),
@@ -513,7 +585,11 @@ impl Shell {
                 .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         )));
-        let model = self.state.current_model.as_deref().unwrap_or("(selecting...)");
+        let model = self
+            .state
+            .current_model
+            .as_deref()
+            .unwrap_or("(selecting...)");
         let inner_w = area.width.saturating_sub(4) as usize;
         let display_model = if model.len() > inner_w {
             &model[..inner_w]
@@ -620,7 +696,12 @@ impl Shell {
             ("speech", "Speech"),
         ];
         for (loop_name, display_name) in &loop_order {
-            let enabled = self.state.loop_states.get(*loop_name).copied().unwrap_or(true);
+            let enabled = self
+                .state
+                .loop_states
+                .get(*loop_name)
+                .copied()
+                .unwrap_or(true);
             let (dot, color) = if enabled {
                 ("\u{25cf}", Color::Green)
             } else {
@@ -720,6 +801,34 @@ impl Shell {
         let Some(ref dd) = self.state.slash_dropdown else {
             return;
         };
+
+        // Unit 20: Show "no matching commands" when filter is empty
+        if dd.no_matches {
+            let popup_height = 3u16; // border + single line
+            let popup_width = 40u16.min(frame.area().width.saturating_sub(4));
+            let y = input_area.y.saturating_sub(popup_height);
+            let popup_area = ratatui::layout::Rect {
+                x: input_area.x + 2,
+                y,
+                width: popup_width,
+                height: popup_height,
+            };
+            frame.render_widget(Clear, popup_area);
+            let no_match_line = Line::from(Span::styled(
+                "no matching commands",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+            let para = Paragraph::new(no_match_line).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+            frame.render_widget(para, popup_area);
+            return;
+        }
+
         if dd.is_empty() {
             return;
         }
@@ -744,12 +853,20 @@ impl Shell {
             .iter()
             .map(|&i| {
                 let cmd = &SLASH_COMMANDS[i];
+                // Unit 19: Show category label next to command
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         cmd.command,
                         Style::default()
                             .fg(Color::LightMagenta)
                             .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[{}]", cmd.category.label()),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
                     ),
                     Span::raw("  "),
                     Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),
@@ -821,10 +938,10 @@ impl Shell {
             {
                 self.pending_inference_id = None;
                 self.state.waiting_for_inference = false;
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Inference failed: {}", reason),
-                );
+                // Unit 21: Parse and format inference errors to be more actionable
+                let error_message =
+                    format_inference_error(&reason, self.state.current_model.as_deref());
+                self.add_message(MessageRole::Warning, error_message);
             }
             Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
                 if self.verbose || self.state.waiting_for_inference {
@@ -1006,6 +1123,15 @@ impl Shell {
                     format!("Voice transcription failed: {}", reason),
                 );
             }
+            Event::Speech(SpeechEvent::LowConfidenceTranscription { confidence, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "Speech detected but confidence too low ({:.0}%). Please try again.",
+                        confidence * 100.0
+                    ),
+                );
+            }
             Event::Download(DownloadEvent::Started {
                 model_name,
                 total_bytes,
@@ -1172,10 +1298,7 @@ impl Shell {
                     return result;
                 }
                 Err(e) => {
-                    self.add_message(
-                        MessageRole::Warning,
-                        format!("Command failed: {}", e),
-                    );
+                    self.add_message(MessageRole::Warning, format!("Command failed: {}", e));
                     self.verbose = command_state.verbose;
                     self.voice_enabled = command_state.voice_enabled;
                     self.transparency_loading = command_state.transparency_loading;
@@ -1293,7 +1416,10 @@ impl<'a> DispatchTarget<'a> {
     async fn send_event(&mut self, event: Event) -> Result<()> {
         match self {
             Self::LocalBus(bus) => {
-                if matches!(event, Event::Inference(InferenceEvent::InferenceRequested { .. })) {
+                if matches!(
+                    event,
+                    Event::Inference(InferenceEvent::InferenceRequested { .. })
+                ) {
                     bus.send_directed("inference", event)
                         .await
                         .map_err(|e| anyhow::anyhow!("directed send failed: {}", e))
@@ -1303,7 +1429,9 @@ impl<'a> DispatchTarget<'a> {
                         .map_err(|e| anyhow::anyhow!("bus broadcast failed: {}", e))
                 }
             }
-            Self::Noop => Err(anyhow::anyhow!("dispatch target does not support send_event")),
+            Self::Noop => Err(anyhow::anyhow!(
+                "dispatch target does not support send_event"
+            )),
         }
     }
 
@@ -1431,16 +1559,23 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
     let cmd = lower.split_whitespace().next().unwrap_or("");
     match cmd {
         "/observation" | "/obs" => {
-            add_message(deps.state, MessageRole::System, "Querying current observation...");
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Querying current observation...",
+            );
             deps.command_state.transparency_loading = true;
             deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
                 query: TransparencyQuery::CurrentObservation,
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::CurrentObservation,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::CurrentObservation,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
@@ -1452,23 +1587,33 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::UserMemory,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::UserMemory,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
         "/explanation" | "/why" => {
-            add_message(deps.state, MessageRole::System, "Querying last inference...");
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Querying last inference...",
+            );
             deps.command_state.transparency_loading = true;
             deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
                 query: TransparencyQuery::InferenceExplanation,
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::InferenceExplanation,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::InferenceExplanation,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
@@ -1480,7 +1625,11 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         }
         "/verbose" => {
             deps.command_state.verbose = !deps.command_state.verbose;
-            let status = if deps.command_state.verbose { "ON" } else { "OFF" };
+            let status = if deps.command_state.verbose {
+                "ON"
+            } else {
+                "OFF"
+            };
             add_message(
                 deps.state,
                 MessageRole::System,
@@ -1500,8 +1649,16 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             }
 
             deps.command_state.voice_enabled = !deps.command_state.voice_enabled;
-            let state = if deps.command_state.voice_enabled { "ON" } else { "OFF" };
-            add_message(deps.state, MessageRole::System, &format!("VOICE: {}", state));
+            let state = if deps.command_state.voice_enabled {
+                "ON"
+            } else {
+                "OFF"
+            };
+            add_message(
+                deps.state,
+                MessageRole::System,
+                &format!("VOICE: {}", state),
+            );
             add_message(
                 deps.state,
                 MessageRole::System,
@@ -1510,12 +1667,8 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             Ok(DispatchResult::Continue)
         }
         "/speech" => {
-            show_speech_config_shared(
-                deps.runtime,
-                deps.state,
-                deps.command_state.voice_enabled,
-            )
-            .await;
+            show_speech_config_shared(deps.runtime, deps.state, deps.command_state.voice_enabled)
+                .await;
             Ok(DispatchResult::Continue)
         }
         "/listen" => {
@@ -1523,11 +1676,16 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 let session_id = deps.state.listen_session_id;
                 deps.state.listen_mode_active = false;
                 transport
-                    .send(target, Event::Speech(SpeechEvent::ListenModeStopRequested {
-                        session_id,
-                    }))
+                    .send(
+                        target,
+                        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }),
+                    )
                     .await?;
-                add_message(deps.state, MessageRole::System, "🎤 Stopping listen mode...");
+                add_message(
+                    deps.state,
+                    MessageRole::System,
+                    "🎤 Stopping listen mode...",
+                );
             } else {
                 let speech_enabled = load_speech_enabled(deps.runtime).await?;
                 if !speech_enabled {
@@ -1546,9 +1704,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 deps.state.listen_mode_active = true;
                 let session_id = deps.state.listen_session_id;
                 transport
-                    .send(target, Event::Speech(SpeechEvent::ListenModeRequested {
-                        session_id,
-                    }))
+                    .send(
+                        target,
+                        Event::Speech(SpeechEvent::ListenModeRequested { session_id }),
+                    )
                     .await?;
                 add_message(
                     deps.state,
@@ -1568,6 +1727,20 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         }
         "/config" => {
             handle_config_command(line, transport, target, deps.state).await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/reload" => {
+            transport
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+                )
+                .await?;
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Reloading config from disk...",
+            );
             Ok(DispatchResult::Continue)
         }
         "/loops" => {
@@ -1593,7 +1766,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         "/close" | "/quit" | "/exit" | "/q" => Ok(DispatchResult::Close),
         "/shutdown" => {
             transport
-                .send(target, Event::System(bus::events::SystemEvent::ShutdownSignal))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ShutdownSignal),
+                )
                 .await?;
             Ok(DispatchResult::Shutdown)
         }
@@ -1608,34 +1784,63 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
     }
 }
 
-fn add_message(state: &mut crate::tui_state::ShellState<SlashDropdown>, role: MessageRole, text: &str) {
+fn add_message(
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+    role: MessageRole,
+    text: &str,
+) {
     state.messages.push(Message::new(role, text.to_string()));
 }
 
 fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
     match event {
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::CurrentObservation)) => {
-            Ok(IpcPayload::SlashCommand { line: "/observation".to_string() })
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::CurrentObservation,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/observation".to_string(),
+        }),
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::UserMemory,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/memory".to_string(),
+        }),
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::InferenceExplanation,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/explanation".to_string(),
+        }),
+        Event::Speech(SpeechEvent::ListenModeRequested { session_id }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/listen start {}", session_id),
+            })
         }
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::UserMemory)) => {
-            Ok(IpcPayload::SlashCommand { line: "/memory".to_string() })
+        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/listen stop {}", session_id),
+            })
         }
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::InferenceExplanation)) => {
-            Ok(IpcPayload::SlashCommand { line: "/explanation".to_string() })
+        Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/config set {} {}", key, value),
+            })
         }
-        Event::Speech(SpeechEvent::ListenModeRequested { session_id }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/listen start {}", session_id),
-        }),
-        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/listen stop {}", session_id),
-        }),
-        Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/config set {} {}", key, value),
-        }),
-        Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/loops {} {}", loop_name, if *enabled { "on" } else { "off" }),
-        }),
-        Event::System(bus::events::SystemEvent::ShutdownSignal) => Ok(IpcPayload::ShutdownRequested),
+        Event::System(bus::events::SystemEvent::ConfigReloadRequested) => {
+            Ok(IpcPayload::SlashCommand {
+                line: "/config reload".to_string(),
+            })
+        }
+        Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!(
+                    "/loops {} {}",
+                    loop_name,
+                    if *enabled { "on" } else { "off" }
+                ),
+            })
+        }
+        Event::System(bus::events::SystemEvent::ShutdownSignal) => {
+            Ok(IpcPayload::ShutdownRequested)
+        }
         _ => Err(anyhow::anyhow!("event cannot be sent over IPC target")),
     }
 }
@@ -1651,7 +1856,8 @@ async fn current_models_dir(runtime: Option<&Runtime>) -> Result<PathBuf> {
         }
     }
 
-    runtime::ollama_models_dir().map_err(|e| anyhow::anyhow!("Could not resolve models directory: {}", e))
+    runtime::ollama_models_dir()
+        .map_err(|e| anyhow::anyhow!("Could not resolve models directory: {}", e))
 }
 
 async fn load_speech_enabled(runtime: Option<&Runtime>) -> Result<bool> {
@@ -1707,7 +1913,10 @@ async fn show_speech_config_shared(
     add_message(
         state,
         MessageRole::System,
-        &format!("voice_always_listening    {}", config.voice_always_listening),
+        &format!(
+            "voice_always_listening    {}",
+            config.voice_always_listening
+        ),
     );
     add_message(
         state,
@@ -1730,7 +1939,10 @@ async fn show_speech_config_shared(
     add_message(
         state,
         MessageRole::System,
-        &format!("voice_session_active      {}", if voice_enabled { "yes" } else { "no" }),
+        &format!(
+            "voice_session_active      {}",
+            if voice_enabled { "yes" } else { "no" }
+        ),
     );
 }
 
@@ -1762,7 +1974,11 @@ async fn show_screenshot_status_shared(
         MessageRole::System,
         &format!(
             "Screenshot capture: {} | Platform: {} | Active model: {} | Vision capable: {}",
-            if capture_enabled { "enabled" } else { "disabled" },
+            if capture_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
             platform_support,
             active_model,
             vision_status
@@ -1789,12 +2005,19 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             .map_err(|_| anyhow::anyhow!("Usage: /microphone select <index>"))?;
         let devices = runtime::list_input_devices();
         if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
-            let value = if idx == 0 { String::new() } else { name.clone() };
+            let value = if idx == 0 {
+                String::new()
+            } else {
+                name.clone()
+            };
             transport
-                .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
-                    key: "microphone_device".to_string(),
-                    value,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                        key: "microphone_device".to_string(),
+                        value,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1809,7 +2032,10 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             add_message(
                 state,
                 MessageRole::Warning,
-                &format!("No device at index {}. Run /microphone to list devices.", idx),
+                &format!(
+                    "No device at index {}. Run /microphone to list devices.",
+                    idx
+                ),
             );
         }
     } else {
@@ -1819,7 +2045,11 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             add_message(state, MessageRole::Warning, "No input devices found.");
         } else {
             for (idx, name) in &devices {
-                add_message(state, MessageRole::System, &format!("  [{}]  {}", idx, name));
+                add_message(
+                    state,
+                    MessageRole::System,
+                    &format!("  [{}]  {}", idx, name),
+                );
             }
             add_message(
                 state,
@@ -1846,16 +2076,27 @@ async fn handle_config_command<T: MessageTransport + ?Sized>(
             String::new()
         };
         transport
-            .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
-                key: key.to_string(),
-                value: value.clone(),
-            }))
+            .send(
+                target,
+                Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                    key: key.to_string(),
+                    value: value.clone(),
+                }),
+            )
             .await?;
         add_message(
             state,
             MessageRole::System,
             &format!("Setting {} = {}...", key, value),
         );
+    } else if parts.get(1) == Some(&"reload") {
+        transport
+            .send(
+                target,
+                Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+            )
+            .await?;
+        add_message(state, MessageRole::System, "Reloading config from disk...");
     } else {
         let config_path = runtime::config::config_path()
             .map(|p| p.display().to_string())
@@ -1863,7 +2104,11 @@ async fn handle_config_command<T: MessageTransport + ?Sized>(
         let config = runtime::config::load_or_create_config().await?;
 
         add_message(state, MessageRole::System, "━━  Configuration");
-        add_message(state, MessageRole::System, &format!("Config file: {}", config_path));
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("Config file: {}", config_path),
+        );
         match toml::to_string_pretty(&config) {
             Ok(toml_str) => {
                 for line in toml_str.lines() {
@@ -1904,17 +2149,24 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
                 add_message(
                     state,
                     MessageRole::System,
-                    &format!("  {} — {}", label, if enabled { "enabled" } else { "disabled" }),
+                    &format!(
+                        "  {} — {}",
+                        label,
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
                 );
             }
         }
         ["/loops", name] => {
             let enabled = !state.loop_states.get(*name).copied().unwrap_or(true);
             transport
-                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
-                    loop_name: (*name).to_string(),
-                    enabled,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::LoopControlRequested {
+                        loop_name: (*name).to_string(),
+                        enabled,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1936,10 +2188,13 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
                 }
             };
             transport
-                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
-                    loop_name: (*name).to_string(),
-                    enabled,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::LoopControlRequested {
+                        loop_name: (*name).to_string(),
+                        enabled,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1961,33 +2216,65 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
 }
 
 fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
-    for line in [
-        "━━  Commands",
-        "/observation or /obs   What are you observing right now?",
-        "/memory or /mem        What do you remember about me?",
-        "/explanation or /why   Why did you say that?",
-        "/models                Select which model to use",
-        "/voice                 Toggle voice input in this CLI session",
-        "/speech                View speech configuration and status",
-        "/listen                Start/stop continuous live transcription",
-        "/microphone            List microphones or select one (/microphone select <index>)",
-        "/loops                 List all background loops and their status",
-        "/loops <name>          Toggle a loop on/off",
-        "/loops <name> on|off   Explicitly enable or disable a loop",
-        "/status                Show system status overview",
-        "/help                  Show this message",
-        "/close or /quit        Close the CLI session",
-        "/shutdown              Shut down Sena completely",
-        "/copy                  Copy last response to clipboard",
+    add_message(state, MessageRole::System, "━━  Commands");
+
+    for category in [
+        CommandCategory::Chat,
+        CommandCategory::Transparency,
+        CommandCategory::Audio,
+        CommandCategory::System,
     ] {
-        add_message(state, MessageRole::System, line);
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("{}:", category.label()),
+        );
+
+        for cmd in SLASH_COMMANDS.iter().filter(|cmd| cmd.category == category) {
+            add_message(
+                state,
+                MessageRole::System,
+                &format!("  {:<20} {}", cmd.command, cmd.description),
+            );
+        }
+
+        if category == CommandCategory::Transparency {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /observation or /obs  Alias for /observation",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /memory or /mem       Alias for /memory",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /explanation or /why  Alias for /explanation",
+            );
+        }
+
+        if category == CommandCategory::System {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /close or /quit       Alias to close the CLI session",
+            );
+        }
+
+        add_message(state, MessageRole::System, "");
     }
 }
 
 fn show_actors_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
     add_message(state, MessageRole::System, "━━  Actor Status");
     for name in ["Platform", "Inference", "CTP", "Memory", "Soul"] {
-        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let status = state
+            .actor_health
+            .get(name)
+            .unwrap_or(&ActorStatus::Starting);
         let text = match status {
             ActorStatus::Ready => "Ready".to_string(),
             ActorStatus::Starting => "Starting".to_string(),
@@ -2124,6 +2411,33 @@ fn is_vision_capable_model(name: &str) -> bool {
         || n.contains("moondream")
         || n.contains("idefics")
         || n.contains("cogvlm")
+}
+
+/// Unit 21: Parse and format inference errors to be more actionable
+fn format_inference_error(reason: &str, model_name: Option<&str>) -> String {
+    let lower = reason.to_lowercase();
+
+    if lower.contains("failed to load model") || lower.contains("no model file") {
+        if let Some(name) = model_name {
+            format!(
+                "Could not load model '{}'. Is the model file accessible? Check that the path is correct and the file exists.",
+                name
+            )
+        } else {
+            "Failed to load the requested model. The model file may be missing or inaccessible."
+                .to_string()
+        }
+    } else if lower.contains("no model available") || lower.contains("no model loaded") {
+        "No AI model is loaded. Use /models to select a model first.".to_string()
+    } else if lower.contains("out of memory") || lower.contains("oom") {
+        "Inference failed due to insufficient memory. Try a smaller model or reduce context size."
+            .to_string()
+    } else if lower.contains("context length exceeded") || lower.contains("context too large") {
+        "Input is too long for this model's context window. Try shorter input or use a model with larger context.".to_string()
+    } else {
+        // Generic error with prefix for clarity
+        format!("[inference error] {}", reason)
+    }
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
@@ -2308,7 +2622,9 @@ fn transparency_timeout_message(query: &TransparencyQuery) -> String {
 #[allow(dead_code)]
 fn verbose_format(ev: &Event) -> Option<String> {
     match ev {
-        Event::CTP(bus::events::CTPEvent::ThoughtEventTriggered(_)) => {
+        Event::CTP(ctp_event)
+            if matches!(**ctp_event, bus::events::CTPEvent::ThoughtEventTriggered(_)) =>
+        {
             Some("[verbose] CTP: thought triggered".to_string())
         }
         Event::Soul(bus::events::SoulEvent::EventLogged(e)) => {
@@ -2368,7 +2684,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     let mut state = crate::tui_state::ShellState::new();
     state.add_welcome_message("Connected to Sena daemon — local-first ambient AI");
     state.add_welcome_message("Type /help for commands, or chat freely.");
-    
+
     // Seed current_model from SessionReady handshake.
     state.current_model = initial_model;
 
@@ -2394,7 +2710,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 }
 
 enum ShellMode {
-    Local { runtime: Arc<Runtime>, shell: Shell },
+    Local {
+        runtime: Arc<Runtime>,
+        shell: Shell,
+    },
     Ipc {
         state: crate::tui_state::ShellState<SlashDropdown>,
         command_state: CommandRuntimeState,
@@ -2476,7 +2795,9 @@ impl ShellMode {
                         }
                     }
                 } else {
-                    state.messages.push(Message::new(MessageRole::User, line.to_string()));
+                    state
+                        .messages
+                        .push(Message::new(MessageRole::User, line.to_string()));
                     let request_id = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
@@ -2507,7 +2828,10 @@ impl ShellMode {
         match self {
             Self::Local { shell, .. } => {
                 if let DisplayMessage::BusEvent(event) = message {
-                    if matches!(*event, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
+                    if matches!(
+                        *event,
+                        Event::System(bus::events::SystemEvent::ShutdownSignal)
+                    ) {
                         tracing::info!("cli: ShutdownSignal received on bus — exiting shell");
                         return Some(ShellExitReason::Shutdown);
                     }
@@ -2545,9 +2869,10 @@ impl ShellMode {
                         IpcPayload::Pong | IpcPayload::Ack { .. } => {}
                         IpcPayload::Error { reason, .. } => {
                             state.waiting_for_inference = false;
-                            state
-                                .messages
-                                .push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                            state.messages.push(Message::new(
+                                MessageRole::Warning,
+                                format!("Error: {}", reason),
+                            ));
                         }
                         IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
                             state.loop_states.insert(loop_name, enabled);
@@ -2595,7 +2920,10 @@ impl ShellMode {
                 config.preferred_model = Some(model_name.clone());
                 match runtime::save_config(&config).await {
                     Ok(_) => {
-                        shell.add_message(MessageRole::System, format!("Selected model: {}", model_name));
+                        shell.add_message(
+                            MessageRole::System,
+                            format!("Selected model: {}", model_name),
+                        );
                         shell.add_message(
                             MessageRole::System,
                             "Model change will take effect after restart.".to_string(),
@@ -2610,6 +2938,13 @@ impl ShellMode {
                 }
             }
             Self::Ipc { state, .. } => {
+                // Unit 20: Add "Loading model..." indicator
+                add_message(
+                    state,
+                    MessageRole::System,
+                    &format!("Loading model: {}...", model_name),
+                );
+
                 let event = Event::System(bus::events::SystemEvent::ConfigSetRequested {
                     key: "preferred_model".to_string(),
                     value: model_name.clone(),
@@ -2621,14 +2956,7 @@ impl ShellMode {
                         &format!("Failed to change model: {}", e),
                     );
                 } else {
-                    add_message(
-                        state,
-                        MessageRole::System,
-                        &format!(
-                            "Selected model: {} — change takes effect after daemon restart.",
-                            model_name
-                        ),
-                    );
+                    // Success message will be shown when ModelLoaded event arrives
                     state.current_model = Some(model_name);
                 }
             }
@@ -2653,7 +2981,11 @@ async fn run_shell<T: MessageTransport>(
 
     'main: loop {
         if let Err(e) = terminal.draw(|f| mode.render(f)) {
-            add_message(mode.state_mut(), MessageRole::Warning, &format!("Display error: {}", e));
+            add_message(
+                mode.state_mut(),
+                MessageRole::Warning,
+                &format!("Display error: {}", e),
+            );
         }
 
         if let Some(first_press) = mode.state().ctrl_c_first_press {
@@ -2812,12 +3144,14 @@ async fn run_shell<T: MessageTransport>(
                                         let current_input = mode.state().editor.input.clone();
                                         if let Some(dd) = &mut mode.state_mut().slash_dropdown {
                                             dd.update(&current_input);
-                                            if dd.is_empty() {
+                                            // Unit 20: Keep dropdown open to show "no matches" if needed
+                                            if dd.is_empty() && !dd.no_matches {
                                                 mode.state_mut().slash_dropdown = None;
                                             }
                                         } else {
                                             let dd = SlashDropdown::from_prefix(&current_input);
-                                            if !dd.is_empty() {
+                                            // Unit 20: Show dropdown even if empty to display "no matches"
+                                            if !dd.is_empty() || dd.no_matches {
                                                 mode.state_mut().slash_dropdown = Some(dd);
                                             }
                                         }
@@ -2845,23 +3179,30 @@ async fn run_shell<T: MessageTransport>(
                                     if !mods.contains(KeyModifiers::CONTROL)
                                         && !mods.contains(KeyModifiers::ALT)
                                         && mode.state().model_popup.is_none() => {
-                                    mode.state_mut().editor.input.push(c);
-                                    mode.state_mut().ctrl_c_first_press = None;
-                                    if mode.state().editor.input.starts_with('/') {
-                                        let current_input = mode.state().editor.input.clone();
-                                        if let Some(dd) = &mut mode.state_mut().slash_dropdown {
-                                            dd.update(&current_input);
-                                            if dd.is_empty() {
-                                                mode.state_mut().slash_dropdown = None;
+                                    // Unit 20: Enforce input length limit
+                                    if mode.state().editor.input.len() >= MAX_INPUT_LENGTH {
+                                        // Reject character — input is at max length
+                                    } else {
+                                        mode.state_mut().editor.input.push(c);
+                                        mode.state_mut().ctrl_c_first_press = None;
+                                        if mode.state().editor.input.starts_with('/') {
+                                            let current_input = mode.state().editor.input.clone();
+                                            if let Some(dd) = &mut mode.state_mut().slash_dropdown {
+                                                dd.update(&current_input);
+                                                // Unit 20: Keep dropdown open to show "no matches" if needed
+                                                if dd.is_empty() && !dd.no_matches {
+                                                    mode.state_mut().slash_dropdown = None;
+                                                }
+                                            } else {
+                                                let dd = SlashDropdown::from_prefix(&current_input);
+                                                // Unit 20: Show dropdown even if empty to display "no matches"
+                                                if !dd.is_empty() || dd.no_matches {
+                                                    mode.state_mut().slash_dropdown = Some(dd);
+                                                }
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&current_input);
-                                            if !dd.is_empty() {
-                                                mode.state_mut().slash_dropdown = Some(dd);
-                                            }
+                                            mode.state_mut().slash_dropdown = None;
                                         }
-                                    } else {
-                                        mode.state_mut().slash_dropdown = None;
                                     }
                                 }
                                 _ => {}
@@ -2897,10 +3238,7 @@ async fn run_shell<T: MessageTransport>(
 }
 
 /// Simplified TUI rendering for IPC mode.
-fn render_ipc_tui(
-    frame: &mut ratatui::Frame,
-    state: &crate::tui_state::ShellState<SlashDropdown>,
-) {
+fn render_ipc_tui(frame: &mut ratatui::Frame, state: &crate::tui_state::ShellState<SlashDropdown>) {
     // ── Vertical layout: header / body / input ────────────────────────────────
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3041,11 +3379,7 @@ fn render_ipc_tui(
     frame.render_widget(paragraph, body_chunks[0]);
 
     // ── Sidebar ───────────────────────────────────────────────────────────────────
-    render_ipc_sidebar(
-        frame,
-        body_chunks[1],
-        state,
-    );
+    render_ipc_sidebar(frame, body_chunks[1], state);
 
     // Input area
     let prompt_line = Line::from(vec![
@@ -3195,7 +3529,10 @@ fn render_ipc_sidebar(
     )));
     let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
     for name in &actor_names {
-        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let status = state
+            .actor_health
+            .get(name)
+            .unwrap_or(&ActorStatus::Starting);
         let (dot, color, label) = match status {
             ActorStatus::Ready => ("\u{25cf}", Color::Green, "Ready"),
             ActorStatus::Starting => ("\u{25cb}", Color::Yellow, "Starting"),
@@ -3255,6 +3592,33 @@ fn render_slash_dropdown_overlay(
 ) {
     use ratatui::widgets::Clear;
 
+    // Unit 20: Show "no matching commands" when filter is empty
+    if dd.no_matches {
+        let popup_height = 3u16; // border + single line
+        let popup_width = 40u16.min(frame.area().width.saturating_sub(4));
+        let y = input_area.y.saturating_sub(popup_height);
+        let popup_area = ratatui::layout::Rect {
+            x: input_area.x + 2,
+            y,
+            width: popup_width,
+            height: popup_height,
+        };
+        frame.render_widget(Clear, popup_area);
+        let no_match_line = Line::from(Span::styled(
+            "no matching commands",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+        let para = Paragraph::new(no_match_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(para, popup_area);
+        return;
+    }
+
     let count = dd.filtered.len() as u16;
     let popup_height = count.min(8) + 2; // +2 for border
     let popup_width = 62u16.min(frame.area().width.saturating_sub(4));
@@ -3275,12 +3639,20 @@ fn render_slash_dropdown_overlay(
         .iter()
         .map(|&i| {
             let cmd = &SLASH_COMMANDS[i];
+            // Unit 19: Show category label next to command
             ListItem::new(Line::from(vec![
                 Span::styled(
                     cmd.command,
                     Style::default()
                         .fg(Color::LightMagenta)
                         .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("[{}]", cmd.category.label()),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
                 ),
                 Span::raw("  "),
                 Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),

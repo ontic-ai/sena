@@ -1,5 +1,6 @@
 use crate::error::MemoryError;
 use crypto::MasterKey;
+use crypto::working_file;
 use std::path::{Path, PathBuf};
 
 /// Manages encrypted storage for ech0's persistent files.
@@ -37,9 +38,7 @@ impl EncryptedStore {
         std::fs::create_dir_all(encrypted_dir)?;
 
         // Clean up any stale working directory from a previous crash
-        if working_dir.exists() {
-            std::fs::remove_dir_all(&working_dir)?;
-        }
+        working_file::clean_stale_working(&working_dir)?;
         std::fs::create_dir_all(&working_dir)?;
 
         // Decrypt all .enc files to the working directory
@@ -48,7 +47,6 @@ impl EncryptedStore {
             let path = entry.path();
 
             if path.extension().and_then(|e| e.to_str()) == Some("enc") {
-                let plaintext = crypto::file::read_encrypted_file(&path, master_key)?;
                 let stem = path
                     .file_stem()
                     .ok_or_else(|| MemoryError::Store("invalid encrypted filename".to_string()))?;
@@ -61,8 +59,8 @@ impl EncryptedStore {
                     ));
                 }
 
-                let working_file = working_dir.join(stem);
-                std::fs::write(&working_file, &plaintext)?;
+                let working_file_path = working_dir.join(stem);
+                working_file::decrypt_to_working(&path, &working_file_path, master_key)?;
             }
         }
 
@@ -94,10 +92,7 @@ impl EncryptedStore {
     pub fn close(mut self) -> Result<(), MemoryError> {
         self.encrypt_working_files()?;
 
-        // Give Windows a moment to release file locks before removing directory
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        let _ = std::fs::remove_dir_all(&self.working_dir);
+        working_file::cleanup_working(&self.working_dir);
         self.closed = true;
         Ok(())
     }
@@ -124,8 +119,7 @@ impl EncryptedStore {
             enc_name.push(".enc");
             let enc_path = self.encrypted_dir.join(enc_name);
 
-            let plaintext = std::fs::read(&path)?;
-            crypto::file::write_encrypted_file(&enc_path, &plaintext, &self.master_key)?;
+            working_file::encrypt_from_working(&path, &enc_path, &self.master_key)?;
         }
         Ok(())
     }
@@ -139,7 +133,7 @@ impl Drop for EncryptedStore {
 
         // Best-effort encrypt on drop if close() wasn't called
         let _ = self.encrypt_working_files();
-        let _ = std::fs::remove_dir_all(&self.working_dir);
+        working_file::cleanup_working(&self.working_dir);
     }
 }
 

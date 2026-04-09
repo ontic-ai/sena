@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod discovery;
 pub mod error;
+mod identity_signals;
 pub mod queue;
 pub mod registry;
 mod transparency_query;

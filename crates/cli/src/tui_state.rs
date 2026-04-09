@@ -230,10 +230,8 @@ impl<T> ShellState<T> {
 
     /// Add a welcome message to the conversation log.
     pub fn add_welcome_message(&mut self, text: &str) {
-        self.messages.push(Message::new(
-            MessageRole::System,
-            text.to_string(),
-        ));
+        self.messages
+            .push(Message::new(MessageRole::System, text.to_string()));
     }
 }
 
