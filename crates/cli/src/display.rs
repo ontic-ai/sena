@@ -86,18 +86,45 @@ pub fn prompt_inline(text: &str) {
 // ── Compound helpers ──────────────────────────────────────────────────────────
 
 /// Print the /help command reference.
+/// Unit 19: Group commands by category for better navigation.
 pub fn help() {
     section("Commands");
+
+    // Chat category
+    println!("  {DIM}Chat & Configuration:{RESET}");
+    println!("  {BOLD}{CYAN}/help{RESET}                 Show this message");
+    println!("  {BOLD}{CYAN}/copy{RESET}                 Copy last response to clipboard");
+    println!("  {BOLD}{CYAN}/models{RESET}               Select which model to use");
+    println!("  {BOLD}{CYAN}/config{RESET}               Show settings (/config set <key> <value> to edit)");
+    println!();
+
+    // Transparency category
+    println!("  {DIM}Transparency & Insight:{RESET}");
     println!("  {BOLD}{CYAN}/observation{RESET}  {DIM}or{RESET} /obs   What are you observing right now?");
     println!(
         "  {BOLD}{CYAN}/memory{RESET}       {DIM}or{RESET} /mem   What do you remember about me?"
     );
     println!("  {BOLD}{CYAN}/explanation{RESET}  {DIM}or{RESET} /why   Why did you say that?");
-    println!("  {BOLD}{CYAN}/models{RESET}               Select which Ollama model to use");
-    println!("  {BOLD}{CYAN}/copy{RESET}                 Copy last response to clipboard");
-    println!("  {BOLD}{CYAN}/help{RESET}                 Show this message");
+    println!("  {BOLD}{CYAN}/actors{RESET}               Show actor health status");
+    println!("  {BOLD}{CYAN}/verbose{RESET}              Toggle verbose logging");
+    println!();
+
+    // Audio category
+    println!("  {DIM}Voice & Audio:{RESET}");
+    println!("  {BOLD}{CYAN}/voice{RESET}                Toggle voice input in this session");
+    println!("  {BOLD}{CYAN}/speech{RESET}               View speech configuration and status");
+    println!("  {BOLD}{CYAN}/listen{RESET}               Start/stop continuous live transcription");
+    println!("  {BOLD}{CYAN}/microphone{RESET}           List/select microphone device");
+    println!();
+
+    // System category
+    println!("  {DIM}System Control:{RESET}");
+    println!("  {BOLD}{CYAN}/screenshot{RESET}           Show screenshot + vision model status");
+    println!("  {BOLD}{CYAN}/loops{RESET}                List/toggle background processing loops");
     println!("  {BOLD}{CYAN}/close{RESET} {DIM}or{RESET} /quit  Close CLI session");
     println!("  {BOLD}{CYAN}/shutdown{RESET}             Shut down Sena completely");
+    println!();
+
     println!("  {DIM}Shortcut:{RESET} Ctrl+Y {DIM}or{RESET} Ctrl+Shift+C to copy last response");
     println!();
 }
