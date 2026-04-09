@@ -1,5 +1,6 @@
 use crate::error::SoulError;
 use crypto::MasterKey;
+use crypto::working_file;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -35,14 +36,11 @@ impl EncryptedDb {
 
         // If a stale working file exists from a previous crash, remove it.
         // We always trust the encrypted file as the source of truth.
-        if working_path.exists() {
-            std::fs::remove_file(&working_path)?;
-        }
+        working_file::clean_stale_working(&working_path)?;
 
         let db = if encrypted_path.exists() {
             // Decrypt existing database to working path
-            let plaintext = crypto::file::read_encrypted_file(encrypted_path, master_key)?;
-            std::fs::write(&working_path, &plaintext)?;
+            working_file::decrypt_to_working(encrypted_path, &working_path, master_key)?;
 
             // Try to open the database
             match redb::Database::open(&working_path) {
@@ -114,9 +112,12 @@ impl EncryptedDb {
         // Close the database to release the file handle (mmap)
         self.db.take();
 
-        // Read the working file and encrypt to persistent location
-        let plaintext = std::fs::read(&self.working_path)?;
-        crypto::file::write_encrypted_file(&self.encrypted_path, &plaintext, &self.master_key)?;
+        // Encrypt working file to persistent location
+        working_file::encrypt_from_working(
+            &self.working_path,
+            &self.encrypted_path,
+            &self.master_key,
+        )?;
 
         // Reopen the database for continued use
         self.db = Some(redb::Database::open(&self.working_path)?);
@@ -131,13 +132,14 @@ impl EncryptedDb {
         // Drop the database to release the file handle and all locks
         drop(self.db.take());
 
-        // On Windows, file locks may not release immediately. Give a brief moment
-        // for the OS to release the lock before we try to read the file.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        working_file::wait_for_file_lock_release();
 
-        // Read and encrypt to persistent location
-        let plaintext = std::fs::read(&self.working_path)?;
-        crypto::file::write_encrypted_file(&self.encrypted_path, &plaintext, &self.master_key)?;
+        // Encrypt working file to persistent location
+        working_file::encrypt_from_working(
+            &self.working_path,
+            &self.encrypted_path,
+            &self.master_key,
+        )?;
 
         // Clean up working file
         let _ = std::fs::remove_file(&self.working_path);
@@ -163,13 +165,11 @@ impl Drop for EncryptedDb {
 
         // Database wasn't properly closed via close() — best-effort encrypt.
         self.db.take();
-        if let Ok(plaintext) = std::fs::read(&self.working_path) {
-            let _ = crypto::file::write_encrypted_file(
-                &self.encrypted_path,
-                &plaintext,
-                &self.master_key,
-            );
-        }
+        let _ = working_file::encrypt_from_working(
+            &self.working_path,
+            &self.encrypted_path,
+            &self.master_key,
+        );
         let _ = std::fs::remove_file(&self.working_path);
     }
 }
