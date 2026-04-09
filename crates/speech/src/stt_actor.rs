@@ -15,6 +15,18 @@ use crate::{AudioBuffer, SpeechError, SttBackend};
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BUFFER_DURATION_SECS: f32 = 3.0;
 
+/// Audio chunk duration for Whisper fake-streaming /listen sessions (1s for responsiveness).
+const LISTEN_WHISPER_BUFFER_DURATION_SECS: f32 = 1.0;
+
+/// Maximum rolling audio retained for listen-mode interim transcriptions (6 seconds at 16kHz).
+const LISTEN_ROLLING_MAX_SAMPLES: usize = 16_000 * 6;
+
+/// Minimum audio accumulated before first interim transcription attempt (2s at 16kHz).
+const LISTEN_INTERIM_MIN_SAMPLES: usize = 16_000 * 2;
+
+/// How often to emit interim (non-final) transcriptions during Whisper listen mode.
+const LISTEN_INTERIM_INTERVAL: Duration = Duration::from_millis(1500);
+
 /// STT Actor - handles speech-to-text transcription.
 ///
 /// Pipeline:
@@ -53,6 +65,10 @@ pub struct SttActor {
     microphone_device: Option<String>,
     /// Whether the speech loop is enabled (pause/resume via LoopControlRequested).
     speech_loop_enabled: bool,
+    /// Rolling audio accumulator for Whisper fake-streaming interim transcriptions.
+    listen_rolling_samples: Vec<f32>,
+    /// Time of last interim Whisper transcription in listen mode.
+    listen_last_interim: Option<std::time::Instant>,
 }
 
 impl SttActor {
@@ -91,6 +107,8 @@ impl SttActor {
             listen_mode_active: false,
             microphone_device: None,
             speech_loop_enabled: true,
+            listen_rolling_samples: Vec::new(),
+            listen_last_interim: None,
         }
     }
 
@@ -270,33 +288,77 @@ impl SttActor {
 
     /// Handle an audio buffer for continuous listen mode.
     ///
-    /// Emits `ListenModeTranscription` with `is_final=false` for low-energy buffers and
-    /// `is_final=true` after silence-threshold silence within the session.
+    /// Implements Whisper fake-streaming via a sliding window:
+    /// - Every 1.5s, runs Whisper on the accumulated rolling audio → emits `is_final=false`
+    /// - When VAD detects end-of-speech, runs Whisper once more → emits `is_final=true`
     async fn handle_listen_audio_buffer(
         &mut self,
         buffer: AudioBuffer,
         session_id: u64,
         bus: &Arc<EventBus>,
     ) {
-        if let Some(ready_buffer) =
-            self.listen_mode_vad
-                .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+        // Accumulate samples in rolling buffer (max 6s at 16kHz).
+        self.listen_rolling_samples
+            .extend_from_slice(&buffer.samples);
+        if self.listen_rolling_samples.len() > LISTEN_ROLLING_MAX_SAMPLES {
+            let excess = self.listen_rolling_samples.len() - LISTEN_ROLLING_MAX_SAMPLES;
+            self.listen_rolling_samples.drain(..excess);
+        }
+
+        // Emit interim (non-final) transcription every LISTEN_INTERIM_INTERVAL
+        // once at least 2s of audio has accumulated.
+        let enough_audio = self.listen_rolling_samples.len() >= LISTEN_INTERIM_MIN_SAMPLES;
+        let interval_elapsed = self
+            .listen_last_interim
+            .map(|t| t.elapsed() >= LISTEN_INTERIM_INTERVAL)
+            .unwrap_or(true);
+
+        if enough_audio && interval_elapsed {
+            let interim_buf = AudioBuffer {
+                samples: self.listen_rolling_samples.clone(),
+                sample_rate: buffer.sample_rate,
+                channels: buffer.channels,
+            };
+            self.listen_last_interim = Some(std::time::Instant::now());
+            match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(interim_buf)).await {
+                Ok(Ok(result)) if !result.text.trim().is_empty() => {
+                    let _ = bus
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                            text: result.text,
+                            is_final: false,
+                            confidence: result.confidence,
+                            session_id,
+                        }))
+                        .await;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("listen[interim]: error: {}", e),
+                Err(_) => tracing::warn!("listen[interim]: timeout"),
+            }
+        }
+
+        // VAD for final speech-end detection.
+        if let Some(ready_buffer) = self
+            .listen_mode_vad
+            .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
         {
             match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(ready_buffer)).await {
-                Ok(Ok(result)) => {
-                    if !result.text.trim().is_empty() {
-                        let _ = bus
-                            .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                                text: result.text,
-                                is_final: true,
-                                confidence: result.confidence,
-                                session_id,
-                            }))
-                            .await;
-                    }
+                Ok(Ok(result)) if !result.text.trim().is_empty() => {
+                    let _ = bus
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                            text: result.text,
+                            is_final: true,
+                            confidence: result.confidence,
+                            session_id,
+                        }))
+                        .await;
+                    // Reset rolling state for next utterance.
+                    self.listen_rolling_samples.clear();
+                    self.listen_last_interim = None;
                 }
-                Ok(Err(e)) => tracing::warn!("listen: transcription error: {}", e),
-                Err(_) => tracing::warn!("listen: transcription timeout"),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("listen[whisper]: transcription error: {}", e),
+                Err(_) => tracing::warn!("listen[whisper]: transcription timeout"),
             }
         }
     }
@@ -433,7 +495,7 @@ impl Actor for SttActor {
                             }
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
-                                buffer_duration_secs: DEFAULT_BUFFER_DURATION_SECS,
+                                buffer_duration_secs: LISTEN_WHISPER_BUFFER_DURATION_SECS,
                                 // Pass all audio to SilenceDetector - it handles
                                 // voice/silence classification internally.
                                 energy_threshold: 0.0,
@@ -449,9 +511,11 @@ impl Actor for SttActor {
                                     // unintended inference calls.
                                     self.listen_mode_active = true;
                                     self.always_listening_vad.reset();
-                                    // Reset listen mode VAD for a clean session.
+                                    // Reset listen mode VAD and rolling buffer for a clean session.
                                     self.listen_mode_vad.reset();
-                                    tracing::info!("listen: session {} started", session_id);
+                                    self.listen_rolling_samples.clear();
+                                    self.listen_last_interim = None;
+                                    tracing::info!("listen: session {} started (whisper fake-streaming)", session_id);
                                 }
                                 Err(e) => {
                                     tracing::error!("listen: failed to start audio capture: {}", e);
@@ -470,6 +534,8 @@ impl Actor for SttActor {
                                 self.listen_audio_stream = None;
                                 self.listen_mode_vad.reset();
                                 self.listen_mode_active = false;
+                                self.listen_rolling_samples.clear();
+                                self.listen_last_interim = None;
                                 tracing::info!("listen: session {} stopped", session_id);
                                 let _ = bus
                                     .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {

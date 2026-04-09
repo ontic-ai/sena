@@ -1112,7 +1112,7 @@ impl Shell {
                         text,
                         request_id,
                         Priority::Normal,
-                        Some("[voice] "),
+                        Some("[you]: "),
                     )
                     .await;
                 }
@@ -1654,6 +1654,17 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             } else {
                 "OFF"
             };
+            // Broadcast speech loop control to the daemon.
+            transport
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::LoopControlRequested {
+                        loop_name: "speech".to_string(),
+                        enabled: deps.command_state.voice_enabled,
+                    }),
+                )
+                .await
+                .ok();
             add_message(
                 deps.state,
                 MessageRole::System,
