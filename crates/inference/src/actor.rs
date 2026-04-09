@@ -4,16 +4,17 @@ use async_trait::async_trait;
 use bus::events::ctp::{CTPEvent, ContextSnapshot};
 use bus::events::inference::Priority;
 use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
-use bus::events::soul::{SoulSummary, SoulSummaryRequested};
+use bus::events::soul::{IdentitySignalEmitted, SoulSummary, SoulSummaryRequested};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::discovery;
+use crate::identity_signals::extract_identity_signals;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
 use crate::transparency_query::{handle_transparency_query, InferenceState};
@@ -875,6 +876,45 @@ impl InferenceActor {
         parts.join("\n\n")
     }
 
+    fn active_hours_range_utc(now: SystemTime) -> String {
+        let hour = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| ((d.as_secs() / 3600) % 24) as u8)
+            .unwrap_or(0);
+
+        if hour < 6 {
+            "00-05".to_string()
+        } else if hour < 12 {
+            "06-11".to_string()
+        } else if hour < 18 {
+            "12-17".to_string()
+        } else {
+            "18-23".to_string()
+        }
+    }
+
+    async fn emit_identity_signals_from_response(&self, bus: &Arc<EventBus>, response: &str) {
+        let now = SystemTime::now();
+        let mut signals = extract_identity_signals(response);
+        signals.push((
+            "active_hours".to_string(),
+            Self::active_hours_range_utc(now),
+        ));
+
+        for (key, value) in signals {
+            let _ = bus
+                .send_directed(
+                    "soul",
+                    Event::Soul(SoulEvent::IdentitySignalEmitted(IdentitySignalEmitted {
+                        key,
+                        value,
+                        timestamp: now,
+                    })),
+                )
+                .await;
+        }
+    }
+
     /// Process a single inference request with memory context enrichment.
     /// This runs directly in the event loop (not queued) so the actor can handle
     /// Embed/Extract requests from memory while waiting for query responses.
@@ -1019,6 +1059,9 @@ impl InferenceActor {
                     .await;
             }
         }
+
+        // Extract and emit identity signals to soul (M3.5).
+        self.emit_identity_signals_from_response(bus, &result).await;
 
         Ok((result, token_count))
     }
@@ -1227,6 +1270,10 @@ impl InferenceActor {
             working_memory_context: memory_chunks,
             rounds_completed: 1,
         });
+
+        // Extract and emit identity signals to soul (M3.5).
+        self.emit_identity_signals_from_response(bus, &full_text)
+            .await;
 
         Ok((full_text, token_count))
     }
@@ -2647,6 +2694,36 @@ mod tests {
         assert!(memory_pos < history_pos);
         assert!(history_pos < context_pos);
         assert!(context_pos < user_pos);
+    }
+
+    #[test]
+    fn active_hours_range_utc_maps_boundaries() {
+        let sec = |h: u64| h * 3600;
+
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(0))
+            ),
+            "00-05"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(6))
+            ),
+            "06-11"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(12))
+            ),
+            "12-17"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(18))
+            ),
+            "18-23"
+        );
     }
 
     #[test]
