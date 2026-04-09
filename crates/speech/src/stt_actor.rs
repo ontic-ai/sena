@@ -19,7 +19,7 @@ const DEFAULT_BUFFER_DURATION_SECS: f32 = 3.0;
 const LISTEN_WHISPER_BUFFER_DURATION_SECS: f32 = 1.0;
 
 /// Maximum rolling audio retained for listen-mode interim transcriptions (6 seconds at 16kHz).
-const LISTEN_ROLLING_MAX_SAMPLES: usize = 16_000 * 6;
+const LISTEN_ROLLING_MAX_SAMPLES: usize = 16_000 * 3;
 
 /// Minimum audio accumulated before first interim transcription attempt (2s at 16kHz).
 const LISTEN_INTERIM_MIN_SAMPLES: usize = 16_000 * 2;
@@ -306,14 +306,17 @@ impl SttActor {
         }
 
         // Emit interim (non-final) transcription every LISTEN_INTERIM_INTERVAL
-        // once at least 2s of audio has accumulated.
+        // once at least 2s of audio has accumulated AND audio is not silent.
         let enough_audio = self.listen_rolling_samples.len() >= LISTEN_INTERIM_MIN_SAMPLES;
         let interval_elapsed = self
             .listen_last_interim
             .map(|t| t.elapsed() >= LISTEN_INTERIM_INTERVAL)
             .unwrap_or(true);
+        // Gate: skip if rolling buffer is mostly silence (avoids Whisper hallucinations).
+        let rolling_rms = crate::silence_detector::calculate_rms(&self.listen_rolling_samples);
+        let has_speech = rolling_rms > self.stt_energy_threshold;
 
-        if enough_audio && interval_elapsed {
+        if enough_audio && interval_elapsed && has_speech {
             let interim_buf = AudioBuffer {
                 samples: self.listen_rolling_samples.clone(),
                 sample_rate: buffer.sample_rate,
