@@ -593,6 +593,18 @@ async fn dispatch_slash_command(
                         LineStyle::SystemNotice,
                     )]
                 }
+            } else if parts.get(1) == Some(&"reload") {
+                if let Err(e) = bus
+                    .broadcast(Event::System(SystemEvent::ConfigReloadRequested))
+                    .await
+                {
+                    vec![(format!("Config reload failed: {}", e), LineStyle::Error)]
+                } else {
+                    vec![(
+                        "Reloading config from disk...".to_string(),
+                        LineStyle::SystemNotice,
+                    )]
+                }
             } else {
                 match crate::config::load_or_create_config().await {
                     Ok(config) => {
@@ -631,6 +643,19 @@ async fn dispatch_slash_command(
                         vec![(format!("Failed to load config: {}", e), LineStyle::Error)]
                     }
                 }
+            }
+        }
+        "/reload" => {
+            if let Err(e) = bus
+                .broadcast(Event::System(SystemEvent::ConfigReloadRequested))
+                .await
+            {
+                vec![(format!("Config reload failed: {}", e), LineStyle::Error)]
+            } else {
+                vec![(
+                    "Reloading config from disk...".to_string(),
+                    LineStyle::SystemNotice,
+                )]
             }
         }
         "/actors" => {
@@ -797,6 +822,10 @@ async fn dispatch_slash_command(
                 ),
                 (
                     "/config                — Show and edit settings".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/reload                — Reload config from disk".to_string(),
                     LineStyle::Normal,
                 ),
                 (

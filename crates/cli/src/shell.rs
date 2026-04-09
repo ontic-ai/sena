@@ -104,7 +104,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         command: "/config",
-        description: "Show settings (/config set <key> <value> to edit)",
+        description: "Show settings (/config set <key> <value> or /config reload)",
+    },
+    SlashCommand {
+        command: "/reload",
+        description: "Reload config from disk",
     },
     SlashCommand {
         command: "/loops",
@@ -240,12 +244,12 @@ impl Shell {
     /// Create a new Shell instance.
     fn new(runtime: Arc<Runtime>) -> Self {
         let voice_enabled = runtime.config.speech_enabled;
-        
+
         // Initialize shared state with welcome messages.
         let mut state = crate::tui_state::ShellState::new();
         state.add_welcome_message("Welcome to Sena — local-first ambient AI");
         state.add_welcome_message("Type /help for commands, or chat freely.");
-        
+
         // Seed current_model from runtime config.
         state.current_model = runtime.config.preferred_model.clone();
 
@@ -509,7 +513,11 @@ impl Shell {
                 .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         )));
-        let model = self.state.current_model.as_deref().unwrap_or("(selecting...)");
+        let model = self
+            .state
+            .current_model
+            .as_deref()
+            .unwrap_or("(selecting...)");
         let inner_w = area.width.saturating_sub(4) as usize;
         let display_model = if model.len() > inner_w {
             &model[..inner_w]
@@ -616,7 +624,12 @@ impl Shell {
             ("speech", "Speech"),
         ];
         for (loop_name, display_name) in &loop_order {
-            let enabled = self.state.loop_states.get(*loop_name).copied().unwrap_or(true);
+            let enabled = self
+                .state
+                .loop_states
+                .get(*loop_name)
+                .copied()
+                .unwrap_or(true);
             let (dot, color) = if enabled {
                 ("\u{25cf}", Color::Green)
             } else {
@@ -1168,10 +1181,7 @@ impl Shell {
                     return result;
                 }
                 Err(e) => {
-                    self.add_message(
-                        MessageRole::Warning,
-                        format!("Command failed: {}", e),
-                    );
+                    self.add_message(MessageRole::Warning, format!("Command failed: {}", e));
                     self.verbose = command_state.verbose;
                     self.voice_enabled = command_state.voice_enabled;
                     self.transparency_loading = command_state.transparency_loading;
@@ -1289,7 +1299,10 @@ impl<'a> DispatchTarget<'a> {
     async fn send_event(&mut self, event: Event) -> Result<()> {
         match self {
             Self::LocalBus(bus) => {
-                if matches!(event, Event::Inference(InferenceEvent::InferenceRequested { .. })) {
+                if matches!(
+                    event,
+                    Event::Inference(InferenceEvent::InferenceRequested { .. })
+                ) {
                     bus.send_directed("inference", event)
                         .await
                         .map_err(|e| anyhow::anyhow!("directed send failed: {}", e))
@@ -1299,7 +1312,9 @@ impl<'a> DispatchTarget<'a> {
                         .map_err(|e| anyhow::anyhow!("bus broadcast failed: {}", e))
                 }
             }
-            Self::Noop => Err(anyhow::anyhow!("dispatch target does not support send_event")),
+            Self::Noop => Err(anyhow::anyhow!(
+                "dispatch target does not support send_event"
+            )),
         }
     }
 
@@ -1427,16 +1442,23 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
     let cmd = lower.split_whitespace().next().unwrap_or("");
     match cmd {
         "/observation" | "/obs" => {
-            add_message(deps.state, MessageRole::System, "Querying current observation...");
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Querying current observation...",
+            );
             deps.command_state.transparency_loading = true;
             deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
                 query: TransparencyQuery::CurrentObservation,
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::CurrentObservation,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::CurrentObservation,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
@@ -1448,23 +1470,33 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::UserMemory,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::UserMemory,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
         "/explanation" | "/why" => {
-            add_message(deps.state, MessageRole::System, "Querying last inference...");
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Querying last inference...",
+            );
             deps.command_state.transparency_loading = true;
             deps.command_state.pending_transparency = Some(PendingTransparencyQuery {
                 query: TransparencyQuery::InferenceExplanation,
                 started_at: Instant::now(),
             });
             transport
-                .send(target, Event::Transparency(BusTransparencyEvent::QueryRequested(
-                    TransparencyQuery::InferenceExplanation,
-                )))
+                .send(
+                    target,
+                    Event::Transparency(BusTransparencyEvent::QueryRequested(
+                        TransparencyQuery::InferenceExplanation,
+                    )),
+                )
                 .await?;
             Ok(DispatchResult::Continue)
         }
@@ -1476,7 +1508,11 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         }
         "/verbose" => {
             deps.command_state.verbose = !deps.command_state.verbose;
-            let status = if deps.command_state.verbose { "ON" } else { "OFF" };
+            let status = if deps.command_state.verbose {
+                "ON"
+            } else {
+                "OFF"
+            };
             add_message(
                 deps.state,
                 MessageRole::System,
@@ -1496,8 +1532,16 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             }
 
             deps.command_state.voice_enabled = !deps.command_state.voice_enabled;
-            let state = if deps.command_state.voice_enabled { "ON" } else { "OFF" };
-            add_message(deps.state, MessageRole::System, &format!("VOICE: {}", state));
+            let state = if deps.command_state.voice_enabled {
+                "ON"
+            } else {
+                "OFF"
+            };
+            add_message(
+                deps.state,
+                MessageRole::System,
+                &format!("VOICE: {}", state),
+            );
             add_message(
                 deps.state,
                 MessageRole::System,
@@ -1506,12 +1550,8 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             Ok(DispatchResult::Continue)
         }
         "/speech" => {
-            show_speech_config_shared(
-                deps.runtime,
-                deps.state,
-                deps.command_state.voice_enabled,
-            )
-            .await;
+            show_speech_config_shared(deps.runtime, deps.state, deps.command_state.voice_enabled)
+                .await;
             Ok(DispatchResult::Continue)
         }
         "/listen" => {
@@ -1519,11 +1559,16 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 let session_id = deps.state.listen_session_id;
                 deps.state.listen_mode_active = false;
                 transport
-                    .send(target, Event::Speech(SpeechEvent::ListenModeStopRequested {
-                        session_id,
-                    }))
+                    .send(
+                        target,
+                        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }),
+                    )
                     .await?;
-                add_message(deps.state, MessageRole::System, "🎤 Stopping listen mode...");
+                add_message(
+                    deps.state,
+                    MessageRole::System,
+                    "🎤 Stopping listen mode...",
+                );
             } else {
                 let speech_enabled = load_speech_enabled(deps.runtime).await?;
                 if !speech_enabled {
@@ -1542,9 +1587,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
                 deps.state.listen_mode_active = true;
                 let session_id = deps.state.listen_session_id;
                 transport
-                    .send(target, Event::Speech(SpeechEvent::ListenModeRequested {
-                        session_id,
-                    }))
+                    .send(
+                        target,
+                        Event::Speech(SpeechEvent::ListenModeRequested { session_id }),
+                    )
                     .await?;
                 add_message(
                     deps.state,
@@ -1566,6 +1612,20 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             handle_config_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
+        "/reload" => {
+            transport
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+                )
+                .await?;
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Reloading config from disk...",
+            );
+            Ok(DispatchResult::Continue)
+        }
         "/loops" => {
             handle_loops_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
@@ -1585,7 +1645,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         "/close" | "/quit" | "/exit" | "/q" => Ok(DispatchResult::Close),
         "/shutdown" => {
             transport
-                .send(target, Event::System(bus::events::SystemEvent::ShutdownSignal))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ShutdownSignal),
+                )
                 .await?;
             Ok(DispatchResult::Shutdown)
         }
@@ -1600,34 +1663,63 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
     }
 }
 
-fn add_message(state: &mut crate::tui_state::ShellState<SlashDropdown>, role: MessageRole, text: &str) {
+fn add_message(
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+    role: MessageRole,
+    text: &str,
+) {
     state.messages.push(Message::new(role, text.to_string()));
 }
 
 fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
     match event {
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::CurrentObservation)) => {
-            Ok(IpcPayload::SlashCommand { line: "/observation".to_string() })
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::CurrentObservation,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/observation".to_string(),
+        }),
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::UserMemory,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/memory".to_string(),
+        }),
+        Event::Transparency(BusTransparencyEvent::QueryRequested(
+            TransparencyQuery::InferenceExplanation,
+        )) => Ok(IpcPayload::SlashCommand {
+            line: "/explanation".to_string(),
+        }),
+        Event::Speech(SpeechEvent::ListenModeRequested { session_id }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/listen start {}", session_id),
+            })
         }
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::UserMemory)) => {
-            Ok(IpcPayload::SlashCommand { line: "/memory".to_string() })
+        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/listen stop {}", session_id),
+            })
         }
-        Event::Transparency(BusTransparencyEvent::QueryRequested(TransparencyQuery::InferenceExplanation)) => {
-            Ok(IpcPayload::SlashCommand { line: "/explanation".to_string() })
+        Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/config set {} {}", key, value),
+            })
         }
-        Event::Speech(SpeechEvent::ListenModeRequested { session_id }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/listen start {}", session_id),
-        }),
-        Event::Speech(SpeechEvent::ListenModeStopRequested { session_id }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/listen stop {}", session_id),
-        }),
-        Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/config set {} {}", key, value),
-        }),
-        Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => Ok(IpcPayload::SlashCommand {
-            line: format!("/loops {} {}", loop_name, if *enabled { "on" } else { "off" }),
-        }),
-        Event::System(bus::events::SystemEvent::ShutdownSignal) => Ok(IpcPayload::ShutdownRequested),
+        Event::System(bus::events::SystemEvent::ConfigReloadRequested) => {
+            Ok(IpcPayload::SlashCommand {
+                line: "/config reload".to_string(),
+            })
+        }
+        Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!(
+                    "/loops {} {}",
+                    loop_name,
+                    if *enabled { "on" } else { "off" }
+                ),
+            })
+        }
+        Event::System(bus::events::SystemEvent::ShutdownSignal) => {
+            Ok(IpcPayload::ShutdownRequested)
+        }
         _ => Err(anyhow::anyhow!("event cannot be sent over IPC target")),
     }
 }
@@ -1643,7 +1735,8 @@ async fn current_models_dir(runtime: Option<&Runtime>) -> Result<PathBuf> {
         }
     }
 
-    runtime::ollama_models_dir().map_err(|e| anyhow::anyhow!("Could not resolve models directory: {}", e))
+    runtime::ollama_models_dir()
+        .map_err(|e| anyhow::anyhow!("Could not resolve models directory: {}", e))
 }
 
 async fn load_speech_enabled(runtime: Option<&Runtime>) -> Result<bool> {
@@ -1699,7 +1792,10 @@ async fn show_speech_config_shared(
     add_message(
         state,
         MessageRole::System,
-        &format!("voice_always_listening    {}", config.voice_always_listening),
+        &format!(
+            "voice_always_listening    {}",
+            config.voice_always_listening
+        ),
     );
     add_message(
         state,
@@ -1722,7 +1818,10 @@ async fn show_speech_config_shared(
     add_message(
         state,
         MessageRole::System,
-        &format!("voice_session_active      {}", if voice_enabled { "yes" } else { "no" }),
+        &format!(
+            "voice_session_active      {}",
+            if voice_enabled { "yes" } else { "no" }
+        ),
     );
 }
 
@@ -1754,7 +1853,11 @@ async fn show_screenshot_status_shared(
         MessageRole::System,
         &format!(
             "Screenshot capture: {} | Platform: {} | Active model: {} | Vision capable: {}",
-            if capture_enabled { "enabled" } else { "disabled" },
+            if capture_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
             platform_support,
             active_model,
             vision_status
@@ -1781,12 +1884,19 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             .map_err(|_| anyhow::anyhow!("Usage: /microphone select <index>"))?;
         let devices = runtime::list_input_devices();
         if let Some((_, name)) = devices.into_iter().find(|(i, _)| *i == idx) {
-            let value = if idx == 0 { String::new() } else { name.clone() };
+            let value = if idx == 0 {
+                String::new()
+            } else {
+                name.clone()
+            };
             transport
-                .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
-                    key: "microphone_device".to_string(),
-                    value,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                        key: "microphone_device".to_string(),
+                        value,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1801,7 +1911,10 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             add_message(
                 state,
                 MessageRole::Warning,
-                &format!("No device at index {}. Run /microphone to list devices.", idx),
+                &format!(
+                    "No device at index {}. Run /microphone to list devices.",
+                    idx
+                ),
             );
         }
     } else {
@@ -1811,7 +1924,11 @@ async fn handle_microphone_command<T: MessageTransport + ?Sized>(
             add_message(state, MessageRole::Warning, "No input devices found.");
         } else {
             for (idx, name) in &devices {
-                add_message(state, MessageRole::System, &format!("  [{}]  {}", idx, name));
+                add_message(
+                    state,
+                    MessageRole::System,
+                    &format!("  [{}]  {}", idx, name),
+                );
             }
             add_message(
                 state,
@@ -1838,16 +1955,27 @@ async fn handle_config_command<T: MessageTransport + ?Sized>(
             String::new()
         };
         transport
-            .send(target, Event::System(bus::events::SystemEvent::ConfigSetRequested {
-                key: key.to_string(),
-                value: value.clone(),
-            }))
+            .send(
+                target,
+                Event::System(bus::events::SystemEvent::ConfigSetRequested {
+                    key: key.to_string(),
+                    value: value.clone(),
+                }),
+            )
             .await?;
         add_message(
             state,
             MessageRole::System,
             &format!("Setting {} = {}...", key, value),
         );
+    } else if parts.get(1) == Some(&"reload") {
+        transport
+            .send(
+                target,
+                Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+            )
+            .await?;
+        add_message(state, MessageRole::System, "Reloading config from disk...");
     } else {
         let config_path = runtime::config::config_path()
             .map(|p| p.display().to_string())
@@ -1855,7 +1983,11 @@ async fn handle_config_command<T: MessageTransport + ?Sized>(
         let config = runtime::config::load_or_create_config().await?;
 
         add_message(state, MessageRole::System, "━━  Configuration");
-        add_message(state, MessageRole::System, &format!("Config file: {}", config_path));
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("Config file: {}", config_path),
+        );
         match toml::to_string_pretty(&config) {
             Ok(toml_str) => {
                 for line in toml_str.lines() {
@@ -1896,17 +2028,24 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
                 add_message(
                     state,
                     MessageRole::System,
-                    &format!("  {} — {}", label, if enabled { "enabled" } else { "disabled" }),
+                    &format!(
+                        "  {} — {}",
+                        label,
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
                 );
             }
         }
         ["/loops", name] => {
             let enabled = !state.loop_states.get(*name).copied().unwrap_or(true);
             transport
-                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
-                    loop_name: (*name).to_string(),
-                    enabled,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::LoopControlRequested {
+                        loop_name: (*name).to_string(),
+                        enabled,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1928,10 +2067,13 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
                 }
             };
             transport
-                .send(target, Event::System(bus::events::SystemEvent::LoopControlRequested {
-                    loop_name: (*name).to_string(),
-                    enabled,
-                }))
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::LoopControlRequested {
+                        loop_name: (*name).to_string(),
+                        enabled,
+                    }),
+                )
                 .await?;
             add_message(
                 state,
@@ -1978,7 +2120,10 @@ fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
 fn show_actors_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
     add_message(state, MessageRole::System, "━━  Actor Status");
     for name in ["Platform", "Inference", "CTP", "Memory", "Soul"] {
-        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let status = state
+            .actor_health
+            .get(name)
+            .unwrap_or(&ActorStatus::Starting);
         let text = match status {
             ActorStatus::Ready => "Ready".to_string(),
             ActorStatus::Starting => "Starting".to_string(),
@@ -2294,7 +2439,7 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
     let mut state = crate::tui_state::ShellState::new();
     state.add_welcome_message("Connected to Sena daemon — local-first ambient AI");
     state.add_welcome_message("Type /help for commands, or chat freely.");
-    
+
     // Seed current_model from SessionReady handshake.
     state.current_model = initial_model;
 
@@ -2320,7 +2465,10 @@ pub async fn run_with_ipc() -> anyhow::Result<()> {
 }
 
 enum ShellMode {
-    Local { runtime: Arc<Runtime>, shell: Shell },
+    Local {
+        runtime: Arc<Runtime>,
+        shell: Shell,
+    },
     Ipc {
         state: crate::tui_state::ShellState<SlashDropdown>,
         command_state: CommandRuntimeState,
@@ -2402,7 +2550,9 @@ impl ShellMode {
                         }
                     }
                 } else {
-                    state.messages.push(Message::new(MessageRole::User, line.to_string()));
+                    state
+                        .messages
+                        .push(Message::new(MessageRole::User, line.to_string()));
                     let request_id = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
@@ -2433,7 +2583,10 @@ impl ShellMode {
         match self {
             Self::Local { shell, .. } => {
                 if let DisplayMessage::BusEvent(event) = message {
-                    if matches!(*event, Event::System(bus::events::SystemEvent::ShutdownSignal)) {
+                    if matches!(
+                        *event,
+                        Event::System(bus::events::SystemEvent::ShutdownSignal)
+                    ) {
                         tracing::info!("cli: ShutdownSignal received on bus — exiting shell");
                         return Some(ShellExitReason::Shutdown);
                     }
@@ -2471,9 +2624,10 @@ impl ShellMode {
                         IpcPayload::Pong | IpcPayload::Ack { .. } => {}
                         IpcPayload::Error { reason, .. } => {
                             state.waiting_for_inference = false;
-                            state
-                                .messages
-                                .push(Message::new(MessageRole::Warning, format!("Error: {}", reason)));
+                            state.messages.push(Message::new(
+                                MessageRole::Warning,
+                                format!("Error: {}", reason),
+                            ));
                         }
                         IpcPayload::LoopStatusUpdate { loop_name, enabled } => {
                             state.loop_states.insert(loop_name, enabled);
@@ -2521,7 +2675,10 @@ impl ShellMode {
                 config.preferred_model = Some(model_name.clone());
                 match runtime::save_config(&config).await {
                     Ok(_) => {
-                        shell.add_message(MessageRole::System, format!("Selected model: {}", model_name));
+                        shell.add_message(
+                            MessageRole::System,
+                            format!("Selected model: {}", model_name),
+                        );
                         shell.add_message(
                             MessageRole::System,
                             "Model change will take effect after restart.".to_string(),
@@ -2579,7 +2736,11 @@ async fn run_shell<T: MessageTransport>(
 
     'main: loop {
         if let Err(e) = terminal.draw(|f| mode.render(f)) {
-            add_message(mode.state_mut(), MessageRole::Warning, &format!("Display error: {}", e));
+            add_message(
+                mode.state_mut(),
+                MessageRole::Warning,
+                &format!("Display error: {}", e),
+            );
         }
 
         if let Some(first_press) = mode.state().ctrl_c_first_press {
@@ -2823,10 +2984,7 @@ async fn run_shell<T: MessageTransport>(
 }
 
 /// Simplified TUI rendering for IPC mode.
-fn render_ipc_tui(
-    frame: &mut ratatui::Frame,
-    state: &crate::tui_state::ShellState<SlashDropdown>,
-) {
+fn render_ipc_tui(frame: &mut ratatui::Frame, state: &crate::tui_state::ShellState<SlashDropdown>) {
     // ── Vertical layout: header / body / input ────────────────────────────────
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2967,11 +3125,7 @@ fn render_ipc_tui(
     frame.render_widget(paragraph, body_chunks[0]);
 
     // ── Sidebar ───────────────────────────────────────────────────────────────────
-    render_ipc_sidebar(
-        frame,
-        body_chunks[1],
-        state,
-    );
+    render_ipc_sidebar(frame, body_chunks[1], state);
 
     // Input area
     let prompt_line = Line::from(vec![
@@ -3121,7 +3275,10 @@ fn render_ipc_sidebar(
     )));
     let actor_names = ["Platform", "Inference", "CTP", "Memory", "Soul"];
     for name in &actor_names {
-        let status = state.actor_health.get(name).unwrap_or(&ActorStatus::Starting);
+        let status = state
+            .actor_health
+            .get(name)
+            .unwrap_or(&ActorStatus::Starting);
         let (dot, color, label) = match status {
             ActorStatus::Ready => ("\u{25cf}", Color::Green, "Ready"),
             ActorStatus::Starting => ("\u{25cb}", Color::Yellow, "Starting"),
