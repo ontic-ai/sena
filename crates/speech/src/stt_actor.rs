@@ -240,9 +240,10 @@ impl SttActor {
                         }))
                         .await;
                 } else {
+                    // Low confidence: inform user that speech was detected but unclear
                     let _ = bus
-                        .broadcast(Event::Speech(SpeechEvent::TranscriptionFailed {
-                            reason: "low confidence".to_string(),
+                        .broadcast(Event::Speech(SpeechEvent::LowConfidenceTranscription {
+                            confidence: result.confidence,
                             request_id,
                         }))
                         .await;
@@ -675,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn low_energy_audio_emits_transcription_failed() {
+    async fn low_energy_audio_emits_low_confidence_event() {
         let bus = Arc::new(EventBus::new());
         let mut actor = SttActor::new(SttBackend::Mock, false, 0.01, None);
 
@@ -700,8 +701,11 @@ mod tests {
         let mut found = false;
         for _ in 0..15 {
             match tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await {
-                Ok(Ok(Event::Speech(SpeechEvent::TranscriptionFailed { reason, .. }))) => {
-                    assert_eq!(reason, "low confidence");
+                Ok(Ok(Event::Speech(SpeechEvent::LowConfidenceTranscription {
+                    confidence,
+                    ..
+                }))) => {
+                    assert!(confidence < 0.5, "confidence should be below threshold");
                     found = true;
                     break;
                 }
@@ -711,7 +715,7 @@ mod tests {
             }
         }
 
-        assert!(found, "expected transcription failed event");
+        assert!(found, "expected low confidence transcription event");
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await

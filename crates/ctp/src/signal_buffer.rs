@@ -142,6 +142,21 @@ impl SignalBuffer {
                 })
             })
     }
+
+    /// Get all window events in the buffer.
+    pub fn all_windows(&self) -> &VecDeque<WindowContext> {
+        &self.window_events
+    }
+
+    /// Get all clipboard events in the buffer.
+    pub fn all_clipboard(&self) -> &VecDeque<ClipboardDigest> {
+        &self.clipboard_events
+    }
+
+    /// Get the count of window events in the buffer.
+    pub fn window_events_count(&self) -> usize {
+        self.window_events.len()
+    }
 }
 
 #[cfg(test)]

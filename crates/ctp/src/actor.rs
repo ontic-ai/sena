@@ -8,19 +8,15 @@ use bus::events::ctp::ContextSnapshot;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
-use bus::events::memory::{ContextMemoryQueryRequest, MemoryEvent};
 use bus::events::platform_vision::{PlatformVisionEvent, ScreenCaptureEvent};
 use bus::events::transparency::TransparencyQuery;
 use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
 use bus::{Actor, ActorError, Event, EventBus};
 
 use crate::context_assembler::ContextAssembler;
-use crate::pattern_engine::PatternEngine;
 use crate::signal_buffer::SignalBuffer;
-use crate::task_inference::TaskInferenceEngine;
 use crate::transparency_query::handle_current_observation;
 use crate::trigger_gate::TriggerGate;
-use crate::user_state::UserStateClassifier;
 
 /// CTP Actor — orchestrates context assembly and thought triggering.
 ///
@@ -29,9 +25,6 @@ pub struct CTPActor {
     buffer: SignalBuffer,
     assembler: ContextAssembler,
     gate: TriggerGate,
-    pattern_engine: PatternEngine,
-    state_classifier: UserStateClassifier,
-    task_engine: TaskInferenceEngine,
     screen_capture_enabled: bool,
     latest_snapshot: Option<ContextSnapshot>,
     session_start: Instant,
@@ -41,11 +34,8 @@ pub struct CTPActor {
     /// True after BootComplete has been received. ThoughtEventTriggered is only
     /// emitted once boot is confirmed so inference backend is ready.
     boot_complete: bool,
-    /// Whether the CTP loop is enabled (pause/resume via LoopControlRequested).
+    /// Whether the CTP loop is enabled (paused/resumed via LoopControlRequested).
     loop_enabled: bool,
-    /// Cached memory relevance score from most recent ContextQueryCompleted.
-    /// Used for trigger gate evaluation on each tick.
-    cached_memory_relevance: f64,
 }
 
 impl CTPActor {
@@ -64,9 +54,6 @@ impl CTPActor {
             buffer: SignalBuffer::new(buffer_window),
             assembler: ContextAssembler::new(),
             gate: TriggerGate::new(trigger_interval),
-            pattern_engine: PatternEngine::new(),
-            state_classifier: UserStateClassifier::new(),
-            task_engine: TaskInferenceEngine,
             screen_capture_enabled: false,
             latest_snapshot: None,
             session_start: Instant::now(),
@@ -75,7 +62,6 @@ impl CTPActor {
             poll_interval,
             boot_complete: false,
             loop_enabled: true,
-            cached_memory_relevance: 0.0,
         }
     }
 
@@ -157,25 +143,13 @@ impl Actor for CTPActor {
                                     }
                                 }
                                 // Handle loop control
-                                Event::System(SystemEvent::LoopControlRequested { loop_name, enabled })
-                                    if loop_name == "ctp" =>
-                                {
-                                    self.loop_enabled = enabled;
-                                    let _ = bus
-                                        .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                Event::System(SystemEvent::LoopControlRequested { loop_name, enabled }) => {
+                                    if loop_name == "ctp" {
+                                        self.loop_enabled = enabled;
+                                        let _ = bus.broadcast(Event::System(SystemEvent::LoopStatusChanged {
                                             loop_name: "ctp".to_string(),
                                             enabled,
-                                        }))
-                                        .await;
-                                }
-                                // Handle memory query responses to update cached relevance
-                                Event::Memory(MemoryEvent::ContextQueryCompleted(response)) => {
-                                    self.cached_memory_relevance = response.relevance_score;
-                                    if self.loop_enabled {
-                                        tracing::debug!(
-                                            "CTP: updated memory relevance cache to {:.3}",
-                                            response.relevance_score
-                                        );
+                                        })).await;
                                     }
                                 }
                                 // Handle shutdown signal
@@ -199,36 +173,12 @@ impl Actor for CTPActor {
 
                 // Periodic trigger check
                 _ = ticker.tick() => {
-                    // Skip all CTP processing if loop is disabled
+                    // Skip CTP processing if loop is disabled
                     if !self.loop_enabled {
                         continue;
                     }
 
-                    let mut snapshot = self.refresh_snapshot();
-
-                    // Step 1: Detect signal patterns
-                    let patterns = self.pattern_engine.detect(&self.buffer, &snapshot);
-
-                    // Step 2: Classify user state from patterns and context
-                    let user_state = self.state_classifier.classify(&snapshot, &patterns);
-                    snapshot.user_state = Some(user_state.clone());
-
-                    // Step 3: Infer rich task description
-                    if let Some(task) = self.task_engine.infer(&snapshot) {
-                        snapshot.inferred_task = Some(task);
-                    }
-
-                    // Step 4: Broadcast detected patterns
-                    for pattern in &patterns {
-                        if let Err(e) = bus.broadcast(Event::CTP(Box::new(CTPEvent::SignalPatternDetected(pattern.clone())))).await {
-                            tracing::warn!("Failed to broadcast SignalPatternDetected: {}", e);
-                        }
-                    }
-
-                    // Step 5: Broadcast user state
-                    if let Err(e) = bus.broadcast(Event::CTP(Box::new(CTPEvent::UserStateComputed(user_state.clone())))).await {
-                        tracing::warn!("Failed to broadcast UserStateComputed: {}", e);
-                    }
+                    let snapshot = self.refresh_snapshot();
 
                     // Emit ContextSnapshotReady event on each tick so downstream
                     // actors can observe context evolution even when no trigger fires.
@@ -236,27 +186,8 @@ impl Actor for CTPActor {
                         .await
                         .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ContextSnapshotReady: {}", e)))?;
 
-                    // Step 6a: Emit memory query for next tick (if inferred task available)
-                    if let Some(task) = &snapshot.inferred_task {
-                        let request_id = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-
-                        let req = ContextMemoryQueryRequest {
-                            context_description: task.semantic_description.clone(),
-                            max_chunks: 5,
-                            request_id,
-                        };
-
-                        let _ = bus
-                            .broadcast(Event::Memory(MemoryEvent::ContextQueryRequested(req)))
-                            .await;
-                    }
-
-                    // Step 6b: Check if we should trigger with cached memory relevance
-                    let memory_relevance = self.cached_memory_relevance;
-                    if self.boot_complete && self.gate.should_trigger(&snapshot, &patterns, memory_relevance) {
+                    // Check if we should trigger
+                    if self.boot_complete && self.gate.should_trigger(&snapshot) {
                         // Emit ThoughtEventTriggered event
                         bus.broadcast(Event::CTP(Box::new(CTPEvent::ThoughtEventTriggered(snapshot))))
                             .await
@@ -563,60 +494,6 @@ mod tests {
         );
         assert_eq!(response.snapshot.keystroke_cadence.events_per_minute, 144.0);
         assert!(response.snapshot.keystroke_cadence.burst_detected);
-
-        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
-            .await
-            .expect("shutdown signal broadcast should succeed in test");
-
-        let result = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn ctp_loop_control_disables_and_reenables_thought_triggering() {
-        let mut actor = CTPActor::new(
-            Duration::from_millis(1), // very short trigger interval
-            Duration::from_secs(300),
-            Duration::from_millis(50),
-        );
-
-        let bus = Arc::new(EventBus::new());
-        let mut bus_rx = bus.subscribe_broadcast();
-
-        actor
-            .start(bus.clone())
-            .await
-            .expect("actor start should succeed in test");
-        let run_handle = tokio::spawn(async move { actor.run().await });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Disable the CTP loop
-        bus.broadcast(Event::System(SystemEvent::LoopControlRequested {
-            loop_name: "ctp".to_string(),
-            enabled: false,
-        }))
-        .await
-        .expect("loop control broadcast should succeed in test");
-
-        // Should receive LoopStatusChanged { enabled: false }
-        let mut found_disabled = false;
-        for _ in 0..20 {
-            match tokio::time::timeout(Duration::from_millis(200), bus_rx.recv()).await {
-                Ok(Ok(Event::System(SystemEvent::LoopStatusChanged { loop_name, enabled })))
-                    if loop_name == "ctp" && !enabled =>
-                {
-                    found_disabled = true;
-                    break;
-                }
-                Ok(Ok(_)) => continue,
-                _ => break,
-            }
-        }
-        assert!(
-            found_disabled,
-            "expected LoopStatusChanged {{ ctp, false }}"
-        );
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await

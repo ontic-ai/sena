@@ -80,7 +80,7 @@ pub struct ModelListResponse {
 #[derive(Debug, Clone)]
 pub enum TransparencyEvent {
     QueryRequested(TransparencyQuery),
-    ObservationResponded(ObservationResponse),
+    ObservationResponded(Box<ObservationResponse>),
     MemoryResponded(MemoryResponse),
     InferenceExplanationResponded(InferenceExplanationResponse),
     ModelListResponded(ModelListResponse),

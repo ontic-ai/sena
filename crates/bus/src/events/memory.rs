@@ -92,6 +92,40 @@ pub struct MemoryConsolidationCompleted {
     pub nodes_decayed: usize,
 }
 
+/// Request from CTP to query memories relevant to the current context.
+/// Unlike QueryRequested (user-initiated), this is automatic/proactive.
+#[derive(Debug, Clone)]
+pub struct ContextMemoryQueryRequest {
+    /// Semantic description of current activity (from EnrichedInferredTask).
+    pub context_description: String,
+    /// Maximum chunks to return.
+    pub max_chunks: usize,
+    /// Unique request ID for response correlation.
+    pub request_id: u64,
+}
+
+/// Response to a context memory query.
+#[derive(Clone)]
+pub struct ContextMemoryQueryResponse {
+    pub chunks: Vec<MemoryChunk>,
+    /// Relevance score (0.0-1.0) — how relevant the retrieved memories are overall.
+    pub relevance_score: f64,
+    pub request_id: u64,
+}
+
+impl std::fmt::Debug for ContextMemoryQueryResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextMemoryQueryResponse")
+            .field(
+                "chunks",
+                &format!("[{} chunks, content REDACTED]", self.chunks.len()),
+            )
+            .field("relevance_score", &self.relevance_score)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
 /// Top-level memory event enum wrapping all memory subsystem events.
 #[derive(Debug, Clone)]
 pub enum MemoryEvent {
@@ -103,6 +137,8 @@ pub enum MemoryEvent {
     QueryCompleted(MemoryQueryResponse),
     ConflictDetected(MemoryConflictDetected),
     ConsolidationCompleted(MemoryConsolidationCompleted),
+    ContextQueryRequested(ContextMemoryQueryRequest),
+    ContextQueryCompleted(ContextMemoryQueryResponse),
 }
 
 #[cfg(test)]
@@ -189,6 +225,46 @@ mod tests {
         assert_send_static::<MemoryQueryRequest>();
         assert_send_static::<MemoryQueryResponse>();
         assert_send_static::<MemoryConflictDetected>();
+        assert_send_static::<ContextMemoryQueryRequest>();
+        assert_send_static::<ContextMemoryQueryResponse>();
         assert_send_static::<MemoryEvent>();
+    }
+
+    #[test]
+    fn context_query_request_constructs() {
+        let req = ContextMemoryQueryRequest {
+            context_description: "coding in Rust".to_string(),
+            max_chunks: 10,
+            request_id: 42,
+        };
+        assert_eq!(req.context_description, "coding in Rust");
+        assert_eq!(req.max_chunks, 10);
+        assert_eq!(req.request_id, 42);
+    }
+
+    #[test]
+    fn context_memory_query_response_debug_redacts() {
+        let response = ContextMemoryQueryResponse {
+            chunks: vec![
+                MemoryChunk {
+                    text: "secret memory 1".into(),
+                    score: 0.9,
+                    timestamp: SystemTime::now(),
+                },
+                MemoryChunk {
+                    text: "secret memory 2".into(),
+                    score: 0.8,
+                    timestamp: SystemTime::now(),
+                },
+            ],
+            relevance_score: 0.85,
+            request_id: 99,
+        };
+        let debug_output = format!("{:?}", response);
+        assert!(debug_output.contains("2 chunks"));
+        assert!(debug_output.contains("REDACTED"));
+        assert!(!debug_output.contains("secret memory"));
+        assert!(debug_output.contains("0.85"));
+        assert!(debug_output.contains("99"));
     }
 }

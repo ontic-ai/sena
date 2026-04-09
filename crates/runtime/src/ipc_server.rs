@@ -146,8 +146,8 @@ impl IpcServer {
 
     #[cfg(windows)]
     async fn start_windows(self: Arc<Self>) -> Result<(), IpcServerError> {
-        let pipe_name = r"\\.\pipe\sena_ipc";
-        self.start_windows_on(pipe_name.to_string()).await
+        let pipe_name = ipc_pipe_name();
+        self.start_windows_on(pipe_name).await
     }
 
     #[cfg(windows)]
@@ -784,40 +784,22 @@ async fn dispatch_slash_command(
             vec![
                 ("━━  Commands".to_string(), LineStyle::SystemNotice),
                 (
-                    "/observation or /obs   — What are you observing right now?".to_string(),
-                    LineStyle::Normal,
+                    "Chat & Configuration: /help, /copy, /models, /config".to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/memory or /mem        — What do you remember about me?".to_string(),
-                    LineStyle::Normal,
+                    "Transparency & Insight: /observation (/obs), /memory (/mem), /explanation (/why), /actors, /verbose"
+                        .to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/explanation or /why   — Why did you say that?".to_string(),
-                    LineStyle::Normal,
+                    "Voice & Audio: /voice, /speech, /listen, /microphone".to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/config                — Show and edit settings".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/actors                — Show actor health status".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/loops                 — Show and toggle background loops".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/speech                — View speech configuration".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/help                  — Show this message".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/shutdown              — Shut down Sena completely".to_string(),
-                    LineStyle::Normal,
+                    "System Control: /screenshot, /loops, /close (/quit), /shutdown"
+                        .to_string(),
+                    LineStyle::SystemNotice,
                 ),
             ]
         }
@@ -1002,8 +984,12 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 style: LineStyle::Error,
             },
         }),
-        Event::CTP(bus::events::ctp::CTPEvent::ThoughtEventTriggered(_thought)) => {
-            // Only show in verbose mode (CLI-managed state).
+        Event::CTP(ctp_event)
+            if matches!(
+                **ctp_event,
+                bus::events::ctp::CTPEvent::ThoughtEventTriggered(_)
+            ) =>
+        {
             None
         }
         Event::Speech(SpeechEvent::ListenModeTranscription {
@@ -1039,6 +1025,18 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 style: LineStyle::SystemNotice,
             },
         }),
+        Event::Speech(SpeechEvent::LowConfidenceTranscription { confidence, .. }) => {
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content: format!(
+                        "Speech detected but confidence too low ({:.0}%). Please try again.",
+                        confidence * 100.0
+                    ),
+                    style: LineStyle::Error,
+                },
+            })
+        }
         Event::System(SystemEvent::ConfigReloaded) => Some(IpcMessage {
             id: 0,
             payload: IpcPayload::DisplayLine {
@@ -1199,9 +1197,110 @@ fn format_model_list_response(resp: &bus::events::transparency::ModelListRespons
 
 /// IPC socket path — DIFFERENT from single-instance lock path.
 #[cfg(unix)]
-fn ipc_socket_path() -> PathBuf {
+pub fn ipc_socket_path() -> PathBuf {
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
     std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
+}
+
+/// IPC pipe name — includes current user to restrict access.
+/// On Windows, named pipes with user-specific names prevent other local users
+/// from connecting to the pipe. This is the lightweight security model that
+/// avoids heavyweight DACL manipulation via Windows API.
+#[cfg(windows)]
+pub fn ipc_pipe_name() -> String {
+    let identity = current_user_pipe_identity()
+        .or_else(current_username_pipe_identity)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(r"\\.\pipe\sena_ipc_{}", identity)
+}
+
+#[cfg(windows)]
+fn current_username_pipe_identity() -> Option<String> {
+    std::env::var("USERNAME")
+        .ok()
+        .and_then(|value| sanitize_pipe_component(&value))
+}
+
+#[cfg(windows)]
+fn sanitize_pipe_component(value: &str) -> Option<String> {
+    let filtered: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+#[cfg(windows)]
+fn current_user_pipe_identity() -> Option<String> {
+    use std::fmt::Write;
+    use std::ptr;
+    use std::slice;
+    use winapi::shared::minwindef::DWORD;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+    use winapi::um::securitybaseapi::{GetLengthSid, GetTokenInformation};
+    use winapi::um::winnt::{TokenUser, TOKEN_QUERY, TOKEN_USER};
+
+    unsafe {
+        let mut token = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+
+        let mut bytes_needed: DWORD = 0;
+        let _ = GetTokenInformation(
+            token,
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut bytes_needed,
+        );
+
+        if bytes_needed == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+
+        let mut buffer = vec![0u8; bytes_needed as usize];
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            bytes_needed,
+            &mut bytes_needed,
+        ) == 0
+        {
+            let _ = CloseHandle(token);
+            return None;
+        }
+
+        let token_user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
+        let sid_len = GetLengthSid(token_user.User.Sid);
+        if sid_len == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+
+        let sid_bytes = slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_len as usize);
+        let mut identity = String::from("sid_");
+        for byte in sid_bytes {
+            let _ = write!(&mut identity, "{:02x}", byte);
+        }
+        let _ = CloseHandle(token);
+
+        sanitize_pipe_component(&identity)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1239,10 +1338,14 @@ mod tests {
         #[cfg(windows)]
         {
             let lock_pipe = r"\\.\pipe\sena_single_instance";
-            let ipc_pipe = r"\\.\pipe\sena_ipc";
+            let ipc_pipe = super::ipc_pipe_name();
             assert_ne!(
                 lock_pipe, ipc_pipe,
                 "IPC server pipe must be different from single-instance lock pipe"
+            );
+            assert!(
+                ipc_pipe.contains("sena_ipc_"),
+                "IPC pipe name must include per-user component"
             );
         }
     }

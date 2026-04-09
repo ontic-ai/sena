@@ -394,10 +394,12 @@ mod tests {
                 timestamp: std::time::Instant::now(),
             },
             session_duration: Duration::from_secs(3600),
-            inferred_task: Some(bus::events::ctp::TaskHint {
+            inferred_task: Some(bus::events::ctp::EnrichedInferredTask {
                 category: "coding".to_string(),
+                semantic_description: "Writing Rust code".to_string(),
                 confidence: 0.92,
             }),
+            user_state: None,
             visual_context: None,
             timestamp: std::time::Instant::now(),
         };
@@ -431,6 +433,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(0),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: std::time::Instant::now(),
         };
