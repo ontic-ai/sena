@@ -94,10 +94,7 @@ memory
  └── soul
 
 prompt
- ├── memory
- ├── ctp
- ├── inference
- └── text
+ └── bus
 
 soul
  ├── bus
