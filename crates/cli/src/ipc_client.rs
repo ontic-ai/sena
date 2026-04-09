@@ -9,8 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
 use tokio::net::UnixStream;
 
 #[cfg(windows)]
@@ -143,15 +141,13 @@ impl IpcClient {
 }
 
 #[cfg(unix)]
-fn ipc_endpoint() -> PathBuf {
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
+fn ipc_endpoint() -> std::path::PathBuf {
+    runtime::ipc_server::ipc_socket_path()
 }
 
 #[cfg(windows)]
 fn ipc_endpoint() -> String {
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".to_string());
-    format!(r"\\.\pipe\sena_ipc_{}", user)
+    runtime::ipc_server::ipc_pipe_name()
 }
 
 #[derive(Debug, thiserror::Error)]

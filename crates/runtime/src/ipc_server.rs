@@ -1199,7 +1199,7 @@ fn format_model_list_response(resp: &bus::events::transparency::ModelListRespons
 
 /// IPC socket path — DIFFERENT from single-instance lock path.
 #[cfg(unix)]
-fn ipc_socket_path() -> PathBuf {
+pub fn ipc_socket_path() -> PathBuf {
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
     std::env::temp_dir().join(format!("sena-ipc-{}.sock", user))
 }
@@ -1209,7 +1209,7 @@ fn ipc_socket_path() -> PathBuf {
 /// from connecting to the pipe. This is the lightweight security model that
 /// avoids heavyweight DACL manipulation via Windows API.
 #[cfg(windows)]
-fn ipc_pipe_name() -> String {
+pub fn ipc_pipe_name() -> String {
     let identity = current_user_pipe_identity()
         .or_else(current_username_pipe_identity)
         .unwrap_or_else(|| "unknown".to_string());
