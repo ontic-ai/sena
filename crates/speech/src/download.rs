@@ -129,50 +129,50 @@ impl ModelManifest {
         }
     }
 
-    /// Returns the Zipformer encoder (int8 quantized, ~15MB).
+    /// Returns the Zipformer encoder (int8 quantized, ~188MB).
     pub fn sherpa_zipformer_encoder() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-encoder-int8".to_string(),
             filename: "sherpa_encoder.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/encoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 15_000_000,
+            size_bytes: 188_000_000,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
 
-    /// Returns the Zipformer decoder (int8 quantized, ~2MB).
+    /// Returns the Zipformer decoder (int8 quantized, ~539KB).
     pub fn sherpa_zipformer_decoder() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-decoder-int8".to_string(),
             filename: "sherpa_decoder.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/decoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 2_000_000,
+            size_bytes: 539_000,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
 
-    /// Returns the Zipformer joiner (int8 quantized, ~1MB).
+    /// Returns the Zipformer joiner (int8 quantized, ~259KB).
     pub fn sherpa_zipformer_joiner() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-joiner-int8".to_string(),
             filename: "sherpa_joiner.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/joiner-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 1_000_000,
+            size_bytes: 259_000,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
 
-    /// Returns the Zipformer token vocabulary (~10KB).
+    /// Returns the Zipformer token vocabulary (~5KB).
     pub fn sherpa_zipformer_tokens() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-tokens".to_string(),
             filename: "sherpa_tokens.txt".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/tokens.txt".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 10_000,
+            size_bytes: 5_050,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
