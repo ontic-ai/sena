@@ -29,6 +29,15 @@ pub enum SpeechEvent {
         request_id: u64,
     },
 
+    /// Transcription completed but confidence was below acceptable threshold.
+    /// User should be informed that speech was detected but not understood clearly.
+    LowConfidenceTranscription {
+        /// Confidence score that triggered this event.
+        confidence: f32,
+        /// Request ID for correlation.
+        request_id: u64,
+    },
+
     /// Request to speak text aloud.
     SpeakRequested {
         /// Text to speak.

@@ -452,6 +452,18 @@ impl Actor for TtsActor {
                                 if let Some(oldest_key) = self.streaming_pending.keys().next().copied() {
                                     self.streaming_pending.remove(&oldest_key);
                                 }
+                                // Notify system that a sentence was dropped due to overflow
+                                if let Some(bus) = &self.bus {
+                                    let _ = bus
+                                        .broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                                            reason: format!(
+                                                "TTS streaming queue overflow (depth={}): sentence dropped",
+                                                self.tts_queue_depth
+                                            ),
+                                            request_id,
+                                        }))
+                                        .await;
+                                }
                             }
 
                             // Spawn synthesis in background
