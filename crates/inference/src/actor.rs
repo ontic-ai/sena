@@ -1335,6 +1335,7 @@ impl InferenceActor {
     ) -> Result<SoulSummary, String> {
         let mut rx = bus.subscribe_broadcast();
 
+        // TODO Phase 7B: switch to RichSummaryRequested for section-based prompt assembly
         bus.send_directed(
             "soul",
             Event::Soul(SoulEvent::SummaryRequested(SoulSummaryRequested {

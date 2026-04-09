@@ -15,9 +15,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use bus::events::memory::{
-    MemoryChunk, MemoryConflictDetected, MemoryConsolidationCompleted, MemoryQueryRequest,
-    MemoryQueryResponse, MemoryWriteCompleted, MemoryWriteRequest, SemanticIngestComplete,
-    SemanticIngestRequest,
+    ContextMemoryQueryRequest, ContextMemoryQueryResponse, MemoryChunk, MemoryConflictDetected,
+    MemoryConsolidationCompleted, MemoryQueryRequest, MemoryQueryResponse, MemoryWriteCompleted,
+    MemoryWriteRequest, SemanticIngestComplete, SemanticIngestRequest,
 };
 use bus::events::transparency::TransparencyQuery;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SystemEvent, TransparencyEvent};
@@ -294,6 +294,54 @@ impl MemoryActor {
             .broadcast(Event::Memory(MemoryEvent::QueryCompleted(response)))
             .await;
 
+        Ok(())
+    }
+
+    async fn handle_context_query(
+        store: Arc<Store<SenaEmbedder, SenaExtractor>>,
+        req: ContextMemoryQueryRequest,
+        bus: Arc<EventBus>,
+    ) -> Result<(), MemoryError> {
+        // Use graph-heavy search (context queries benefit from relationship traversal)
+        let opts = SearchOptions {
+            limit: req.max_chunks.max(1),
+            vector_weight: 0.35,
+            graph_weight: 0.65,
+            min_importance: 0.10, // lower threshold — CTP wants broad context
+            tiers: vec![MemoryTier::Semantic, MemoryTier::Episodic],
+        };
+
+        let results = store
+            .search(&req.context_description, opts)
+            .await
+            .map_err(|e| MemoryError::Store(e.to_string()))?;
+
+        let chunks: Vec<MemoryChunk> = results
+            .nodes
+            .iter()
+            .map(|scored| MemoryChunk {
+                text: node_to_text(&scored.node),
+                score: scored.score,
+                timestamp: SystemTime::now(),
+            })
+            .collect();
+
+        // Calculate overall relevance as mean score, or 0.0 if empty
+        let relevance_score = if chunks.is_empty() {
+            0.0
+        } else {
+            chunks.iter().map(|c| c.score as f64).sum::<f64>() / chunks.len() as f64
+        };
+
+        let response = ContextMemoryQueryResponse {
+            chunks,
+            relevance_score,
+            request_id: req.request_id,
+        };
+
+        let _ = bus
+            .broadcast(Event::Memory(MemoryEvent::ContextQueryCompleted(response)))
+            .await;
         Ok(())
     }
 
@@ -584,6 +632,28 @@ impl Actor for MemoryActor {
                                             };
                                             let _ = b
                                                 .broadcast(Event::Memory(MemoryEvent::QueryCompleted(response)))
+                                                .await;
+                                        }
+                                    });
+                                }
+                                MemoryEvent::ContextQueryRequested(req) => {
+                                    let s = Arc::clone(&store);
+                                    let b = Arc::clone(&bus);
+                                    let req_id = req.request_id;
+                                    self.task_set.spawn(async move {
+                                        if let Err(e) = Self::handle_context_query(s, req, Arc::clone(&b)).await {
+                                            // Graceful degradation: return empty response on failure
+                                            tracing::warn!(
+                                                "memory: context query {} failed, returning empty results: {}",
+                                                req_id, e
+                                            );
+                                            let response = ContextMemoryQueryResponse {
+                                                chunks: Vec::new(),
+                                                relevance_score: 0.0,
+                                                request_id: req_id,
+                                            };
+                                            let _ = b
+                                                .broadcast(Event::Memory(MemoryEvent::ContextQueryCompleted(response)))
                                                 .await;
                                         }
                                     });

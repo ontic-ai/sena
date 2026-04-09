@@ -48,85 +48,131 @@ const TRANSPARENCY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Slash-command autocomplete ────────────────────────────────────────────────
 
+/// Maximum input length in characters (Unit 20)
+const MAX_INPUT_LENGTH: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandCategory {
+    Chat,
+    Transparency,
+    Audio,
+    System,
+}
+
+impl CommandCategory {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Transparency => "Transparency",
+            Self::Audio => "Audio",
+            Self::System => "System",
+        }
+    }
+}
+
 struct SlashCommand {
     command: &'static str,
     description: &'static str,
+    category: CommandCategory,
 }
 
 const SLASH_COMMANDS: &[SlashCommand] = &[
+    // Chat category
     SlashCommand {
-        command: "/observation",
-        description: "What are you observing right now?",
-    },
-    SlashCommand {
-        command: "/memory",
-        description: "What do you remember about me?",
-    },
-    SlashCommand {
-        command: "/explanation",
-        description: "Why did you say that?",
-    },
-    SlashCommand {
-        command: "/models",
-        description: "Select which model to use",
+        command: "/help",
+        description: "Show all commands",
+        category: CommandCategory::Chat,
     },
     SlashCommand {
         command: "/copy",
         description: "Copy the last response to clipboard",
+        category: CommandCategory::Chat,
     },
     SlashCommand {
-        command: "/actors",
-        description: "Show actor health status",
-    },
-    SlashCommand {
-        command: "/verbose",
-        description: "Toggle verbose logging",
-    },
-    SlashCommand {
-        command: "/voice",
-        description: "Toggle voice input in this CLI session",
-    },
-    SlashCommand {
-        command: "/speech",
-        description: "View speech configuration and status",
-    },
-    SlashCommand {
-        command: "/listen",
-        description: "Start/stop continuous live transcription",
-    },
-    SlashCommand {
-        command: "/microphone",
-        description: "List microphones or select one (/microphone select <index>)",
-    },
-    SlashCommand {
-        command: "/screenshot",
-        description: "Show screenshot capture + vision model status",
+        command: "/models",
+        description: "Select which model to use",
+        category: CommandCategory::Chat,
     },
     SlashCommand {
         command: "/config",
         description: "Show settings (/config set <key> <value> to edit)",
+        category: CommandCategory::Chat,
+    },
+    // Transparency category
+    SlashCommand {
+        command: "/observation",
+        description: "What are you observing right now?",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/memory",
+        description: "What do you remember about me?",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/explanation",
+        description: "Why did you say that?",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/actors",
+        description: "Show actor health status",
+        category: CommandCategory::Transparency,
+    },
+    SlashCommand {
+        command: "/verbose",
+        description: "Toggle verbose logging",
+        category: CommandCategory::Transparency,
+    },
+    // Audio category
+    SlashCommand {
+        command: "/voice",
+        description: "Toggle voice input in this CLI session",
+        category: CommandCategory::Audio,
+    },
+    SlashCommand {
+        command: "/speech",
+        description: "View speech configuration and status",
+        category: CommandCategory::Audio,
+    },
+    SlashCommand {
+        command: "/listen",
+        description: "Start/stop continuous live transcription",
+        category: CommandCategory::Audio,
+    },
+    SlashCommand {
+        command: "/microphone",
+        description: "List microphones or select one (/microphone select <index>)",
+        category: CommandCategory::Audio,
+    },
+    // System category
+    SlashCommand {
+        command: "/screenshot",
+        description: "Show screenshot capture + vision model status",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/loops",
         description: "List/toggle background loops",
-    },
-    SlashCommand {
-        command: "/help",
-        description: "Show all commands",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/close",
         description: "Close CLI (keep tray/runtime alive)",
+        category: CommandCategory::System,
     },
     SlashCommand {
         command: "/shutdown",
         description: "Shut down Sena completely",
+        category: CommandCategory::System,
     },
 ];
 
 struct SlashDropdown {
     filtered: Vec<usize>,
     selected: usize,
+    /// True if the current prefix matches no commands (Unit 20)
+    no_matches: bool,
 }
 
 #[allow(dead_code)]
@@ -144,9 +190,11 @@ impl SlashDropdown {
             .filter(|(_, c)| c.command.starts_with(lower.as_str()))
             .map(|(i, _)| i)
             .collect();
+        let no_matches = filtered.is_empty() && !prefix.is_empty() && prefix != "/";
         Self {
             filtered,
             selected: 0,
+            no_matches,
         }
     }
 
@@ -159,6 +207,7 @@ impl SlashDropdown {
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.no_matches = self.filtered.is_empty() && !prefix.is_empty() && prefix != "/";
     }
 
     fn prev(&mut self) {
@@ -414,6 +463,11 @@ impl Shell {
 
     /// Render the input area — bordered frame with prompt, status, and key hints.
     fn render_input(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        // Calculate input length for char counter (Unit 20)
+        let input_len = self.state.editor.input.chars().count();
+        let threshold = (MAX_INPUT_LENGTH as f64 * 0.8) as usize;
+        let show_char_counter = input_len > threshold;
+
         // Border color reflects current state
         let border_color = if self.state.waiting_for_inference || self.transparency_loading {
             Color::Yellow
@@ -468,11 +522,18 @@ impl Shell {
                 .add_modifier(Modifier::DIM),
         ));
 
+        // Title with optional char counter
+        let title = if show_char_counter {
+            format!(" Input [{}/{}] ", input_len, MAX_INPUT_LENGTH)
+        } else {
+            " Input ".to_string()
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
-                " Input ",
+                title,
                 Style::default()
                     .fg(border_color)
                     .add_modifier(Modifier::BOLD),
@@ -725,6 +786,34 @@ impl Shell {
         let Some(ref dd) = self.state.slash_dropdown else {
             return;
         };
+
+        // Unit 20: Show "no matching commands" when filter is empty
+        if dd.no_matches {
+            let popup_height = 3u16; // border + single line
+            let popup_width = 40u16.min(frame.area().width.saturating_sub(4));
+            let y = input_area.y.saturating_sub(popup_height);
+            let popup_area = ratatui::layout::Rect {
+                x: input_area.x + 2,
+                y,
+                width: popup_width,
+                height: popup_height,
+            };
+            frame.render_widget(Clear, popup_area);
+            let no_match_line = Line::from(Span::styled(
+                "no matching commands",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+            let para = Paragraph::new(no_match_line).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+            frame.render_widget(para, popup_area);
+            return;
+        }
+
         if dd.is_empty() {
             return;
         }
@@ -749,12 +838,20 @@ impl Shell {
             .iter()
             .map(|&i| {
                 let cmd = &SLASH_COMMANDS[i];
+                // Unit 19: Show category label next to command
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         cmd.command,
                         Style::default()
                             .fg(Color::LightMagenta)
                             .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[{}]", cmd.category.label()),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
                     ),
                     Span::raw("  "),
                     Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),
@@ -826,10 +923,10 @@ impl Shell {
             {
                 self.pending_inference_id = None;
                 self.state.waiting_for_inference = false;
-                self.add_message(
-                    MessageRole::Warning,
-                    format!("Inference failed: {}", reason),
-                );
+                // Unit 21: Parse and format inference errors to be more actionable
+                let error_message =
+                    format_inference_error(&reason, self.state.current_model.as_deref());
+                self.add_message(MessageRole::Warning, error_message);
             }
             Event::Inference(InferenceEvent::ModelLoaded { name, backend }) => {
                 if self.verbose || self.state.waiting_for_inference {
@@ -1009,6 +1106,15 @@ impl Shell {
                 self.add_message(
                     MessageRole::Warning,
                     format!("Voice transcription failed: {}", reason),
+                );
+            }
+            Event::Speech(SpeechEvent::LowConfidenceTranscription { confidence, .. }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!(
+                        "Speech detected but confidence too low ({:.0}%). Please try again.",
+                        confidence * 100.0
+                    ),
                 );
             }
             Event::Download(DownloadEvent::Started {
@@ -2064,25 +2170,55 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
 }
 
 fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
-    for line in [
-        "━━  Commands",
-        "/observation or /obs   What are you observing right now?",
-        "/memory or /mem        What do you remember about me?",
-        "/explanation or /why   Why did you say that?",
-        "/models                Select which model to use",
-        "/voice                 Toggle voice input in this CLI session",
-        "/speech                View speech configuration and status",
-        "/listen                Start/stop continuous live transcription",
-        "/microphone            List microphones or select one (/microphone select <index>)",
-        "/loops                 List all background loops and their status",
-        "/loops <name>          Toggle a loop on/off",
-        "/loops <name> on|off   Explicitly enable or disable a loop",
-        "/help                  Show this message",
-        "/close or /quit        Close the CLI session",
-        "/shutdown              Shut down Sena completely",
-        "/copy                  Copy last response to clipboard",
+    add_message(state, MessageRole::System, "━━  Commands");
+
+    for category in [
+        CommandCategory::Chat,
+        CommandCategory::Transparency,
+        CommandCategory::Audio,
+        CommandCategory::System,
     ] {
-        add_message(state, MessageRole::System, line);
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("{}:", category.label()),
+        );
+
+        for cmd in SLASH_COMMANDS.iter().filter(|cmd| cmd.category == category) {
+            add_message(
+                state,
+                MessageRole::System,
+                &format!("  {:<20} {}", cmd.command, cmd.description),
+            );
+        }
+
+        if category == CommandCategory::Transparency {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /observation or /obs  Alias for /observation",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /memory or /mem       Alias for /memory",
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "  /explanation or /why  Alias for /explanation",
+            );
+        }
+
+        if category == CommandCategory::System {
+            add_message(
+                state,
+                MessageRole::System,
+                "  /close or /quit       Alias to close the CLI session",
+            );
+        }
+
+        add_message(state, MessageRole::System, "");
     }
 }
 
@@ -2164,6 +2300,33 @@ fn is_vision_capable_model(name: &str) -> bool {
         || n.contains("moondream")
         || n.contains("idefics")
         || n.contains("cogvlm")
+}
+
+/// Unit 21: Parse and format inference errors to be more actionable
+fn format_inference_error(reason: &str, model_name: Option<&str>) -> String {
+    let lower = reason.to_lowercase();
+
+    if lower.contains("failed to load model") || lower.contains("no model file") {
+        if let Some(name) = model_name {
+            format!(
+                "Could not load model '{}'. Is the model file accessible? Check that the path is correct and the file exists.",
+                name
+            )
+        } else {
+            "Failed to load the requested model. The model file may be missing or inaccessible."
+                .to_string()
+        }
+    } else if lower.contains("no model available") || lower.contains("no model loaded") {
+        "No AI model is loaded. Use /models to select a model first.".to_string()
+    } else if lower.contains("out of memory") || lower.contains("oom") {
+        "Inference failed due to insufficient memory. Try a smaller model or reduce context size."
+            .to_string()
+    } else if lower.contains("context length exceeded") || lower.contains("context too large") {
+        "Input is too long for this model's context window. Try shorter input or use a model with larger context.".to_string()
+    } else {
+        // Generic error with prefix for clarity
+        format!("[inference error] {}", reason)
+    }
 }
 
 /// Run the interactive shell. Returns the exit reason for the restart loop.
@@ -2664,6 +2827,13 @@ impl ShellMode {
                 }
             }
             Self::Ipc { state, .. } => {
+                // Unit 20: Add "Loading model..." indicator
+                add_message(
+                    state,
+                    MessageRole::System,
+                    &format!("Loading model: {}...", model_name),
+                );
+
                 let event = Event::System(bus::events::SystemEvent::ConfigSetRequested {
                     key: "preferred_model".to_string(),
                     value: model_name.clone(),
@@ -2675,14 +2845,7 @@ impl ShellMode {
                         &format!("Failed to change model: {}", e),
                     );
                 } else {
-                    add_message(
-                        state,
-                        MessageRole::System,
-                        &format!(
-                            "Selected model: {} — change takes effect after daemon restart.",
-                            model_name
-                        ),
-                    );
+                    // Success message will be shown when ModelLoaded event arrives
                     state.current_model = Some(model_name);
                 }
             }
@@ -2870,12 +3033,14 @@ async fn run_shell<T: MessageTransport>(
                                         let current_input = mode.state().editor.input.clone();
                                         if let Some(dd) = &mut mode.state_mut().slash_dropdown {
                                             dd.update(&current_input);
-                                            if dd.is_empty() {
+                                            // Unit 20: Keep dropdown open to show "no matches" if needed
+                                            if dd.is_empty() && !dd.no_matches {
                                                 mode.state_mut().slash_dropdown = None;
                                             }
                                         } else {
                                             let dd = SlashDropdown::from_prefix(&current_input);
-                                            if !dd.is_empty() {
+                                            // Unit 20: Show dropdown even if empty to display "no matches"
+                                            if !dd.is_empty() || dd.no_matches {
                                                 mode.state_mut().slash_dropdown = Some(dd);
                                             }
                                         }
@@ -2903,23 +3068,30 @@ async fn run_shell<T: MessageTransport>(
                                     if !mods.contains(KeyModifiers::CONTROL)
                                         && !mods.contains(KeyModifiers::ALT)
                                         && mode.state().model_popup.is_none() => {
-                                    mode.state_mut().editor.input.push(c);
-                                    mode.state_mut().ctrl_c_first_press = None;
-                                    if mode.state().editor.input.starts_with('/') {
-                                        let current_input = mode.state().editor.input.clone();
-                                        if let Some(dd) = &mut mode.state_mut().slash_dropdown {
-                                            dd.update(&current_input);
-                                            if dd.is_empty() {
-                                                mode.state_mut().slash_dropdown = None;
+                                    // Unit 20: Enforce input length limit
+                                    if mode.state().editor.input.len() >= MAX_INPUT_LENGTH {
+                                        // Reject character — input is at max length
+                                    } else {
+                                        mode.state_mut().editor.input.push(c);
+                                        mode.state_mut().ctrl_c_first_press = None;
+                                        if mode.state().editor.input.starts_with('/') {
+                                            let current_input = mode.state().editor.input.clone();
+                                            if let Some(dd) = &mut mode.state_mut().slash_dropdown {
+                                                dd.update(&current_input);
+                                                // Unit 20: Keep dropdown open to show "no matches" if needed
+                                                if dd.is_empty() && !dd.no_matches {
+                                                    mode.state_mut().slash_dropdown = None;
+                                                }
+                                            } else {
+                                                let dd = SlashDropdown::from_prefix(&current_input);
+                                                // Unit 20: Show dropdown even if empty to display "no matches"
+                                                if !dd.is_empty() || dd.no_matches {
+                                                    mode.state_mut().slash_dropdown = Some(dd);
+                                                }
                                             }
                                         } else {
-                                            let dd = SlashDropdown::from_prefix(&current_input);
-                                            if !dd.is_empty() {
-                                                mode.state_mut().slash_dropdown = Some(dd);
-                                            }
+                                            mode.state_mut().slash_dropdown = None;
                                         }
-                                    } else {
-                                        mode.state_mut().slash_dropdown = None;
                                     }
                                 }
                                 _ => {}
@@ -3309,6 +3481,33 @@ fn render_slash_dropdown_overlay(
 ) {
     use ratatui::widgets::Clear;
 
+    // Unit 20: Show "no matching commands" when filter is empty
+    if dd.no_matches {
+        let popup_height = 3u16; // border + single line
+        let popup_width = 40u16.min(frame.area().width.saturating_sub(4));
+        let y = input_area.y.saturating_sub(popup_height);
+        let popup_area = ratatui::layout::Rect {
+            x: input_area.x + 2,
+            y,
+            width: popup_width,
+            height: popup_height,
+        };
+        frame.render_widget(Clear, popup_area);
+        let no_match_line = Line::from(Span::styled(
+            "no matching commands",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+        let para = Paragraph::new(no_match_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(para, popup_area);
+        return;
+    }
+
     let count = dd.filtered.len() as u16;
     let popup_height = count.min(8) + 2; // +2 for border
     let popup_width = 62u16.min(frame.area().width.saturating_sub(4));
@@ -3329,12 +3528,20 @@ fn render_slash_dropdown_overlay(
         .iter()
         .map(|&i| {
             let cmd = &SLASH_COMMANDS[i];
+            // Unit 19: Show category label next to command
             ListItem::new(Line::from(vec![
                 Span::styled(
                     cmd.command,
                     Style::default()
                         .fg(Color::LightMagenta)
                         .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("[{}]", cmd.category.label()),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
                 ),
                 Span::raw("  "),
                 Span::styled(cmd.description, Style::default().fg(Color::DarkGray)),
