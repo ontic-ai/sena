@@ -1,5 +1,5 @@
 # Sena — Architecture
-**Version:** 0.5.0  
+**Version:** 0.6.0  
 **Status:** Governing Document — no implementation decision may contradict this file without a formal revision  
 **Reconcile against:** `docs/PRD.md` first, this document second
 
@@ -314,12 +314,14 @@ Platform Events → Signal Buffer → Context Assembler → Trigger Gate → Tho
 
 ```rust
 pub struct ContextSnapshot {
-    pub active_app: AppContext,
+    pub active_app: WindowContext,
     pub recent_files: Vec<FileEvent>,
     pub clipboard_digest: Option<String>,   // digest/summary, not raw content
     pub keystroke_cadence: KeystrokeCadence,
     pub session_duration: Duration,
-    pub inferred_task: Option<TaskHint>,
+    pub inferred_task: Option<EnrichedInferredTask>,  // was Option<TaskHint>
+    pub user_state: Option<UserState>,                 // NEW
+    pub visual_context: Option<VisualContext>,          // NEW (from Phase 5.5)
     pub timestamp: Instant,
 }
 ```
@@ -351,6 +353,61 @@ When multiple speech actors require microphone access (wakeword detection, STT a
 - When listen mode activates, wakeword detection must be suppressed (via `WakewordSuppressed` event) and its audio stream released.
 - When listen mode deactivates, wakeword can resume (via `WakewordResumed` event) and reclaim its stream.
 - Shared state (accumulated samples, VAD state) must be scoped per-mode, never shared between concurrent capture purposes.
+
+### 6.5 CTP Intelligence Layer
+
+CTP's intelligence layer analyzes signal buffers and context snapshots to detect behavioral patterns, infer user state, and semantically describe tasks. This layer enables significance-based triggering that considers user context, not just raw context diffs.
+
+**Pattern Engine** (`crates/ctp/src/pattern_engine.rs`):
+
+Detects behavioral patterns from the signal buffer using rule-based detection (no ML). Each pattern has named detection rules with configurable thresholds:
+
+| Pattern | Detection criteria |
+|---|---|
+| **Frustration** | Rapid window switches (>3 in 30s), high keystroke variance (burst then pause), clipboard copy without paste (abandoned) |
+| **Repetition** | Same file edited >3 times in 5 minutes, same app switch back-and-forth |
+| **FlowState** | Sustained keystroke cadence in narrow variance band, no app switches for >10 minutes, low idle periods |
+| **Anomaly** | Out-of-hours activity, unusual app combination, rapid task switching (>5 context switches in 2 minutes) |
+
+All thresholds must be tunable via config (`ctp.pattern_thresholds`).
+
+**User State Classifier** (`crates/ctp/src/user_state.rs`):
+
+Computes ephemeral user state from the current snapshot + detected patterns. Output fields:
+- `frustration_level`: 0–100 integer score
+- `flow_detected`: boolean
+- `context_switch_cost`: 0–100 integer score representing cognitive load from recent switches
+
+User state is **never persisted** — it is computed per CTP tick and discarded. It influences trigger scoring and is included in the `ContextSnapshot.user_state` field for prompt composition.
+
+**Task Inference Engine** (`crates/ctp/src/task_inference.rs`):
+
+Generates semantic task descriptions from active window context, replacing the old simple app-name matching. Produces `EnrichedInferredTask` with:
+- `semantic_description`: String (e.g., "Editing Rust source code", "Debugging a build failure", "Writing documentation")
+- `confidence`: f64 (0.0–1.0)
+
+Task descriptions are rule-based inferences from window title + app name patterns. No LLM inference is used for task inference.
+
+**Significance-based triggering** (`trigger_gate.rs` enhancement):
+
+The trigger gate now considers:
+1. Context diff magnitude (unchanged from Phase 1–6)
+2. Detected patterns (frustration/repetition increase score, flow state increases threshold)
+3. Memory relevance (if context-aware memory query returns high relevance score, increase trigger likelihood)
+4. User state (high frustration or context switch cost boosts proactive trigger probability)
+
+Trigger scoring is configurable. Default weights:
+- Context diff: 40%
+- Pattern detection: 30%
+- Memory relevance: 20%
+- User state: 10%
+
+**Hard rules:**
+- All pattern detection is rule-based. Thresholds must be tunable via config.
+- User state is ephemeral — computed per CTP tick, not persisted to Soul or memory.
+- `EnrichedInferredTask` replaces the old `TaskHint` type in `ContextSnapshot`.
+- Task inference is synchronous and fast (<5ms). No blocking I/O or inference calls.
+- Pattern engine output is emitted as `PatternDetected` events on the bus for transparency.
 
 ---
 
@@ -482,6 +539,18 @@ Both ech0 storage files (`redb` graph, `hora` vector index) are encrypted. See �
 - `ConflictResolution::Overwrite` is never called silently. Any overwrite is logged to Soul first.
 - The ech0 `Store` instance is owned exclusively by the memory actor. No other actor holds a reference to it.
 
+### 8.8 Context-Aware Memory Queries
+
+CTP can request context-relevant memories via `ContextMemoryQueryRequested` events (defined in `bus::events::memory`). The memory actor performs graph-heavy search (65% graph weight vs. 35% vector weight) with lower importance thresholds (0.10) for broad context retrieval.
+
+The response (`ContextMemoryQueryResponse`) includes:
+- `chunks`: `Vec<MemoryChunk>` — retrieved memories ranked by relevance
+- `overall_relevance`: f64 (0.0–1.0) — aggregate relevance score for CTP trigger gating
+
+Context queries differ from standard memory queries (which use 50/50 graph/vector weight and 0.30 importance threshold). Context queries prioritize breadth and recency over strict semantic match, enabling CTP to detect when the user's current activity relates to past experiences even if the phrasing differs.
+
+**Hard rule:** Context queries never trigger memory consolidation or ingestion. They are read-only.
+
 ---
 
 ## 9. Prompt Composition
@@ -500,6 +569,7 @@ pub enum PromptSegment {
     UserIntent(Option<String>),
     ReflectionDirective(ReflectionMode),
     SoulContext(SoulSummary),
+    RichSoulContext(RichSoulSummary),  // NEW — multi-section, relevance-scored soul summary
 }
 ```
 
@@ -541,6 +611,74 @@ Every significant event (inference cycle, memory write, identity signal, user in
 - Soul's event log is append-only. No record is ever deleted by the system. Deletion is a user-initiated, explicit, destructive action with confirmation.
 - Soul's internal schema types are never exposed in `pub` APIs outside the crate. External crates receive `SoulSummary` and `SoulEventLogged` — opaque, typed summaries.
 - Soul does not perform inference. It stores and retrieves. Any "understanding" of soul data is done by CTP or the prompt actor.
+
+### 10.4 Soul Intelligence Layer
+
+Soul's intelligence layer processes absorbed events to identify persistent behavioral patterns, temporal habits, and user preferences. All modules are private (`mod`, not `pub mod`) — only events are public.
+
+**Distillation Engine** (`crates/soul/src/distillation.rs`):
+
+Watches identity signal counters (stored in the `IDENTITY_SIGNALS` table as key-value pairs). When a signal crosses significance thresholds (configurable, e.g., >5 occurrences in 7 days), it distills the pattern into a `DistilledIdentitySignal`. Distilled signals are persisted and included in `RichSoulSummary`.
+
+Example signals:
+- Preferred programming languages (file extension frequency)
+- Active project contexts (frequent directory patterns)
+- Communication style (preferred tone from feedback)
+
+Thresholds: `soul.distillation_min_occurrences` (default 5), `soul.distillation_window_days` (default 7).
+
+**Temporal Model** (`crates/soul/src/temporal_model.rs`):
+
+Records events bucketed by hour-of-day (0–23) and day-of-week (Mon–Sun). Produces `TemporalBehaviorPattern` entries:
+- Peak activity hours
+- Typical work hours vs. off-hours
+- Weekend vs. weekday behavior differences
+
+Temporal patterns are computed from the event log (`EVENT_LOG` table) during the harvest cycle. They enable Sena to adapt proactive behavior to user rhythms (e.g., suppress proactive thoughts during detected focus hours).
+
+**Preference Learner** (`crates/soul/src/preference_learning.rs`):
+
+Tracks user engagement signals from bus events:
+- `InferenceAccepted` / `InferenceIgnored` / `InferenceInterrupted`
+- `FollowUpQuery` (user asked clarifying question — sign of interest)
+
+After sufficient data (>20 inference cycles with explicit feedback), distills preferences:
+- `verbosity` (short vs. detailed responses)
+- `proactiveness` (how often proactive thoughts are accepted vs. ignored)
+- `tone` (formal, casual, technical)
+
+Preferences are stored as key-value pairs in `IDENTITY_SIGNALS` and included in `RichSoulSummary`.
+
+**Rich Summary Assembler** (`crates/soul/src/summary_assembler.rs`):
+
+Produces `RichSoulSummary` (emitted via `SoulRichSummaryReady` event) with multiple sections:
+1. **RecentEvents** (last 10 events from event log)
+2. **IdentitySignals** (distilled patterns, sorted by relevance score)
+3. **TemporalHabits** (current-hour and current-day patterns)
+4. **Preferences** (learned interaction preferences)
+
+Each section is relevance-scored based on:
+- Recency (events in last 24h score higher)
+- Frequency (signals with >10 occurrences score higher)
+- Context match (if current task matches a distilled signal, boost its score)
+
+The prompt actor can selectively include high-relevance sections based on token budget.
+
+**Harvest cycle:**
+
+Every 50 absorbed events (configurable via `soul.harvest_event_threshold`), the soul actor triggers:
+1. Distillation: check identity signal counters, distill new patterns
+2. Temporal update: bucket recent events by time, update temporal model
+3. Preference check: if >20 feedback events exist, recompute preferences
+
+All harvested data is persisted to the `IDENTITY_SIGNALS` table as JSON-serialized key-value pairs.
+
+**Hard rules:**
+- All intelligence modules are `mod` (private to soul crate). Only events are public.
+- All data persisted through existing `IDENTITY_SIGNALS` table (key-value pairs). No new schema tables for intelligence data.
+- Harvest cycle is triggered by event count, not time interval (deterministic, testable).
+- `RichSoulSummary` sections are sorted by relevance. The prompt actor decides which to include.
+- No LLM inference is performed by Soul. All distillation and preference learning is rule-based heuristics.
 
 ---
 
