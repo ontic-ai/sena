@@ -6,13 +6,13 @@ use bus::events::soul::{RichSoulSummary, SoulSection, SoulSectionType};
 use redb::{ReadableDatabase, ReadableTable};
 
 /// Summary assembler that builds rich, structured Soul summaries.
-pub(crate) struct SummaryAssembler;
+pub struct SummaryAssembler;
 
 impl SummaryAssembler {
     /// Build a rich multi-section summary from Soul database state.
     ///
     /// `token_budget` limits total output size (rough estimate: 4 chars ≈ 1 token).
-    pub(crate) fn assemble(
+    pub fn assemble(
         db: &redb::Database,
         token_budget: usize,
     ) -> Result<RichSoulSummary, SoulError> {
@@ -208,7 +208,6 @@ impl SummaryAssembler {
 mod tests {
     use super::*;
     use crate::schema::apply_schema;
-    use redb::{ReadableTable, TableDefinition};
     use tempfile::tempdir;
 
     fn open_test_db() -> (tempfile::TempDir, redb::Database) {

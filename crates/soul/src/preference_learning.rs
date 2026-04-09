@@ -4,7 +4,7 @@ use bus::events::soul::EngagementSignal;
 
 /// Preference learner that accumulates engagement signals and distills
 /// user preferences once sufficient data is available.
-pub(crate) struct PreferenceLearner {
+pub struct PreferenceLearner {
     accepted_count: u32,
     ignored_count: u32,
     interrupted_count: u32,
@@ -14,7 +14,7 @@ pub(crate) struct PreferenceLearner {
 }
 
 impl PreferenceLearner {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             accepted_count: 0,
             ignored_count: 0,
@@ -25,7 +25,7 @@ impl PreferenceLearner {
     }
 
     /// Record an engagement signal.
-    pub(crate) fn record_engagement(&mut self, signal: &EngagementSignal) {
+    pub fn record_engagement(&mut self, signal: &EngagementSignal) {
         match signal {
             EngagementSignal::Accepted => self.accepted_count += 1,
             EngagementSignal::Ignored => self.ignored_count += 1,
@@ -38,7 +38,7 @@ impl PreferenceLearner {
     ///
     /// Returns (key, value) pairs to write to IDENTITY_SIGNALS.
     /// Clears internal counters after harvest.
-    pub(crate) fn harvest_preferences(&mut self) -> Vec<(String, String)> {
+    pub fn harvest_preferences(&mut self) -> Vec<(String, String)> {
         let total = self.accepted_count
             + self.ignored_count
             + self.interrupted_count
@@ -81,6 +81,12 @@ impl PreferenceLearner {
         self.follow_up_count = 0;
 
         preferences
+    }
+}
+
+impl Default for PreferenceLearner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
