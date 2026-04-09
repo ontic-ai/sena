@@ -95,8 +95,13 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         command: "/config",
-        description: "Show settings (/config set <key> <value> to edit)",
+        description: "Show settings (/config set <key> <value> or /config reload)",
         category: CommandCategory::Chat,
+    },
+    SlashCommand {
+        command: "/reload",
+        description: "Reload config from disk",
+        category: CommandCategory::System,
     },
     // Transparency category
     SlashCommand {
@@ -150,6 +155,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
         category: CommandCategory::System,
+>>>>>>> origin/dev
     },
     SlashCommand {
         command: "/loops",
@@ -1714,6 +1720,20 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             handle_config_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
+        "/reload" => {
+            transport
+                .send(
+                    target,
+                    Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+                )
+                .await?;
+            add_message(
+                deps.state,
+                MessageRole::System,
+                "Reloading config from disk...",
+            );
+            Ok(DispatchResult::Continue)
+        }
         "/loops" => {
             handle_loops_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
@@ -1789,6 +1809,11 @@ fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
         Event::System(bus::events::SystemEvent::ConfigSetRequested { key, value }) => {
             Ok(IpcPayload::SlashCommand {
                 line: format!("/config set {} {}", key, value),
+            })
+        }
+        Event::System(bus::events::SystemEvent::ConfigReloadRequested) => {
+            Ok(IpcPayload::SlashCommand {
+                line: "/config reload".to_string(),
             })
         }
         Event::System(bus::events::SystemEvent::LoopControlRequested { loop_name, enabled }) => {
@@ -2051,6 +2076,14 @@ async fn handle_config_command<T: MessageTransport + ?Sized>(
             MessageRole::System,
             &format!("Setting {} = {}...", key, value),
         );
+    } else if parts.get(1) == Some(&"reload") {
+        transport
+            .send(
+                target,
+                Event::System(bus::events::SystemEvent::ConfigReloadRequested),
+            )
+            .await?;
+        add_message(state, MessageRole::System, "Reloading config from disk...");
     } else {
         let config_path = runtime::config::config_path()
             .map(|p| p.display().to_string())
