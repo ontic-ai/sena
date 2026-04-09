@@ -257,6 +257,15 @@ impl WakewordActor {
         };
 
         if let Some(conf) = confidence {
+            // Debounce: check if we're within cooldown period from last detection
+            if let Some(last) = self.last_detection {
+                if last.elapsed() < self.debounce_duration {
+                    // Within cooldown period — ignore this detection
+                    return Ok(());
+                }
+            }
+
+            // Update last detection time before broadcasting
             self.last_detection = Some(Instant::now());
 
             bus.broadcast(Event::Speech(SpeechEvent::WakewordDetected {

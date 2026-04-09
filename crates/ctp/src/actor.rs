@@ -182,14 +182,14 @@ impl Actor for CTPActor {
 
                     // Emit ContextSnapshotReady event on each tick so downstream
                     // actors can observe context evolution even when no trigger fires.
-                    bus.broadcast(Event::CTP(CTPEvent::ContextSnapshotReady(snapshot.clone())))
+                    bus.broadcast(Event::CTP(Box::new(CTPEvent::ContextSnapshotReady(snapshot.clone()))))
                         .await
                         .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ContextSnapshotReady: {}", e)))?;
 
                     // Check if we should trigger
                     if self.boot_complete && self.gate.should_trigger(&snapshot) {
                         // Emit ThoughtEventTriggered event
-                        bus.broadcast(Event::CTP(CTPEvent::ThoughtEventTriggered(snapshot)))
+                        bus.broadcast(Event::CTP(Box::new(CTPEvent::ThoughtEventTriggered(snapshot))))
                             .await
                             .map_err(|e| ActorError::RuntimeError(format!("failed to broadcast ThoughtEventTriggered: {}", e)))?;
                     }
@@ -278,7 +278,7 @@ impl CTPActor {
         let response = handle_current_observation(self.refresh_snapshot());
 
         bus.broadcast(Event::Transparency(
-            TransparencyEvent::ObservationResponded(response),
+            TransparencyEvent::ObservationResponded(Box::new(response)),
         ))
         .await
         .map_err(|e| format!("failed to broadcast ObservationResponded: {}", e))

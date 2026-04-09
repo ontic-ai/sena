@@ -489,11 +489,80 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ---
 
+## Phase 7A — CTP + Soul Intelligence Layer & UX Polish
+
+**Goal:** Transform CTP from a passive signal collector into an active reasoning cortex with pattern recognition, user-state classification, and rich task inference. Elevate Soul from flat key-value storage into an identity distillation, temporal modeling, and preference learning engine. Polish CLI, prompt, memory, and speech subsystems to consume the new intelligence.
+
+**Entry gate:** Phase 6 exit conditions met.
+
+**Open questions:** None — all design decisions resolved during implementation.
+
+### M7A.1 — Intelligence Audit & Bus Event Foundation
+- [x] Full subsystem audit of CTP, Soul, Memory, Prompt, CLI, Speech (776-line report)
+- [x] New bus event types: CTP (UserStateComputed, SignalPatternDetected, EnrichedInferredTask), Soul (IdentitySignalDistilled, TemporalPatternDetected, PreferenceLearningUpdate, RichSummaryRequested/Ready), Memory (ContextQueryRequested/Completed), Speech (LowConfidenceTranscription)
+- [x] Box CTP event variant to reduce Event enum size
+
+### M7A.2 — CTP Intelligence
+- [x] Pattern engine: frustration, repetition, flow-state, anomaly detection from signal buffer
+- [x] User-state classifier: frustration_level, flow_detected, context_switch_cost
+- [x] Rich task inference engine: semantic descriptions with confidence scoring
+- [x] Trigger gate: pattern-aware significance scoring (+0.20 frustration, +0.15 anomaly, +0.10 switch cost, +0.10 memory relevance)
+- [x] CTP actor integration: pattern → state → task → broadcast → trigger pipeline
+
+### M7A.3 — Soul Intelligence
+- [x] Identity distillation: harvests DistilledIdentitySignal from observation counters
+- [x] Temporal behavior model: hour×day_of_week bucketed activity patterns
+- [x] Preference learning: engagement signal tracking → verbosity, engagement, proactiveness preferences
+- [x] Rich summary assembler: multi-section RichSoulSummary with token budget and relevance sorting
+- [x] Soul actor integration: periodic intelligence harvesting every 50 events
+
+### M7A.4 — Cross-Crate Integration
+- [x] Prompt: RichSoulContext segment renders multi-section soul summaries; enhanced CurrentContext with semantic task + user state
+- [x] Memory: context-aware queries (ContextMemoryQueryRequest/Response) with graph-heavy search
+- [x] CTP↔Memory feedback loop: cached_memory_relevance updates trigger gate scoring
+
+### M7A.5 — CLI UX Polish
+- [x] /help grouped by category (Chat, Transparency, Audio, System) in TUI and IPC
+- [x] Input length limit (4096 chars) with visible character counter
+- [x] No-match autocomplete indicator
+- [x] Model loading feedback messages
+- [x] Formatted inference error display
+- [x] Enhanced onboarding: explicit list of what works vs doesn't without a model
+
+### M7A.6 — Speech Naturalness
+- [x] Low-confidence transcription events instead of silent failures
+- [x] TTS queue overflow broadcasts SpeechFailed (was silent)
+- [x] Wakeword debounce cooldown to prevent rapid-fire detections
+
+### M7A.7 — Integration Tests & Architecture Docs
+- [x] CTP intelligence integration tests (pattern engine + user state + task inference)
+- [x] Soul intelligence integration tests (distillation + temporal + preference + summary)
+- [x] Cross-crate integration tests (CTP→Memory query, Soul→Prompt rendering)
+- [x] Architecture docs bumped to v0.6.0: §6.5 CTP Intelligence Layer, §8.8 Context-Aware Memory Queries, §10.4 Soul Intelligence Layer
+
+**Exit gate — Phase 7A complete when:**
+- [x] CTP detects at least 4 signal pattern types and uses them in trigger decisions
+- [x] CTP classifies user state (frustration, flow, context-switch cost) every tick
+- [x] CTP infers semantic task descriptions with confidence scoring
+- [x] Soul distills identity signals from observation counters
+- [x] Soul tracks temporal behavior patterns bucketed by time
+- [x] Soul learns user preferences from engagement signals
+- [x] Soul assembles rich multi-section summaries with token budgets
+- [x] Memory responds to context-aware queries from CTP
+- [x] Prompt renders rich soul context and enhanced snapshots
+- [x] CLI /help is grouped, input is length-limited, onboarding is informative
+- [x] Speech handles low-confidence gracefully, TTS overflow is visible, wakeword debounces
+- [x] 536+ tests pass across the workspace (2 ignored: OS keychain integration and 72h longevity — both pre-existing)
+- [x] Architecture docs reflect all new subsystems
+- [x] All previous exit gate conditions still hold
+
+---
+
 ## Phase 7 — Natural Speech: Voice Cloning and Continuous Listening
 
 **Goal:** Transform Sena's speech capabilities from basic TTS/STT to natural, emotionally-aware voice interaction. TTS gains voice cloning and emotional prosody driven by Soul state. STT becomes continuous, low-latency, and speaker-aware.
 
-**Entry gate:** Phase 6 exit gate fully satisfied. OQ-TTS-7 and OQ-STT-7 resolved.
+**Entry gate:** Phase 7A exit gate fully satisfied. OQ-TTS-7 and OQ-STT-7 resolved.
 
 **Open Questions (must resolve before work begins):**
 

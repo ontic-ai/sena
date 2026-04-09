@@ -4,16 +4,17 @@ use async_trait::async_trait;
 use bus::events::ctp::{CTPEvent, ContextSnapshot};
 use bus::events::inference::Priority;
 use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
-use bus::events::soul::{SoulSummary, SoulSummaryRequested};
+use bus::events::soul::{IdentitySignalEmitted, SoulSummary, SoulSummaryRequested};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::discovery;
+use crate::identity_signals::extract_identity_signals;
 use crate::queue::{InferenceQueue, QueuedWork, WorkKind};
 use crate::registry::ModelRegistry;
 use crate::transparency_query::{handle_transparency_query, InferenceState};
@@ -372,12 +373,12 @@ impl InferenceActor {
                     None => return Err(err),
                 };
 
-                let retry_max_tokens = match Self::compute_retry_max_tokens(overflow, params.max_tokens)
-                {
-                    Ok(Some(v)) => v,
-                    Ok(None) => return Err(err),
-                    Err(e) => return Err(e.to_string()),
-                };
+                let retry_max_tokens =
+                    match Self::compute_retry_max_tokens(overflow, params.max_tokens) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => return Err(err),
+                        Err(e) => return Err(e.to_string()),
+                    };
 
                 tracing::warn!(
                     "inference: context overflow on first attempt; retrying once with max_tokens {} -> {} (prompt={}, context={})",
@@ -875,6 +876,45 @@ impl InferenceActor {
         parts.join("\n\n")
     }
 
+    fn active_hours_range_utc(now: SystemTime) -> String {
+        let hour = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| ((d.as_secs() / 3600) % 24) as u8)
+            .unwrap_or(0);
+
+        if hour < 6 {
+            "00-05".to_string()
+        } else if hour < 12 {
+            "06-11".to_string()
+        } else if hour < 18 {
+            "12-17".to_string()
+        } else {
+            "18-23".to_string()
+        }
+    }
+
+    async fn emit_identity_signals_from_response(&self, bus: &Arc<EventBus>, response: &str) {
+        let now = SystemTime::now();
+        let mut signals = extract_identity_signals(response);
+        signals.push((
+            "active_hours".to_string(),
+            Self::active_hours_range_utc(now),
+        ));
+
+        for (key, value) in signals {
+            let _ = bus
+                .send_directed(
+                    "soul",
+                    Event::Soul(SoulEvent::IdentitySignalEmitted(IdentitySignalEmitted {
+                        key,
+                        value,
+                        timestamp: now,
+                    })),
+                )
+                .await;
+        }
+    }
+
     /// Process a single inference request with memory context enrichment.
     /// This runs directly in the event loop (not queued) so the actor can handle
     /// Embed/Extract requests from memory while waiting for query responses.
@@ -1019,6 +1059,9 @@ impl InferenceActor {
                     .await;
             }
         }
+
+        // Extract and emit identity signals to soul (M3.5).
+        self.emit_identity_signals_from_response(bus, &result).await;
 
         Ok((result, token_count))
     }
@@ -1228,6 +1271,10 @@ impl InferenceActor {
             rounds_completed: 1,
         });
 
+        // Extract and emit identity signals to soul (M3.5).
+        self.emit_identity_signals_from_response(bus, &full_text)
+            .await;
+
         Ok((full_text, token_count))
     }
 
@@ -1335,6 +1382,7 @@ impl InferenceActor {
     ) -> Result<SoulSummary, String> {
         let mut rx = bus.subscribe_broadcast();
 
+        // TODO Phase 7B: switch to RichSummaryRequested for section-based prompt assembly
         bus.send_directed(
             "soul",
             Event::Soul(SoulEvent::SummaryRequested(SoulSummaryRequested {
@@ -1651,13 +1699,14 @@ impl Actor for InferenceActor {
                         Ok(Event::System(SystemEvent::ShutdownSignal)) => {
                             return Ok(());
                         }
-                        Ok(Event::CTP(CTPEvent::ContextSnapshotReady(snapshot))) => {
-                            self.last_snapshot = Some(snapshot);
-                        }
-                        Ok(Event::CTP(CTPEvent::ThoughtEventTriggered(snapshot))) => {
-                            // Proactive inference: CTP determined context is worth reasoning about.
-                            // Compose a context-derived prompt and run inference.
-                            self.last_snapshot = Some(snapshot.clone());
+                        Ok(Event::CTP(ctp_event)) => match *ctp_event {
+                            CTPEvent::ContextSnapshotReady(snapshot) => {
+                                self.last_snapshot = Some(snapshot);
+                            }
+                            CTPEvent::ThoughtEventTriggered(snapshot) => {
+                                // Proactive inference: CTP determined context is worth reasoning about.
+                                // Compose a context-derived prompt and run inference.
+                                self.last_snapshot = Some(snapshot.clone());
 
                             // Guard: only run proactive inference if the model is already loaded.
                             // Never call ensure_loaded() proactively — model loading is an
@@ -1717,7 +1766,9 @@ impl Actor for InferenceActor {
                                         .await;
                                 }
                             }
-                        }
+                            }
+                            _ => {} // Ignore other CTPEvent variants
+                        },
                         Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
                             text,
                             confidence: _,
@@ -2565,6 +2616,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(3600),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
         };
@@ -2601,6 +2653,7 @@ mod tests {
             },
             session_duration: Duration::from_secs(1200),
             inferred_task: None,
+            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
         };
@@ -2641,6 +2694,36 @@ mod tests {
         assert!(memory_pos < history_pos);
         assert!(history_pos < context_pos);
         assert!(context_pos < user_pos);
+    }
+
+    #[test]
+    fn active_hours_range_utc_maps_boundaries() {
+        let sec = |h: u64| h * 3600;
+
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(0))
+            ),
+            "00-05"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(6))
+            ),
+            "06-11"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(12))
+            ),
+            "12-17"
+        );
+        assert_eq!(
+            InferenceActor::active_hours_range_utc(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(sec(18))
+            ),
+            "18-23"
+        );
     }
 
     #[test]

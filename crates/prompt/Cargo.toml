@@ -8,8 +8,4 @@ repository.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
-ctp = { path = "../ctp" }
-inference = { path = "../inference" }
-memory = { path = "../memory" }
-text = { path = "../text" }
 thiserror.workspace = true

@@ -1,8 +1,6 @@
 //! Windows platform adapter implementation.
 
 #[cfg(target_os = "windows")]
-use std::hash::{Hash, Hasher};
-#[cfg(target_os = "windows")]
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
@@ -197,9 +195,9 @@ impl PlatformAdapter for WindowsPlatform {
         let char_count = text.chars().count();
 
         // Hash the content â€” never store raw clipboard text.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let digest_hex = format!("{:016x}", hasher.finish());
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(text.as_bytes());
+        let digest_hex = format!("{:x}", digest);
 
         Some(ClipboardDigest {
             digest: Some(digest_hex),
