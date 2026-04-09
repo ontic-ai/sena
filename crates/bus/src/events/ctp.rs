@@ -66,7 +66,7 @@ pub struct UserState {
 }
 
 /// Type of signal pattern detected.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignalPatternType {
     Frustration,
     Repetition,
