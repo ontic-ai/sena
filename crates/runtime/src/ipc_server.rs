@@ -784,40 +784,22 @@ async fn dispatch_slash_command(
             vec![
                 ("━━  Commands".to_string(), LineStyle::SystemNotice),
                 (
-                    "/observation or /obs   — What are you observing right now?".to_string(),
-                    LineStyle::Normal,
+                    "Chat & Configuration: /help, /copy, /models, /config".to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/memory or /mem        — What do you remember about me?".to_string(),
-                    LineStyle::Normal,
+                    "Transparency & Insight: /observation (/obs), /memory (/mem), /explanation (/why), /actors, /verbose"
+                        .to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/explanation or /why   — Why did you say that?".to_string(),
-                    LineStyle::Normal,
+                    "Voice & Audio: /voice, /speech, /listen, /microphone".to_string(),
+                    LineStyle::SystemNotice,
                 ),
                 (
-                    "/config                — Show and edit settings".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/actors                — Show actor health status".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/loops                 — Show and toggle background loops".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/speech                — View speech configuration".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/help                  — Show this message".to_string(),
-                    LineStyle::Normal,
-                ),
-                (
-                    "/shutdown              — Shut down Sena completely".to_string(),
-                    LineStyle::Normal,
+                    "System Control: /screenshot, /loops, /close (/quit), /shutdown"
+                        .to_string(),
+                    LineStyle::SystemNotice,
                 ),
             ]
         }
@@ -1008,7 +990,6 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 bus::events::ctp::CTPEvent::ThoughtEventTriggered(_)
             ) =>
         {
-            // Only show in verbose mode (CLI-managed state).
             None
         }
         Event::Speech(SpeechEvent::ListenModeTranscription {
@@ -1044,6 +1025,18 @@ fn event_to_display_line(event: &Event) -> Option<IpcMessage> {
                 style: LineStyle::SystemNotice,
             },
         }),
+        Event::Speech(SpeechEvent::LowConfidenceTranscription { confidence, .. }) => {
+            Some(IpcMessage {
+                id: 0,
+                payload: IpcPayload::DisplayLine {
+                    content: format!(
+                        "Speech detected but confidence too low ({:.0}%). Please try again.",
+                        confidence * 100.0
+                    ),
+                    style: LineStyle::Error,
+                },
+            })
+        }
         Event::System(SystemEvent::ConfigReloaded) => Some(IpcMessage {
             id: 0,
             payload: IpcPayload::DisplayLine {
