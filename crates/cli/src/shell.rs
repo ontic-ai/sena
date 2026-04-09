@@ -155,11 +155,20 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         command: "/screenshot",
         description: "Show screenshot capture + vision model status",
         category: CommandCategory::System,
->>>>>>> origin/dev
     },
     SlashCommand {
         command: "/loops",
         description: "List/toggle background loops",
+        category: CommandCategory::System,
+    },
+    SlashCommand {
+        command: "/status",
+        description: "Show system status overview",
+        category: CommandCategory::System,
+    },
+    SlashCommand {
+        command: "/help",
+        description: "Show all commands",
         category: CommandCategory::System,
     },
     SlashCommand {
@@ -1738,6 +1747,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             handle_loops_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
+        "/status" => {
+            show_status_shared(deps.runtime, deps.state).await;
+            Ok(DispatchResult::Continue)
+        }
         "/help" | "/h" => {
             show_help_shared(deps.state);
             Ok(DispatchResult::Continue)
@@ -2269,6 +2282,71 @@ fn show_actors_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
         };
         add_message(state, MessageRole::System, &format!("{}  {}", name, text));
     }
+}
+
+async fn show_status_shared(
+    runtime: Option<&Runtime>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) {
+    add_message(state, MessageRole::Sena, "== System Status ==");
+
+    add_message(state, MessageRole::System, "Uptime");
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  {}", state.stats.elapsed_formatted()),
+    );
+
+    let model = state
+        .current_model
+        .clone()
+        .unwrap_or_else(|| "(no model loaded)".to_string());
+    add_message(state, MessageRole::System, "Active Model");
+    add_message(state, MessageRole::System, &format!("  {}", model));
+
+    add_message(state, MessageRole::System, "Actor Health");
+    let mut actors: Vec<(String, ActorStatus)> = state
+        .actor_health
+        .iter()
+        .map(|(name, status)| ((*name).to_string(), status.clone()))
+        .collect();
+    actors.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, status) in actors {
+        let line = match status {
+            ActorStatus::Ready => format!("  {}: Ready", name),
+            ActorStatus::Starting => format!("  {}: Starting", name),
+            ActorStatus::Failed(reason) => format!("  {}: Failed ({})", name, reason),
+        };
+        add_message(state, MessageRole::System, &line);
+    }
+
+    add_message(state, MessageRole::System, "Loop States");
+    let mut loops: Vec<(String, bool)> = state
+        .loop_states
+        .iter()
+        .map(|(name, enabled)| (name.clone(), *enabled))
+        .collect();
+    loops.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, enabled) in loops {
+        add_message(
+            state,
+            MessageRole::System,
+            &format!("  {}: {}", name, if enabled { "enabled" } else { "disabled" }),
+        );
+    }
+
+    let speech_enabled = if let Some(runtime) = runtime {
+        runtime.config.speech_enabled
+    } else {
+        runtime::config::load_or_create_config()
+            .await
+            .map(|c| c.speech_enabled)
+            .unwrap_or(false)
+    };
+    let speech_status = if speech_enabled { "enabled" } else { "disabled" };
+    add_message(state, MessageRole::System, "Speech");
+    add_message(state, MessageRole::System, &format!("  STT: {}", speech_status));
+    add_message(state, MessageRole::System, &format!("  TTS: {}", speech_status));
 }
 
 fn copy_last_response_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
