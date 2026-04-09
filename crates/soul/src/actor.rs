@@ -15,9 +15,13 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 
 use crate::{
+    distillation::DistillationEngine,
     encrypted_db::EncryptedDb,
     error::SoulError,
+    preference_learning::PreferenceLearner,
     schema::{self, EVENT_LOG, IDENTITY_SIGNALS, USER_IDENTITY},
+    summary_assembler::SummaryAssembler,
+    temporal_model::TemporalModel,
 };
 
 const SOUL_ACTOR_NAME: &str = "soul";
@@ -33,6 +37,14 @@ pub struct SoulActor {
     broadcast_rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
     task_set: JoinSet<()>,
+    /// Identity signal distillation engine.
+    distillation: DistillationEngine,
+    /// Temporal behavior model.
+    temporal: TemporalModel,
+    /// Preference learner.
+    preference_learner: PreferenceLearner,
+    /// Event absorption counter for periodic harvesting.
+    absorbed_event_count: u64,
 }
 
 impl SoulActor {
@@ -46,6 +58,10 @@ impl SoulActor {
             broadcast_rx: None,
             directed_rx: None,
             task_set: JoinSet::new(),
+            distillation: DistillationEngine::new(),
+            temporal: TemporalModel::new(),
+            preference_learner: PreferenceLearner::new(),
+            absorbed_event_count: 0,
         }
     }
 
@@ -310,11 +326,14 @@ impl SoulActor {
         Ok(())
     }
 
-    fn absorb_platform_signal(&self, event: PlatformEvent) -> Result<(), SoulError> {
+    fn absorb_platform_signal(&mut self, event: PlatformEvent) -> Result<(), SoulError> {
         match event {
             PlatformEvent::WindowChanged(window) => {
                 let key = format!("tool_pref::{}", window.app_name.to_lowercase());
                 self.increment_identity_counter(&key, 1)?;
+                // Record temporal event (use SystemTime::now() for calendar time)
+                self.temporal
+                    .record_event(std::time::SystemTime::now(), "window_change");
             }
             PlatformEvent::FileEvent(file) => {
                 if let Some(ext) = file.path.extension().and_then(|e| e.to_str()) {
@@ -332,10 +351,11 @@ impl SoulActor {
             }
             PlatformEvent::ClipboardChanged(_) => {}
         }
+        self.absorbed_event_count += 1;
         Ok(())
     }
 
-    fn absorb_ctp_signal(&self, event: CTPEvent) -> Result<(), SoulError> {
+    fn absorb_ctp_signal(&mut self, event: CTPEvent) -> Result<(), SoulError> {
         match event {
             CTPEvent::ContextSnapshotReady(snapshot) => {
                 if let Some(task) = snapshot.inferred_task {
@@ -345,6 +365,8 @@ impl SoulActor {
             }
             CTPEvent::ThoughtEventTriggered(_) => {
                 self.increment_identity_counter("ctp::thought_trigger_count", 1)?;
+                self.temporal
+                    .record_event(std::time::SystemTime::now(), "inference_triggered");
             }
             CTPEvent::UserStateComputed(user_state) => {
                 // Absorb user state signals for behavioral pattern analysis
@@ -361,20 +383,24 @@ impl SoulActor {
                 self.increment_identity_counter(&key, 1)?;
             }
         }
+        self.absorbed_event_count += 1;
         Ok(())
     }
 
-    fn absorb_inference_signal(&self, event: InferenceEvent) -> Result<(), SoulError> {
+    fn absorb_inference_signal(&mut self, event: InferenceEvent) -> Result<(), SoulError> {
         if let InferenceEvent::InferenceCompleted { text, .. } = event {
             for topic in infer_interest_topics(&text) {
                 let key = format!("interest::{}", topic);
                 self.increment_identity_counter(&key, 1)?;
             }
+            self.temporal
+                .record_event(std::time::SystemTime::now(), "inference_completed");
         }
+        self.absorbed_event_count += 1;
         Ok(())
     }
 
-    fn absorb_system_signal(&self, event: SystemEvent) -> Result<(), SoulError> {
+    fn absorb_system_signal(&mut self, event: SystemEvent) -> Result<(), SoulError> {
         match event {
             SystemEvent::FirstBoot => {
                 self.increment_identity_counter("system::first_boot_count", 1)?;
@@ -387,6 +413,7 @@ impl SoulActor {
             }
             _ => {}
         }
+        self.absorbed_event_count += 1;
         Ok(())
     }
 
@@ -458,6 +485,116 @@ impl SoulActor {
                 })))
                 .await;
         });
+        Ok(())
+    }
+
+    /// Handle RichSummaryRequested event.
+    fn handle_rich_summary_requested(
+        &mut self,
+        token_budget: usize,
+        request_id: u64,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| SoulError::Database("not initialized".into()))?;
+        let redb = db.db()?;
+
+        let mut summary = SummaryAssembler::assemble(redb, token_budget)?;
+        summary.request_id = request_id;
+
+        let bus_clone = Arc::clone(bus);
+        self.task_set.spawn(async move {
+            let _ = bus_clone
+                .broadcast(Event::Soul(SoulEvent::RichSummaryReady(summary)))
+                .await;
+        });
+
+        Ok(())
+    }
+
+    /// Handle PreferenceLearningUpdate event.
+    fn handle_preference_learning_update(
+        &mut self,
+        signal: &bus::events::soul::EngagementSignal,
+        bus: &Arc<EventBus>,
+    ) -> Result<(), SoulError> {
+        self.preference_learner.record_engagement(signal);
+        self.maybe_harvest_intelligence(bus)?;
+        Ok(())
+    }
+
+    /// Periodically harvest distilled signals and preferences.
+    ///
+    /// Called after every N absorbed events or explicitly after preference updates.
+    fn maybe_harvest_intelligence(&mut self, bus: &Arc<EventBus>) -> Result<(), SoulError> {
+        // Harvest every 50 absorbed events
+        if self.absorbed_event_count < 50 {
+            return Ok(());
+        }
+
+        // Load current identity signals into distillation engine
+        if let Some(db) = &self.db {
+            let redb = db.db()?;
+            let signals = read_identity_signals(redb)?;
+            for (key, value) in signals {
+                self.distillation.observe_identity_signal(&key, &value);
+            }
+        }
+
+        // Harvest distilled signals
+        let distilled_signals = self.distillation.harvest();
+        for signal in distilled_signals {
+            // Persist to IDENTITY_SIGNALS
+            self.write_identity_signal(&signal.signal_key, &signal.signal_value)?;
+            // Broadcast event
+            let bus_clone = Arc::clone(bus);
+            let signal_clone = signal.clone();
+            self.task_set.spawn(async move {
+                let _ = bus_clone
+                    .broadcast(Event::Soul(SoulEvent::IdentitySignalDistilled(
+                        signal_clone,
+                    )))
+                    .await;
+            });
+        }
+
+        // Harvest preferences
+        let preferences = self.preference_learner.harvest_preferences();
+        for (key, value) in preferences {
+            self.write_identity_signal(&key, &value)?;
+        }
+
+        // Harvest temporal patterns (top 10) and persist to IDENTITY_SIGNALS
+        let patterns = self.temporal.top_patterns(10);
+        for pattern in patterns {
+            if let (Some(hour), Some(day)) = (pattern.hour_of_day, pattern.day_of_week) {
+                let key = format!(
+                    "temporal::hour::{}::day::{}::{}",
+                    hour, day, pattern.behavior_category
+                );
+                self.write_identity_signal(&key, &pattern.frequency.to_string())?;
+
+                // Broadcast event
+                let bus_clone = Arc::clone(bus);
+                let pattern_clone = pattern.clone();
+                self.task_set.spawn(async move {
+                    let _ = bus_clone
+                        .broadcast(Event::Soul(SoulEvent::TemporalPatternDetected(
+                            pattern_clone,
+                        )))
+                        .await;
+                });
+            }
+        }
+
+        // Emit personality update after intelligence harvest
+        self.emit_personality_updated(bus)?;
+
+        // Reset counter
+        self.absorbed_event_count = 0;
+
         Ok(())
     }
 }
@@ -626,21 +763,27 @@ impl Actor for SoulActor {
                             if is_boot_complete {
                                 let _ = self.emit_personality_updated(&bus);
                             }
+                            let _ = self.maybe_harvest_intelligence(&bus);
                         }
                         Ok(Event::Platform(platform_event)) => {
                             let _ = self.absorb_platform_signal(platform_event);
+                            let _ = self.maybe_harvest_intelligence(&bus);
                         }
                         Ok(Event::CTP(ctp_event)) => {
                             let _ = self.absorb_ctp_signal(*ctp_event);
+                            let _ = self.maybe_harvest_intelligence(&bus);
                         }
                         Ok(Event::Inference(inference_event)) => {
                             let _ = self.absorb_inference_signal(inference_event);
+                            let _ = self.maybe_harvest_intelligence(&bus);
                         }
                         Ok(Event::Memory(MemoryEvent::ConsolidationCompleted(_))) => {
                             let _ = self.increment_identity_counter(
                                 "memory::consolidation_completed_count",
                                 1,
                             );
+                            self.absorbed_event_count += 1;
+                            let _ = self.maybe_harvest_intelligence(&bus);
                         }
                         Ok(Event::Soul(SoulEvent::ReadRequested(req))) => {
                             let _ = self.handle_read(req, &bus);
@@ -672,6 +815,12 @@ impl Actor for SoulActor {
                                 }
                                 SoulEvent::InitializeWithName { name } => {
                                     let _ = self.handle_initialize_with_name(name, &bus);
+                                }
+                                SoulEvent::RichSummaryRequested { token_budget, request_id } => {
+                                    let _ = self.handle_rich_summary_requested(token_budget, request_id, &bus);
+                                }
+                                SoulEvent::PreferenceLearningUpdate { signal, .. } => {
+                                    let _ = self.handle_preference_learning_update(&signal, &bus);
                                 }
                                 SoulEvent::ExportRequested { path } => {
                                     // TODO M6: implement full export (event log + identity signals → JSON).

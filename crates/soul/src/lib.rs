@@ -6,6 +6,11 @@ pub mod error;
 pub mod redacted;
 pub mod schema;
 
+mod distillation;
+mod preference_learning;
+mod summary_assembler;
+mod temporal_model;
+
 pub use actor::SoulActor;
 pub use encrypted_db::EncryptedDb;
 pub use error::SoulError;
