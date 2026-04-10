@@ -724,7 +724,7 @@ Lives in `crates/speech`. This is Sena's primary user-facing interaction surface
 ### 14.1 Architecture
 
 Speech is two independent actors:
-- **STT Actor:** Captures microphone audio, detects speech, transcribes via Whisper.cpp
+- **STT Actor:** Captures microphone audio, detects speech, transcribes via whisper-rs v0.16.0
 - **TTS Actor:** Receives text, synthesizes speech via Piper (preferred) or OS platform TTS
 
 Both actors communicate exclusively via the bus. They never call each other directly.
@@ -732,12 +732,14 @@ Both actors communicate exclusively via the bus. They never call each other dire
 ### 14.2 STT Pipeline
 
 ```
-Microphone → cpal audio capture → Voice Activity Detection → Whisper.cpp transcription → TranscriptionCompleted event on bus
+Microphone → cpal audio capture → Voice Activity Detection → whisper-rs v0.16.0 transcription → TranscriptionCompleted event on bus
 ```
 
 Modes:
 - **Wakeword mode (default):** Always listening for wakeword ("Sena") via dedicated tiny model (OpenWakeWord, ~5MB). After wakeword detected, captures speech until silence, then transcribes.
 - **Push-to-talk mode:** STT activates only on explicit user action (hotkey or tray button).
+
+Transcription results include word-level confidence scores. Words with confidence below threshold (default 0.6) are flagged in CLI output with visual indicators.
 
 ### 14.3 TTS Pipeline
 
@@ -750,7 +752,7 @@ Voice personality is warm and concise, derived from Soul state. TTS is the defau
 ### 14.4 Model Management
 
 Speech models are downloaded from HuggingFace on first enable:
-- Whisper GGUF (~150MB for small model)
+- Whisper GGUF (~150MB for small model) — transcribed via whisper-rs v0.16.0
 - Piper voice model (~60MB)  
 - OpenWakeWord model (~5MB)
 
@@ -758,6 +760,8 @@ This is the **only** network exception in Sena's local-first architecture. Downl
 - User-consented (explicit enable in config or onboarding)
 - Model weights only (no user data transmitted)
 - Cached locally after first download
+
+Real-time VRAM usage monitoring is available when GPU acceleration is active. VRAM status is polled every 10 seconds and displayed in the CLI sidebar.
 
 ### 14.5 Hard Rules
 
