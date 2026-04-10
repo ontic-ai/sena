@@ -19,5 +19,8 @@ cpal = "0.15"
 # TTS backend (platform-native via unified interface)
 tts = "0.26"
 
+# STT backend (whisper.cpp bindings)
+whisper-rs = "0.16.0"
+
 [dev-dependencies]
 tempfile = "3"

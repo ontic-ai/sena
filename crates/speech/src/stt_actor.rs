@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use bus::{Actor, ActorError, Event, EventBus, SpeechEvent, SystemEvent};
 
 use crate::audio_input::{AudioInputConfig, AudioInputStream};
+use crate::stt::WhisperPipeline;
 use crate::{AudioBuffer, SpeechError, SttBackend};
 
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,7 +37,7 @@ pub struct SttActor {
     /// Minimum confidence score for transcription output to be accepted.
     /// Range [0.0, 1.0]. Default: 0.5.
     confidence_threshold: f32,
-    /// Path to Whisper model file. Will be used by whisper-cpp-plus in Unit 7.
+    /// Path to Whisper model file. Will be used by whisper-rs.
     #[allow(dead_code)]
     whisper_model_path: Option<String>,
     model_dir: Option<PathBuf>,
@@ -137,10 +138,39 @@ impl SttActor {
         let handle = match self.backend {
             SttBackend::Mock => SttBackendHandle::Mock,
             SttBackend::Whisper => {
-                // TODO: Whisper backend will be reimplemented with whisper-cpp-plus in Unit 7
-                return Err(SpeechError::SttInitFailed(
-                    "Whisper backend not yet implemented (whisper-cpp-plus pending)".to_string(),
-                ));
+                // Resolve model path: use whisper_model_path if set, else model_dir/ggml-base.en.bin
+                let model_path = if let Some(ref path) = self.whisper_model_path {
+                    path.clone()
+                } else if let Some(ref dir) = self.model_dir {
+                    dir.join("ggml-base.en.bin").to_string_lossy().to_string()
+                } else {
+                    return Err(SpeechError::SttInitFailed(
+                        "no whisper model path configured".to_string(),
+                    ));
+                };
+
+                let model_path_clone = model_path.clone();
+
+                // Load model in spawn_blocking (blocking operation)
+                let pipeline =
+                    tokio::task::spawn_blocking(move || WhisperPipeline::load(&model_path_clone))
+                        .await
+                        .map_err(|e| {
+                            SpeechError::SttInitFailed(format!("task join failed: {}", e))
+                        })?
+                        .map_err(SpeechError::SttInitFailed)?;
+
+                // Emit SttModelLoaded event
+                if let Some(ref bus) = self.bus {
+                    let _ = bus
+                        .broadcast(Event::Speech(SpeechEvent::SttModelLoaded {
+                            model_name: model_path.clone(),
+                            backend: "whisper-rs".to_string(),
+                        }))
+                        .await;
+                }
+
+                SttBackendHandle::Whisper(Arc::new(pipeline))
             }
         };
 
@@ -184,6 +214,38 @@ impl SttActor {
                         confidence: 0.85,
                     })
                 }
+            }
+            Some(SttBackendHandle::Whisper(pipeline)) => {
+                let pipeline = Arc::clone(pipeline);
+                let samples = buffer.samples.clone();
+
+                // Run transcription in spawn_blocking (blocking operation)
+                let segments = tokio::task::spawn_blocking(move || pipeline.transcribe(&samples))
+                    .await
+                    .map_err(|e| {
+                        SpeechError::TranscriptionFailed(format!("task join failed: {}", e))
+                    })?
+                    .map_err(SpeechError::TranscriptionFailed)?;
+
+                // Combine all segment texts
+                let text: String = segments
+                    .iter()
+                    .map(|seg| seg.text.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                // Calculate average confidence across segments
+                let avg_confidence = if segments.is_empty() {
+                    0.0
+                } else {
+                    segments.iter().map(|s| s.confidence).sum::<f32>() / segments.len() as f32
+                };
+
+                Ok(TranscriptionResult {
+                    text,
+                    confidence: avg_confidence,
+                })
             }
             None => Err(SpeechError::TranscriptionFailed(
                 "STT backend not initialized".to_string(),
@@ -502,7 +564,7 @@ impl Actor for SttActor {
 
 enum SttBackendHandle {
     Mock,
-    // TODO: Whisper variant will be added in Unit 7 with whisper-cpp-plus backend
+    Whisper(Arc<WhisperPipeline>),
 }
 
 struct TranscriptionResult {
