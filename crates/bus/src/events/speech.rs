@@ -145,7 +145,7 @@ pub enum SpeechEvent {
     },
 
     /// Streaming STT word emitted during transcription.
-    /// Emitted per word as whisper-cpp-plus processes the audio.
+    /// Emitted per word as whisper-rs processes the audio.
     TranscriptionWordReady {
         /// The transcribed word.
         word: String,
@@ -161,7 +161,7 @@ pub enum SpeechEvent {
     SttModelLoaded {
         /// Name of the loaded model.
         model_name: String,
-        /// Backend identifier (e.g., "whisper-cpp-plus").
+        /// Backend identifier (e.g., "whisper-rs").
         backend: String,
     },
 

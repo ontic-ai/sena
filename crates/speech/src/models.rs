@@ -40,7 +40,7 @@ pub struct ModelManifest;
 impl ModelManifest {
     /// Returns the Whisper base (English-only) GGML model for STT.
     ///
-    /// Single GGML file used by whisper-cpp-plus. Downloaded by runtime DownloadManager.
+    /// Single GGML file used by whisper-rs. Downloaded by runtime DownloadManager.
     pub fn whisper_base_en() -> ModelInfo {
         ModelInfo {
             name: "whisper-base-en-ggml".to_string(),
