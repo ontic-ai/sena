@@ -210,6 +210,10 @@ pub struct ShellState<T> {
     pub listen_mode_active: bool,
     /// Session ID of the currently active listen session (0 when inactive).
     pub listen_session_id: u64,
+    /// Current GPU VRAM total in MB (0 = no GPU or detection failed).
+    pub vram_total_mb: u64,
+    /// Current GPU VRAM used in MB.
+    pub vram_used_mb: u64,
 }
 
 impl<T> ShellState<T> {
@@ -246,6 +250,8 @@ impl<T> ShellState<T> {
             waiting_for_inference: false,
             listen_mode_active: false,
             listen_session_id: 0,
+            vram_total_mb: 0,
+            vram_used_mb: 0,
         }
     }
 

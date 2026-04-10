@@ -62,6 +62,7 @@ impl IpcServer {
             "platform_polling",
             "screen_capture",
             "speech",
+            "vram_monitor",
         ] {
             default_states.insert((*name).to_string(), true);
         }
@@ -239,6 +240,12 @@ impl IpcServer {
                         payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
                     });
                 }
+                if let Event::System(SystemEvent::VramUsageUpdated { total_mb, used_mb }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::VramStatusUpdate { total_mb, used_mb },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -335,6 +342,12 @@ impl IpcServer {
                     let _ = bus_tx.send(IpcMessage {
                         id: 0,
                         payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
+                    });
+                }
+                if let Event::System(SystemEvent::VramUsageUpdated { total_mb, used_mb }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::VramStatusUpdate { total_mb, used_mb },
                     });
                 }
                 if let Some(display_msg) = event_to_display_line(&event) {

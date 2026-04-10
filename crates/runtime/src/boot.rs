@@ -345,6 +345,65 @@ pub async fn boot() -> Result<Runtime, BootError> {
     // Step 12.5: Spawn memory monitor task.
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
 
+    // Step 12.6: Spawn VRAM monitor loop (if VRAM detected).
+    if hw_profile.available_vram_mb > 0 {
+        let bus_vram = Arc::clone(&bus);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let mut enabled = true;
+            let mut shutdown_rx = bus_vram.subscribe_broadcast();
+
+            // Initial state broadcast.
+            let _ = bus_vram
+                .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                    loop_name: "vram_monitor".to_string(),
+                    enabled: true,
+                }))
+                .await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if enabled {
+                            let (used, total) = tokio::task::spawn_blocking(
+                                crate::hardware_profile::poll_vram_usage
+                            ).await.unwrap_or((0, 0));
+
+                            if total > 0 {
+                                let _ = bus_vram
+                                    .broadcast(Event::System(SystemEvent::VramUsageUpdated {
+                                        total_mb: total,
+                                        used_mb: used,
+                                    }))
+                                    .await;
+                            }
+                        }
+                    }
+                    event = shutdown_rx.recv() => {
+                        if let Ok(Event::System(SystemEvent::ShutdownSignal)) = event {
+                            break;
+                        }
+                        if let Ok(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name,
+                            enabled: new_enabled,
+                        })) = event
+                        {
+                            if loop_name == "vram_monitor" && enabled != new_enabled {
+                                enabled = new_enabled;
+                                let _ = bus_vram
+                                    .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                        loop_name: "vram_monitor".to_string(),
+                                        enabled,
+                                    }))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Step 13: Spawn IPC server (CLI communication endpoint).
     {
         let ipc_bus = Arc::clone(&bus);

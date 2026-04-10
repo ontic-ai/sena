@@ -638,6 +638,57 @@ impl Shell {
         )));
         lines.push(Line::from(""));
 
+        // ── VRAM ──────────────────────────────────────────────────────────────
+        if self.state.vram_total_mb > 0 {
+            lines.push(Line::from(Span::styled(
+                " VRAM",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            let used = self.state.vram_used_mb;
+            let total = self.state.vram_total_mb;
+            let pct = if total > 0 {
+                (used * 100 / total) as u16
+            } else {
+                0
+            };
+
+            // Build a text-based bar: [████░░░░░░] 3.2/8.0 GB (40%)
+            let bar_width = (area.width.saturating_sub(6) as usize).min(20);
+            let filled = (bar_width as u16 * pct / 100) as usize;
+            let empty = bar_width.saturating_sub(filled);
+
+            let bar_color = if pct > 90 {
+                Color::Red
+            } else if pct > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+
+            let bar_line = Line::from(vec![
+                Span::styled("  [", Style::default().fg(Color::DarkGray)),
+                Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+                Span::styled("] ", Style::default().fg(Color::DarkGray)),
+            ]);
+            lines.push(bar_line);
+
+            let usage_text = format!(
+                "  {:.1}/{:.1} GB ({}%)",
+                used as f64 / 1024.0,
+                total as f64 / 1024.0,
+                pct
+            );
+            lines.push(Line::from(Span::styled(
+                usage_text,
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+        }
+
         // ── Session stats ─────────────────────────────────────────────────────
         lines.push(Line::from(Span::styled(
             " Session",
@@ -2944,6 +2995,10 @@ impl ShellMode {
                         IpcPayload::ModelStatusUpdate { name } => {
                             state.current_model = Some(name);
                         }
+                        IpcPayload::VramStatusUpdate { total_mb, used_mb } => {
+                            state.vram_total_mb = total_mb;
+                            state.vram_used_mb = used_mb;
+                        }
                         _ => {}
                     }
                 }
@@ -3561,6 +3616,57 @@ fn render_ipc_sidebar(
         Style::default().fg(Color::White),
     )));
     lines.push(Line::from(""));
+
+    // ── VRAM ──────────────────────────────────────────────────────────────────
+    if state.vram_total_mb > 0 {
+        lines.push(Line::from(Span::styled(
+            " VRAM",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        let used = state.vram_used_mb;
+        let total = state.vram_total_mb;
+        let pct = if total > 0 {
+            (used * 100 / total) as u16
+        } else {
+            0
+        };
+
+        // Build a text-based bar: [████░░░░░░] 3.2/8.0 GB (40%)
+        let bar_width = (area.width.saturating_sub(6) as usize).min(20);
+        let filled = (bar_width as u16 * pct / 100) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        let bar_color = if pct > 90 {
+            Color::Red
+        } else if pct > 70 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
+        let bar_line = Line::from(vec![
+            Span::styled("  [", Style::default().fg(Color::DarkGray)),
+            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+        ]);
+        lines.push(bar_line);
+
+        let usage_text = format!(
+            "  {:.1}/{:.1} GB ({}%)",
+            used as f64 / 1024.0,
+            total as f64 / 1024.0,
+            pct
+        );
+        lines.push(Line::from(Span::styled(
+            usage_text,
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(""));
+    }
 
     // ── Session stats ─────────────────────────────────────────────────────────
     lines.push(Line::from(Span::styled(
