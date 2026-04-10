@@ -407,15 +407,51 @@ impl Shell {
         for msg in &self.state.messages {
             match msg.role {
                 MessageRole::User => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
+                    // Check if this is a voice transcription with word-level confidence
+                    if let Some(word_confidences) = &msg.word_confidences {
+                        // Build colored line with confidence-based coloring
+                        let mut spans = vec![Span::styled(
                             "\u{25b8} ",
                             Style::default()
                                 .fg(Color::LightMagenta)
                                 .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(&msg.text, Style::default().fg(Color::White)),
-                    ]));
+                        )];
+                        // Extract the prefix if present (e.g., "[voice] ")
+                        if msg.text.starts_with("[voice] ") {
+                            spans.push(Span::styled(
+                                "[voice] ",
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        // Add colored words
+                        for (i, (word, confidence)) in word_confidences.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" "));
+                            }
+                            // Determine color based on confidence tier
+                            // High >= 0.80: green, Medium >= 0.55: yellow, Low: red
+                            let color = if *confidence >= 0.80 {
+                                Color::Green
+                            } else if *confidence >= 0.55 {
+                                Color::Yellow
+                            } else {
+                                Color::Red
+                            };
+                            spans.push(Span::styled(word.as_str(), Style::default().fg(color)));
+                        }
+                        lines.push(Line::from(spans));
+                    } else {
+                        // Regular user message
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "\u{25b8} ",
+                                Style::default()
+                                    .fg(Color::LightMagenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(&msg.text, Style::default().fg(Color::White)),
+                        ]));
+                    }
                     lines.push(Line::from("")); // spacing
                 }
                 MessageRole::Sena => {
@@ -1106,14 +1142,25 @@ impl Shell {
                 text,
                 confidence: _,
                 request_id,
+                words,
                 ..
             }) => {
                 if self.voice_enabled {
+                    // Store voice transcription with word-level confidence for colored display
+                    if !words.is_empty() {
+                        let word_data: Vec<(String, f32)> = words
+                            .iter()
+                            .map(|w| (w.text.clone(), w.confidence))
+                            .collect();
+                        let mut msg = crate::tui_state::Message::new_voice_transcription(word_data);
+                        msg.text = format!("[voice] {}", msg.text);
+                        self.state.messages.push(msg);
+                    }
                     self.send_chat_with_request(
                         text,
                         request_id,
                         Priority::Normal,
-                        Some("[voice] "),
+                        None, // prefix already added above
                     )
                     .await;
                 }

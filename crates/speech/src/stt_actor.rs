@@ -207,11 +207,13 @@ impl SttActor {
                     Ok(TranscriptionResult {
                         text: String::new(),
                         confidence: 0.1,
+                        words: vec![],
                     })
                 } else {
                     Ok(TranscriptionResult {
                         text: "mock transcription".to_string(),
                         confidence: 0.85,
+                        words: vec![],
                     })
                 }
             }
@@ -242,9 +244,34 @@ impl SttActor {
                     segments.iter().map(|s| s.confidence).sum::<f32>() / segments.len() as f32
                 };
 
+                // Build per-word data from segments with linearly interpolated timestamps
+                let mut words = Vec::new();
+                for seg in &segments {
+                    let seg_words: Vec<&str> = seg.text.split_whitespace().collect();
+                    let word_count = seg_words.len();
+                    if word_count == 0 {
+                        continue;
+                    }
+                    let duration = seg.end_ms.saturating_sub(seg.start_ms);
+                    let word_duration = if word_count > 0 {
+                        duration / word_count as u32
+                    } else {
+                        duration
+                    };
+                    for (i, w) in seg_words.iter().enumerate() {
+                        words.push(bus::events::speech::TranscribedWord {
+                            text: w.to_string(),
+                            confidence: seg.confidence,
+                            start_ms: seg.start_ms + (i as u32) * word_duration,
+                            end_ms: seg.start_ms + ((i as u32) + 1) * word_duration,
+                        });
+                    }
+                }
+
                 Ok(TranscriptionResult {
                     text,
                     confidence: avg_confidence,
+                    words,
                 })
             }
             None => Err(SpeechError::TranscriptionFailed(
@@ -262,13 +289,31 @@ impl SttActor {
         match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(buffer)).await {
             Ok(Ok(result)) => {
                 if result.confidence >= self.confidence_threshold {
+                    // Emit per-word streaming events
+                    for (seq, word) in result.words.iter().enumerate() {
+                        let _ = bus
+                            .broadcast(Event::Speech(SpeechEvent::TranscriptionWordReady {
+                                word: word.text.clone(),
+                                confidence: word.confidence,
+                                sequence: seq as u32,
+                                request_id,
+                            }))
+                            .await;
+                    }
+                    // Emit completion with word-level data
+                    let avg = if result.words.is_empty() {
+                        result.confidence
+                    } else {
+                        result.words.iter().map(|w| w.confidence).sum::<f32>()
+                            / result.words.len() as f32
+                    };
                     let _ = bus
                         .broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
                             text: result.text,
                             confidence: result.confidence,
                             request_id,
-                            words: vec![],
-                            average_confidence: result.confidence,
+                            words: result.words,
+                            average_confidence: avg,
                         }))
                         .await;
                 } else {
@@ -570,6 +615,7 @@ enum SttBackendHandle {
 struct TranscriptionResult {
     text: String,
     confidence: f32,
+    words: Vec<bus::events::speech::TranscribedWord>,
 }
 
 fn decode_audio_samples(bytes: &[u8]) -> Result<Vec<f32>, SpeechError> {

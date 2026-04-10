@@ -35,8 +35,7 @@ pub async fn check_speech_models(model_dir: &Path) -> Result<Vec<String>, Speech
     let _has_output = check_audio_output_device();
 
     // Check required models are cached
-    let whisper_cached =
-        ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en()).await;
+    let whisper_cached = ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en()).await;
     let piper_cached = ModelCache::is_cached(model_dir, &ModelManifest::piper_voice()).await;
 
     let mut missing = Vec::new();

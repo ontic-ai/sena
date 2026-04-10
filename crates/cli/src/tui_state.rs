@@ -70,12 +70,33 @@ pub enum MessageRole {
 pub struct Message {
     pub role: MessageRole,
     pub text: String,
+    /// Optional word-level confidence data for voice transcriptions.
+    /// Each tuple is (word_text, confidence_score).
+    pub word_confidences: Option<Vec<(String, f32)>>,
 }
 
 impl Message {
     /// Create a new message.
     pub fn new(role: MessageRole, text: String) -> Self {
-        Self { role, text }
+        Self {
+            role,
+            text,
+            word_confidences: None,
+        }
+    }
+
+    /// Create a new voice transcription message with word-level confidence.
+    pub fn new_voice_transcription(words: Vec<(String, f32)>) -> Self {
+        let text = words
+            .iter()
+            .map(|(w, _)| w.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            role: MessageRole::User,
+            text,
+            word_confidences: Some(words),
+        }
     }
 }
 
