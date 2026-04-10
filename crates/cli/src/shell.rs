@@ -2757,6 +2757,12 @@ fn verbose_format(ev: &Event) -> Option<String> {
         Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => {
             Some(format!("[verbose] Inference: model loaded — {}", name))
         }
+        Event::Speech(SpeechEvent::WakewordSuppressed { reason }) => {
+            Some(format!("[verbose] Wakeword: suppressed ({})", reason))
+        }
+        Event::Speech(SpeechEvent::WakewordResumed) => {
+            Some("[verbose] Wakeword: resumed".to_string())
+        }
         _ => None,
     }
 }
