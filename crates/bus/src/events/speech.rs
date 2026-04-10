@@ -1,5 +1,18 @@
 //! Speech events — voice input, transcription, voice output.
 
+/// Word-level timing and confidence data from STT transcription.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TranscribedWord {
+    /// The transcribed word text.
+    pub text: String,
+    /// Confidence score for this word [0.0, 1.0].
+    pub confidence: f32,
+    /// Start time in milliseconds from the beginning of the audio.
+    pub start_ms: u32,
+    /// End time in milliseconds from the beginning of the audio.
+    pub end_ms: u32,
+}
+
 /// Speech-related events.
 #[derive(Debug, Clone)]
 pub enum SpeechEvent {
@@ -15,10 +28,14 @@ pub enum SpeechEvent {
     TranscriptionCompleted {
         /// Transcribed text.
         text: String,
-        /// Confidence score [0.0, 1.0].
+        /// Overall confidence score [0.0, 1.0] (kept for backward compat).
         confidence: f32,
         /// Request ID for correlation.
         request_id: u64,
+        /// Word-level transcription with timing and confidence data.
+        words: Vec<TranscribedWord>,
+        /// Average confidence across all words.
+        average_confidence: f32,
     },
 
     /// Transcription failed.
@@ -126,6 +143,45 @@ pub enum SpeechEvent {
         /// Session ID that was stopped.
         session_id: u64,
     },
+
+    /// Streaming STT word emitted during transcription.
+    /// Emitted per word as whisper-cpp-plus processes the audio.
+    TranscriptionWordReady {
+        /// The transcribed word.
+        word: String,
+        /// Confidence score for this word [0.0, 1.0].
+        confidence: f32,
+        /// Sequence number for ordering (starts at 0 for each request).
+        sequence: u32,
+        /// Request ID for correlation.
+        request_id: u64,
+    },
+
+    /// STT model loaded successfully.
+    SttModelLoaded {
+        /// Name of the loaded model.
+        model_name: String,
+        /// Backend identifier (e.g., "whisper-cpp-plus").
+        backend: String,
+    },
+
+    /// STT model load failed.
+    SttModelLoadFailed {
+        /// Failure reason.
+        reason: String,
+    },
+
+    /// STT is actively listening for voice input.
+    SttListening,
+
+    /// STT stopped listening.
+    SttStopped,
+
+    /// STT transcription was cancelled (e.g., user typed text while voice was active).
+    SttCancelled {
+        /// Request ID that was cancelled.
+        request_id: u64,
+    },
 }
 
 #[cfg(test)]
@@ -157,12 +213,15 @@ mod tests {
             text: "hello".to_string(),
             confidence: 0.95,
             request_id: 42,
+            words: vec![],
+            average_confidence: 0.95,
         };
         let cloned = event.clone();
         if let SpeechEvent::TranscriptionCompleted {
             text,
             confidence,
             request_id,
+            ..
         } = cloned
         {
             assert_eq!(text, "hello");

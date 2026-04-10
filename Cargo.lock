@@ -4012,10 +4012,6 @@ name = "prompt"
 version = "0.1.0"
 dependencies = [
  "bus",
- "ctp",
- "inference",
- "memory",
- "text",
  "thiserror 2.0.18",
 ]
 
@@ -4920,12 +4916,8 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "cpal",
- "futures-util",
- "hex",
  "rand 0.9.2",
- "reqwest",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",

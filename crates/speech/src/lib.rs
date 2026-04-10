@@ -12,8 +12,8 @@
 pub mod audio_input;
 pub mod audio_output;
 mod candle_whisper;
-pub mod download;
 pub mod error;
+pub mod models;
 pub mod onboarding;
 mod silence_detector;
 pub mod stt_actor;

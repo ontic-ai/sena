@@ -130,10 +130,8 @@ impl TtsActor {
         let assertiveness_delta = (assertiveness as f32 - 50.0) / 50.0;
         let brevity_delta = (brevity as f32 - 50.0) / 50.0;
 
-        let modifier = 1.0
-            + (assertiveness_delta * 0.08)
-            + (brevity_delta * 0.06)
-            - (warmth_delta * 0.06);
+        let modifier =
+            1.0 + (assertiveness_delta * 0.08) + (brevity_delta * 0.06) - (warmth_delta * 0.06);
 
         modifier.clamp(0.8, 1.2)
     }

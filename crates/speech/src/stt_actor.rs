@@ -237,6 +237,8 @@ impl SttActor {
                             text: result.text,
                             confidence: result.confidence,
                             request_id,
+                            words: vec![],
+                            average_confidence: result.confidence,
                         }))
                         .await;
                 } else {

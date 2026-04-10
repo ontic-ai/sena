@@ -19,12 +19,6 @@ cpal = "0.15"
 # TTS backend (platform-native via unified interface)
 tts = "0.26"
 
-# Model download (Phase 5 only — speech models from HuggingFace)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-sha2 = "0.10"
-futures-util = "0.3"
-hex = "0.4"
-
 # STT backend - Whisper via candle-transformers (pure Rust)
 candle-core = { version = "0.10", default-features = false }
 candle-nn = { version = "0.10", default-features = false }

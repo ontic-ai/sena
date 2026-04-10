@@ -1773,6 +1773,7 @@ impl Actor for InferenceActor {
                             text,
                             confidence: _,
                             request_id,
+                            ..
                         })) => {
                             // Auto-trigger iterative reasoning for long queries with conversation context.
                             // Heuristic: text > 200 chars AND >= 2 prior exchanges suggests a complex,

@@ -1106,6 +1106,7 @@ impl Shell {
                 text,
                 confidence: _,
                 request_id,
+                ..
             }) => {
                 if self.voice_enabled {
                     self.send_chat_with_request(
@@ -2331,7 +2332,11 @@ async fn show_status_shared(
         add_message(
             state,
             MessageRole::System,
-            &format!("  {}: {}", name, if enabled { "enabled" } else { "disabled" }),
+            &format!(
+                "  {}: {}",
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            ),
         );
     }
 
@@ -2343,10 +2348,22 @@ async fn show_status_shared(
             .map(|c| c.speech_enabled)
             .unwrap_or(false)
     };
-    let speech_status = if speech_enabled { "enabled" } else { "disabled" };
+    let speech_status = if speech_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
     add_message(state, MessageRole::System, "Speech");
-    add_message(state, MessageRole::System, &format!("  STT: {}", speech_status));
-    add_message(state, MessageRole::System, &format!("  TTS: {}", speech_status));
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  STT: {}", speech_status),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  TTS: {}", speech_status),
+    );
 }
 
 fn copy_last_response_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {

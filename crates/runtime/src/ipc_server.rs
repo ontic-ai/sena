@@ -1307,13 +1307,7 @@ fn current_user_pipe_identity() -> Option<String> {
         }
 
         let mut bytes_needed: DWORD = 0;
-        let _ = GetTokenInformation(
-            token,
-            TokenUser,
-            ptr::null_mut(),
-            0,
-            &mut bytes_needed,
-        );
+        let _ = GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut bytes_needed);
 
         if bytes_needed == 0 {
             let _ = CloseHandle(token);

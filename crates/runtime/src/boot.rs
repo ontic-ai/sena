@@ -73,6 +73,9 @@ pub enum BootError {
     #[error("embed model download failed: {0}")]
     EmbedModelDownloadFailed(String),
 
+    #[error("whisper model download failed: {0}")]
+    WhisperModelDownloadFailed(String),
+
     #[error("prompt init failed: {0}")]
     PromptInitFailed(String),
 
@@ -255,7 +258,28 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 10: PromptComposer is stateless — no spawn needed.
 
-    // Step 10.5: Speech onboarding (non-fatal).
+    // Step 10.5: Ensure whisper model is available before speech actors spawn.
+    // The whisper model is required for STT (speech-to-text).
+    // If the file is missing, download it now (non-blocking — speech can start without STT).
+    // CRITICAL: This must run BEFORE speech actors (Step 11) to prevent race conditions.
+    let whisper_model_path = if config.speech_enabled {
+        match ensure_whisper_model(&bus, &config).await {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!(
+                    "whisper model download failed, STT will be unavailable: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Step 10.6: Speech model check (non-fatal).
+    // NOTE: Speech model downloads are handled by the runtime's DownloadManager.
+    // This step only checks if models exist. If models are missing, speech will be disabled.
     let mut speech_available = config.speech_enabled;
     let speech_model_dir = config
         .speech_model_dir
@@ -265,24 +289,28 @@ pub async fn boot() -> Result<Runtime, BootError> {
     if config.speech_enabled
         && speech::onboarding::speech_onboarding_needed(&speech_model_dir).await
     {
-        match speech::onboarding::run_speech_onboarding(&bus, &speech_model_dir).await {
-            Ok(_downloaded) => {}
-            Err(e) => {
-                eprintln!("WARN: speech onboarding failed, disabling speech: {}", e);
-                speech_available = false;
-            }
-        }
+        eprintln!(
+            "WARN: speech models missing at {}, disabling speech. Use download manager to acquire models.",
+            speech_model_dir.display()
+        );
+        speech_available = false;
     }
 
     // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
     if speech_available {
         let stt_backend = speech::SttBackend::Whisper;
 
+        // Use the downloaded whisper_model_path if available, otherwise fall back to config.
+        let resolved_whisper_path = whisper_model_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| config.whisper_model_path.clone());
+
         let stt_actor = speech::SttActor::new(
             stt_backend,
             config.voice_always_listening,
             config.stt_energy_threshold,
-            config.whisper_model_path.clone(),
+            resolved_whisper_path,
         )
         .with_model_dir(Some(speech_model_dir.clone()))
         .with_microphone_device(config.microphone_device.clone())
@@ -551,6 +579,67 @@ async fn ensure_embed_model(bus: &Arc<EventBus>, config: &SenaConfig) -> Result<
 
     tracing::info!(
         "boot: embed model downloaded to {}",
+        downloaded_path.display()
+    );
+
+    Ok(downloaded_path)
+}
+
+/// Ensures the whisper STT model is present on disk.
+/// Downloads from HuggingFace if the file is missing.
+/// Returns the resolved path to the model file.
+///
+/// This function is called at boot Step 10.5, BEFORE speech actors spawn at Step 11.
+/// This ordering is critical: the STT actor needs the model path at construction time.
+/// If download fails, STT will start in degraded mode (no transcription capability).
+async fn ensure_whisper_model(bus: &Arc<EventBus>, config: &SenaConfig) -> Result<PathBuf, String> {
+    // Determine model directory: use config override or platform default
+    let model_dir = if let Some(ref p) = config.whisper_model_path {
+        // If user set an explicit path, use its parent as the directory
+        p.rsplit_once(std::path::MAIN_SEPARATOR)
+            .map(|(parent, _)| PathBuf::from(parent))
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        // Default: <config_dir>/models/
+        platform::config_dir()
+            .map_err(|e| format!("config dir resolve failed: {}", e))?
+            .join("models")
+    };
+
+    let model = crate::download_manager::ModelManifest::whisper_base_en();
+
+    // Compute full expected path
+    let expected_path = if let Some(ref p) = config.whisper_model_path {
+        PathBuf::from(p)
+    } else {
+        crate::download_manager::ModelCache::cached_path(&model_dir, &model)
+    };
+
+    // Already present and valid — fast path
+    if crate::download_manager::ModelCache::is_cached(&model_dir, &model).await {
+        tracing::info!(
+            "boot: whisper model already cached at {}",
+            expected_path.display()
+        );
+        return Ok(expected_path);
+    }
+
+    tracing::info!(
+        "boot: whisper model not found at {} — downloading ({}MB, non-blocking)",
+        expected_path.display(),
+        model.size_bytes / (1024 * 1024)
+    );
+
+    let client = crate::download_manager::DownloadClient::new()
+        .map_err(|e| format!("download client init: {}", e))?;
+
+    let downloaded_path = client
+        .download_model(bus, &model_dir, &model, 1)
+        .await
+        .map_err(|e| format!("whisper model download: {}", e))?;
+
+    tracing::info!(
+        "boot: whisper model downloaded to {}",
         downloaded_path.display()
     );
 

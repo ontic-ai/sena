@@ -55,6 +55,22 @@ impl ModelManifest {
             size_bytes: 91_000_000, // ~87MB (approximate)
         }
     }
+
+    /// Returns the Whisper base.en GGML model info (~148MB).
+    ///
+    /// This is Sena's default STT (speech-to-text) model.
+    /// base.en is English-only, optimized for size and speed on CPU.
+    pub fn whisper_base_en() -> ModelInfo {
+        ModelInfo {
+            name: "whisper-base.en".to_string(),
+            filename: "ggml-base.en.bin".to_string(),
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+                .to_string(),
+            // TODO: Pin real SHA-256 checksum — placeholder skips verification for now
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            size_bytes: 148_164_587, // ~148MB
+        }
+    }
 }
 
 /// Model cache operations.
