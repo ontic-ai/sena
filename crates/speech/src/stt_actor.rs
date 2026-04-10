@@ -289,17 +289,6 @@ impl SttActor {
         match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(buffer)).await {
             Ok(Ok(result)) => {
                 if result.confidence >= self.confidence_threshold {
-                    // Emit per-word streaming events
-                    for (seq, word) in result.words.iter().enumerate() {
-                        let _ = bus
-                            .broadcast(Event::Speech(SpeechEvent::TranscriptionWordReady {
-                                word: word.text.clone(),
-                                confidence: word.confidence,
-                                sequence: seq as u32,
-                                request_id,
-                            }))
-                            .await;
-                    }
                     // Emit completion with word-level data
                     let avg = if result.words.is_empty() {
                         result.confidence
