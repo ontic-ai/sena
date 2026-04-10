@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 
 use bus::{Actor, ActorError, Event, EventBus, SpeechEvent, SystemEvent};
 
@@ -36,6 +36,8 @@ pub struct SttActor {
     /// Minimum confidence score for transcription output to be accepted.
     /// Range [0.0, 1.0]. Default: 0.5.
     confidence_threshold: f32,
+    /// Path to Whisper model file. Will be used by whisper-cpp-plus in Unit 7.
+    #[allow(dead_code)]
     whisper_model_path: Option<String>,
     model_dir: Option<PathBuf>,
     silence_duration_secs: f32,
@@ -134,33 +136,16 @@ impl SttActor {
     async fn initialize_backend(&mut self) -> Result<(), SpeechError> {
         let handle = match self.backend {
             SttBackend::Mock => SttBackendHandle::Mock,
-            SttBackend::Whisper => self.initialize_candle_backend().await?,
+            SttBackend::Whisper => {
+                // TODO: Whisper backend will be reimplemented with whisper-cpp-plus in Unit 7
+                return Err(SpeechError::SttInitFailed(
+                    "Whisper backend not yet implemented (whisper-cpp-plus pending)".to_string(),
+                ));
+            }
         };
 
         self.backend_handle = Some(handle);
         Ok(())
-    }
-
-    async fn initialize_candle_backend(&self) -> Result<SttBackendHandle, SpeechError> {
-        let model_dir = self.model_dir.clone();
-        let model_path = self.whisper_model_path.clone();
-
-        // Load model in spawn_blocking to avoid blocking async
-        let model = tokio::task::spawn_blocking(move || {
-            let dir = model_dir
-                .as_deref()
-                .unwrap_or_else(|| std::path::Path::new(""));
-            crate::candle_whisper::CandleWhisperModel::load(dir, model_path.as_deref())
-        })
-        .await
-        .map_err(|e| SpeechError::SttInitFailed(format!("spawn_blocking panicked: {}", e)))??;
-
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WorkerCommand>();
-        std::thread::spawn(move || {
-            candle_worker_loop(model, cmd_rx);
-        });
-
-        Ok(SttBackendHandle::CandleWhisper { tx: cmd_tx })
     }
 
     fn maybe_start_audio_capture(&mut self) -> Result<(), SpeechError> {
@@ -199,23 +184,6 @@ impl SttActor {
                         confidence: 0.85,
                     })
                 }
-            }
-            Some(SttBackendHandle::CandleWhisper { tx }) => {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                tx.send(WorkerCommand::Transcribe {
-                    samples: buffer.samples,
-                    reply: reply_tx,
-                })
-                .map_err(|e| {
-                    SpeechError::TranscriptionFailed(format!(
-                        "candle worker channel send failed: {}",
-                        e
-                    ))
-                })?;
-
-                reply_rx.await.map_err(|e| {
-                    SpeechError::TranscriptionFailed(format!("candle worker reply failed: {}", e))
-                })?
             }
             None => Err(SpeechError::TranscriptionFailed(
                 "STT backend not initialized".to_string(),
@@ -526,10 +494,7 @@ impl Actor for SttActor {
         self.listen_audio_rx = None;
         self.listen_audio_stream = None;
         self.listen_session_id = None;
-
-        if let Some(SttBackendHandle::CandleWhisper { tx }) = self.backend_handle.take() {
-            let _ = tx.send(WorkerCommand::Shutdown);
-        }
+        self.backend_handle = None;
 
         Ok(())
     }
@@ -537,39 +502,7 @@ impl Actor for SttActor {
 
 enum SttBackendHandle {
     Mock,
-    CandleWhisper {
-        tx: std::sync::mpsc::Sender<WorkerCommand>,
-    },
-}
-
-enum WorkerCommand {
-    Transcribe {
-        samples: Vec<f32>,
-        reply: oneshot::Sender<Result<TranscriptionResult, SpeechError>>,
-    },
-    Shutdown,
-}
-
-fn candle_worker_loop(
-    mut model: crate::candle_whisper::CandleWhisperModel,
-    rx: std::sync::mpsc::Receiver<WorkerCommand>,
-) {
-    while let Ok(command) = rx.recv() {
-        match command {
-            WorkerCommand::Shutdown => break,
-            WorkerCommand::Transcribe { samples, reply } => {
-                let result = model.transcribe(&samples).map(|text| {
-                    let confidence = if text.trim().is_empty() {
-                        0.0
-                    } else {
-                        (crate::silence_detector::calculate_rms(&samples) * 10.0).clamp(0.55, 0.99)
-                    };
-                    TranscriptionResult { text, confidence }
-                });
-                let _ = reply.send(result);
-            }
-        }
-    }
+    // TODO: Whisper variant will be added in Unit 7 with whisper-cpp-plus backend
 }
 
 struct TranscriptionResult {

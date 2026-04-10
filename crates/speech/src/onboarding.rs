@@ -36,12 +36,12 @@ pub async fn check_speech_models(model_dir: &Path) -> Result<Vec<String>, Speech
 
     // Check required models are cached
     let whisper_cached =
-        ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en_safetensors()).await;
+        ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en()).await;
     let piper_cached = ModelCache::is_cached(model_dir, &ModelManifest::piper_voice()).await;
 
     let mut missing = Vec::new();
     if !whisper_cached {
-        missing.push("whisper-base-en-safetensors".to_string());
+        missing.push("whisper-base-en-ggml".to_string());
     }
     if !piper_cached {
         missing.push("piper-en-us-lessac-medium".to_string());
@@ -110,7 +110,7 @@ mod tests {
             .await
             .expect("check succeeded");
         assert!(!missing.is_empty());
-        assert!(missing.contains(&"whisper-base-en-safetensors".to_string()));
+        assert!(missing.contains(&"whisper-base-en-ggml".to_string()));
         assert!(missing.contains(&"piper-en-us-lessac-medium".to_string()));
     }
 }

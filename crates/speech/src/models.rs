@@ -38,50 +38,18 @@ pub struct ModelInfo {
 pub struct ModelManifest;
 
 impl ModelManifest {
-    /// Returns the Whisper base (English-only) model for STT.
+    /// Returns the Whisper base (English-only) GGML model for STT.
     ///
-    /// Candle-compatible models require three files:
-    /// - model.safetensors (or model.gguf for quantized)
-    /// - config.json
-    /// - tokenizer.json
-    ///
-    /// This manifest entry points to the safetensors model.
-    /// Companion config and tokenizer files must be downloaded separately
-    /// (see `whisper_config()` and `whisper_tokenizer()`).
-    pub fn whisper_base_en_safetensors() -> ModelInfo {
+    /// Single GGML file used by whisper-cpp-plus. Downloaded by runtime DownloadManager.
+    pub fn whisper_base_en() -> ModelInfo {
         ModelInfo {
-            name: "whisper-base-en-safetensors".to_string(),
-            filename: "model.safetensors".to_string(),
-            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/model.safetensors"
+            name: "whisper-base-en-ggml".to_string(),
+            filename: "ggml-base.en.bin".to_string(),
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
                 .to_string(),
-            sha256: "d4dd5542fd6a1d35639e21384238f3bfe6c557c849d392b5905d33ee29e71db5".to_string(),
-            size_bytes: 290_000_000, // ~290MB
-            model_type: ModelType::WhisperStt,
-        }
-    }
-
-    /// Returns the Whisper config.json for candle.
-    pub fn whisper_config() -> ModelInfo {
-        ModelInfo {
-            name: "whisper-config".to_string(),
-            filename: "config.json".to_string(),
-            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/config.json"
-                .to_string(),
+            // TODO: Pin real SHA-256 checksum from HuggingFace
             sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 2_000, // ~2KB
-            model_type: ModelType::WhisperStt,
-        }
-    }
-
-    /// Returns the Whisper tokenizer.json for candle.
-    pub fn whisper_tokenizer() -> ModelInfo {
-        ModelInfo {
-            name: "whisper-tokenizer".to_string(),
-            filename: "tokenizer.json".to_string(),
-            url: "https://huggingface.co/openai/whisper-base.en/resolve/main/tokenizer.json"
-                .to_string(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 2_000_000, // ~2MB
+            size_bytes: 148_164_587, // ~148MB
             model_type: ModelType::WhisperStt,
         }
     }
@@ -114,9 +82,7 @@ impl ModelManifest {
     /// Returns all known models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
-            Self::whisper_base_en_safetensors(),
-            Self::whisper_config(),
-            Self::whisper_tokenizer(),
+            Self::whisper_base_en(),
             Self::piper_voice(),
             Self::open_wakeword(),
         ]
@@ -163,32 +129,24 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 5);
+        assert_eq!(models.len(), 3);
 
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
-        assert_eq!(whisper.filename, "model.safetensors");
+        assert_eq!(whisper.filename, "ggml-base.en.bin");
 
-        let whisper_cfg = &models[1];
-        assert_eq!(whisper_cfg.model_type, ModelType::WhisperStt);
-        assert_eq!(whisper_cfg.filename, "config.json");
-
-        let whisper_tok = &models[2];
-        assert_eq!(whisper_tok.model_type, ModelType::WhisperStt);
-        assert_eq!(whisper_tok.filename, "tokenizer.json");
-
-        let piper = &models[3];
+        let piper = &models[1];
         assert_eq!(piper.model_type, ModelType::PiperTts);
         assert!(piper.filename.ends_with(".onnx"));
 
-        let wakeword = &models[4];
+        let wakeword = &models[2];
         assert_eq!(wakeword.model_type, ModelType::OpenWakeWord);
         assert!(wakeword.filename.ends_with(".tflite"));
     }
 
     #[test]
     fn cached_path_returns_correct_path() {
-        let model = ModelManifest::whisper_base_en_safetensors();
+        let model = ModelManifest::whisper_base_en();
         let model_dir = Path::new("/tmp/models");
         let path = ModelCache::cached_path(model_dir, &model);
 
@@ -198,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn is_cached_returns_false_for_nonexistent_file() {
         let temp_dir = tempdir().expect("tempdir creation");
-        let model = ModelManifest::whisper_base_en_safetensors();
+        let model = ModelManifest::whisper_base_en();
 
         let cached = ModelCache::is_cached(temp_dir.path(), &model).await;
         assert!(!cached);
