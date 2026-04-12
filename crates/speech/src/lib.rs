@@ -15,6 +15,7 @@ mod candle_whisper;
 pub mod download;
 pub mod error;
 pub mod onboarding;
+mod parakeet_stt;
 mod sherpa_stt;
 mod silence_detector;
 pub mod stt_actor;
@@ -23,6 +24,7 @@ pub mod wakeword;
 
 pub use audio_input::list_input_devices;
 pub use error::SpeechError;
+pub use parakeet_stt::ParakeetStt;
 pub use stt_actor::SttActor;
 pub use tts_actor::TtsActor;
 pub use wakeword::WakewordActor;
@@ -45,7 +47,7 @@ pub enum SttBackend {
     Whisper,
     /// Sherpa-onnx Zipformer streaming STT (ONNX, <600MB VRAM).
     Sherpa,
-    /// NVIDIA Parakeet streaming STT (.nemo, 1.2-2GB VRAM recommended).
+    /// NVIDIA Parakeet streaming STT (ONNX format, 1.2-2GB VRAM recommended).
     Parakeet,
     /// Mock backend for testing.
     Mock,

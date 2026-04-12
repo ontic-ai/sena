@@ -214,7 +214,7 @@ impl SttActor {
             SttBackend::Mock => SttBackendHandle::Mock,
             SttBackend::Whisper => self.initialize_candle_backend().await?,
             SttBackend::Sherpa => SttBackendHandle::Sherpa,
-            SttBackend::Parakeet => SttBackendHandle::Parakeet,
+            SttBackend::Parakeet => self.initialize_parakeet_backend().await?,
         };
 
         self.backend_handle = Some(handle);
@@ -241,6 +241,36 @@ impl SttActor {
         });
 
         Ok(SttBackendHandle::CandleWhisper { tx: cmd_tx })
+    }
+
+    async fn initialize_parakeet_backend(&self) -> Result<SttBackendHandle, SpeechError> {
+        let model_dir = self
+            .model_dir
+            .clone()
+            .ok_or_else(|| SpeechError::SttInitFailed("model_dir not configured".to_string()))?;
+
+        let parakeet_model_dir = model_dir.join("parakeet");
+
+        tracing::info!(
+            "initializing Parakeet backend from {}",
+            parakeet_model_dir.display()
+        );
+
+        // Load model in spawn_blocking to avoid blocking async
+        let model = tokio::task::spawn_blocking(move || {
+            crate::parakeet_stt::ParakeetStt::load(&parakeet_model_dir)
+        })
+        .await
+        .map_err(|e| SpeechError::SttInitFailed(format!("spawn_blocking panicked: {}", e)))??;
+
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ParakeetCommand>();
+        std::thread::spawn(move || {
+            parakeet_worker_loop(model, cmd_rx);
+        });
+
+        tracing::info!("Parakeet backend initialized successfully");
+
+        Ok(SttBackendHandle::Parakeet { tx: cmd_tx })
     }
 
     fn maybe_start_audio_capture(&mut self) -> Result<(), SpeechError> {
@@ -300,9 +330,30 @@ impl SttActor {
             Some(SttBackendHandle::Sherpa) => Err(SpeechError::TranscriptionFailed(
                 "Sherpa backend not yet implemented".to_string(),
             )),
-            Some(SttBackendHandle::Parakeet) => Err(SpeechError::TranscriptionFailed(
-                "Parakeet backend not yet implemented".to_string(),
-            )),
+            Some(SttBackendHandle::Parakeet { tx }) => {
+                // Convert f32 samples to i16 for parakeet
+                let samples_i16: Vec<i16> = buffer
+                    .samples
+                    .iter()
+                    .map(|&s| (s * 32768.0).clamp(-32768.0, 32767.0) as i16)
+                    .collect();
+
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tx.send(ParakeetCommand::Transcribe {
+                    samples: samples_i16,
+                    reply: reply_tx,
+                })
+                .map_err(|e| {
+                    SpeechError::TranscriptionFailed(format!(
+                        "parakeet worker channel send failed: {}",
+                        e
+                    ))
+                })?;
+
+                reply_rx.await.map_err(|e| {
+                    SpeechError::TranscriptionFailed(format!("parakeet worker reply failed: {}", e))
+                })?
+            }
             None => Err(SpeechError::TranscriptionFailed(
                 "STT backend not initialized".to_string(),
             )),
@@ -782,8 +833,14 @@ impl Actor for SttActor {
         self.listen_audio_stream = None;
         self.listen_session_id = None;
 
-        if let Some(SttBackendHandle::CandleWhisper { tx }) = self.backend_handle.take() {
-            let _ = tx.send(WorkerCommand::Shutdown);
+        match self.backend_handle.take() {
+            Some(SttBackendHandle::CandleWhisper { tx }) => {
+                let _ = tx.send(WorkerCommand::Shutdown);
+            }
+            Some(SttBackendHandle::Parakeet { tx }) => {
+                let _ = tx.send(ParakeetCommand::Shutdown);
+            }
+            _ => {}
         }
 
         Ok(())
@@ -797,8 +854,10 @@ enum SttBackendHandle {
     },
     /// Sherpa backend placeholder (implementation in Unit 3).
     Sherpa,
-    /// Parakeet backend placeholder (implementation in Unit 4).
-    Parakeet,
+    /// Parakeet backend — NVIDIA Parakeet-EOU ONNX streaming STT.
+    Parakeet {
+        tx: std::sync::mpsc::Sender<ParakeetCommand>,
+    },
 }
 
 enum WorkerCommand {
@@ -851,6 +910,42 @@ fn sherpa_worker_loop(
             SherpaCmd::Decode { samples, reply } => {
                 let text = model.decode_chunk(samples);
                 let _ = reply.send(text);
+            }
+        }
+    }
+}
+
+/// Commands for the Parakeet worker thread.
+enum ParakeetCommand {
+    Transcribe {
+        samples: Vec<i16>,
+        reply: oneshot::Sender<Result<TranscriptionResult, SpeechError>>,
+    },
+    Shutdown,
+}
+
+/// Worker loop for blocking Parakeet decode calls.
+fn parakeet_worker_loop(
+    mut model: crate::parakeet_stt::ParakeetStt,
+    rx: std::sync::mpsc::Receiver<ParakeetCommand>,
+) {
+    while let Ok(command) = rx.recv() {
+        match command {
+            ParakeetCommand::Shutdown => break,
+            ParakeetCommand::Transcribe { samples, reply } => {
+                let result = model.decode_chunk(&samples).map(|text| {
+                    let confidence = if text.trim().is_empty() {
+                        0.0
+                    } else {
+                        // Calculate confidence from audio energy (similar to Whisper)
+                        let samples_f32: Vec<f32> =
+                            samples.iter().map(|&s| s as f32 / 32768.0).collect();
+                        (crate::silence_detector::calculate_rms(&samples_f32) * 10.0)
+                            .clamp(0.55, 0.99)
+                    };
+                    TranscriptionResult { text, confidence }
+                });
+                let _ = reply.send(result);
             }
         }
     }
