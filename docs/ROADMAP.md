@@ -292,11 +292,13 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Queue management: FIFO with max queue depth, interruption support
 - [x] Integration test: text → audio playback on all 3 OS's
 
-#### M5.3 — STT: Whisper.cpp Integration ✅
-- [x] Whisper.cpp model loading from downloaded GGUF (feature-gated: `--features whisper`)
+#### M5.3 — STT: Whisper Integration ✅
+- [x] Whisper model loading from downloaded GGUF (whisper-rs v0.16.0)
 - [x] Audio capture via cpal (16kHz mono)
 - [x] Voice Activity Detection (VAD): energy threshold + silence detection
 - [x] Transcription pipeline: audio buffer → whisper inference → TranscriptionCompleted event
+- [x] Word-level confidence scoring with visual indicators in CLI output
+- [x] TranscriptionWordReady streaming events for real-time word display
 - [x] On-demand mode: transcribe on VoiceInputDetected event
 - [x] Always-listening mode: continuous capture with VAD-triggered transcription
 - [x] `SilenceDetector` struct extracted — per-mode VAD instances prevent cross-mode state contamination (Audit Finding F1 partial)

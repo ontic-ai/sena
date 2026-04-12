@@ -51,4 +51,20 @@ pub enum SpeechError {
     /// Model not found in manifest.
     #[error("model not found: {0}")]
     ModelNotFound(String),
+
+    /// STT worker binary not found.
+    #[error("stt-worker binary not found at: {0}")]
+    WorkerNotFound(std::path::PathBuf),
+
+    /// STT worker process failed to spawn.
+    #[error("worker spawn failed: {0}")]
+    WorkerSpawnFailed(String),
+
+    /// STT worker process crashed.
+    #[error("worker crashed with exit code: {0}")]
+    WorkerCrashed(i32),
+
+    /// Communication with STT worker failed.
+    #[error("worker pipe error: {0}")]
+    WorkerPipeError(String),
 }

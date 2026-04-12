@@ -407,15 +407,51 @@ impl Shell {
         for msg in &self.state.messages {
             match msg.role {
                 MessageRole::User => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
+                    // Check if this is a voice transcription with word-level confidence
+                    if let Some(word_confidences) = &msg.word_confidences {
+                        // Build colored line with confidence-based coloring
+                        let mut spans = vec![Span::styled(
                             "\u{25b8} ",
                             Style::default()
                                 .fg(Color::LightMagenta)
                                 .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(&msg.text, Style::default().fg(Color::White)),
-                    ]));
+                        )];
+                        // Extract the prefix if present (e.g., "[voice] ")
+                        if msg.text.starts_with("[voice] ") {
+                            spans.push(Span::styled(
+                                "[voice] ",
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        // Add colored words
+                        for (i, (word, confidence)) in word_confidences.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" "));
+                            }
+                            // Determine color based on confidence tier
+                            // High >= 0.80: green, Medium >= 0.55: yellow, Low: red
+                            let color = if *confidence >= 0.80 {
+                                Color::Green
+                            } else if *confidence >= 0.55 {
+                                Color::Yellow
+                            } else {
+                                Color::Red
+                            };
+                            spans.push(Span::styled(word.as_str(), Style::default().fg(color)));
+                        }
+                        lines.push(Line::from(spans));
+                    } else {
+                        // Regular user message
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "\u{25b8} ",
+                                Style::default()
+                                    .fg(Color::LightMagenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(&msg.text, Style::default().fg(Color::White)),
+                        ]));
+                    }
                     lines.push(Line::from("")); // spacing
                 }
                 MessageRole::Sena => {
@@ -601,6 +637,57 @@ impl Shell {
             Style::default().fg(Color::White),
         )));
         lines.push(Line::from(""));
+
+        // ── VRAM ──────────────────────────────────────────────────────────────
+        if self.state.vram_total_mb > 0 {
+            lines.push(Line::from(Span::styled(
+                " VRAM",
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            let used = self.state.vram_used_mb;
+            let total = self.state.vram_total_mb;
+            let pct = if total > 0 {
+                (used * 100 / total) as u16
+            } else {
+                0
+            };
+
+            // Build a text-based bar: [████░░░░░░] 3.2/8.0 GB (40%)
+            let bar_width = (area.width.saturating_sub(6) as usize).min(20);
+            let filled = (bar_width as u16 * pct / 100) as usize;
+            let empty = bar_width.saturating_sub(filled);
+
+            let bar_color = if pct > 90 {
+                Color::Red
+            } else if pct > 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+
+            let bar_line = Line::from(vec![
+                Span::styled("  [", Style::default().fg(Color::DarkGray)),
+                Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+                Span::styled("] ", Style::default().fg(Color::DarkGray)),
+            ]);
+            lines.push(bar_line);
+
+            let usage_text = format!(
+                "  {:.1}/{:.1} GB ({}%)",
+                used as f64 / 1024.0,
+                total as f64 / 1024.0,
+                pct
+            );
+            lines.push(Line::from(Span::styled(
+                usage_text,
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+        }
 
         // ── Session stats ─────────────────────────────────────────────────────
         lines.push(Line::from(Span::styled(
@@ -1106,13 +1193,25 @@ impl Shell {
                 text,
                 confidence: _,
                 request_id,
+                words,
+                ..
             }) => {
                 if self.voice_enabled {
+                    // Store voice transcription with word-level confidence for colored display
+                    if !words.is_empty() {
+                        let word_data: Vec<(String, f32)> = words
+                            .iter()
+                            .map(|w| (w.text.clone(), w.confidence))
+                            .collect();
+                        let mut msg = crate::tui_state::Message::new_voice_transcription(word_data);
+                        msg.text = format!("[voice] {}", msg.text);
+                        self.state.messages.push(msg);
+                    }
                     self.send_chat_with_request(
                         text,
                         request_id,
                         Priority::Normal,
-                        Some("[voice] "),
+                        None, // prefix already added above
                     )
                     .await;
                 }
@@ -1220,6 +1319,12 @@ impl Shell {
                 self.add_message(
                     MessageRole::System,
                     "[speech] TTS playback complete".to_string(),
+                );
+            }
+            Event::Speech(SpeechEvent::SttModelLoaded { model_name, backend }) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!("[speech] STT model loaded: {} ({})", model_name, backend),
                 );
             }
             Event::Speech(SpeechEvent::SpeechFailed { reason, .. }) => {
@@ -2331,7 +2436,11 @@ async fn show_status_shared(
         add_message(
             state,
             MessageRole::System,
-            &format!("  {}: {}", name, if enabled { "enabled" } else { "disabled" }),
+            &format!(
+                "  {}: {}",
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            ),
         );
     }
 
@@ -2343,10 +2452,22 @@ async fn show_status_shared(
             .map(|c| c.speech_enabled)
             .unwrap_or(false)
     };
-    let speech_status = if speech_enabled { "enabled" } else { "disabled" };
+    let speech_status = if speech_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
     add_message(state, MessageRole::System, "Speech");
-    add_message(state, MessageRole::System, &format!("  STT: {}", speech_status));
-    add_message(state, MessageRole::System, &format!("  TTS: {}", speech_status));
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  STT: {}", speech_status),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  TTS: {}", speech_status),
+    );
 }
 
 fn copy_last_response_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
@@ -2636,6 +2757,12 @@ fn verbose_format(ev: &Event) -> Option<String> {
         Event::Inference(InferenceEvent::ModelLoaded { name, .. }) => {
             Some(format!("[verbose] Inference: model loaded — {}", name))
         }
+        Event::Speech(SpeechEvent::WakewordSuppressed { reason }) => {
+            Some(format!("[verbose] Wakeword: suppressed ({})", reason))
+        }
+        Event::Speech(SpeechEvent::WakewordResumed) => {
+            Some("[verbose] Wakeword: resumed".to_string())
+        }
         _ => None,
     }
 }
@@ -2879,6 +3006,10 @@ impl ShellMode {
                         }
                         IpcPayload::ModelStatusUpdate { name } => {
                             state.current_model = Some(name);
+                        }
+                        IpcPayload::VramStatusUpdate { total_mb, used_mb } => {
+                            state.vram_total_mb = total_mb;
+                            state.vram_used_mb = used_mb;
                         }
                         _ => {}
                     }
@@ -3497,6 +3628,57 @@ fn render_ipc_sidebar(
         Style::default().fg(Color::White),
     )));
     lines.push(Line::from(""));
+
+    // ── VRAM ──────────────────────────────────────────────────────────────────
+    if state.vram_total_mb > 0 {
+        lines.push(Line::from(Span::styled(
+            " VRAM",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        let used = state.vram_used_mb;
+        let total = state.vram_total_mb;
+        let pct = if total > 0 {
+            (used * 100 / total) as u16
+        } else {
+            0
+        };
+
+        // Build a text-based bar: [████░░░░░░] 3.2/8.0 GB (40%)
+        let bar_width = (area.width.saturating_sub(6) as usize).min(20);
+        let filled = (bar_width as u16 * pct / 100) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        let bar_color = if pct > 90 {
+            Color::Red
+        } else if pct > 70 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
+        let bar_line = Line::from(vec![
+            Span::styled("  [", Style::default().fg(Color::DarkGray)),
+            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+        ]);
+        lines.push(bar_line);
+
+        let usage_text = format!(
+            "  {:.1}/{:.1} GB ({}%)",
+            used as f64 / 1024.0,
+            total as f64 / 1024.0,
+            pct
+        );
+        lines.push(Line::from(Span::styled(
+            usage_text,
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(""));
+    }
 
     // ── Session stats ─────────────────────────────────────────────────────────
     lines.push(Line::from(Span::styled(

@@ -62,6 +62,7 @@ impl IpcServer {
             "platform_polling",
             "screen_capture",
             "speech",
+            "vram_monitor",
         ] {
             default_states.insert((*name).to_string(), true);
         }
@@ -239,6 +240,12 @@ impl IpcServer {
                         payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
                     });
                 }
+                if let Event::System(SystemEvent::VramUsageUpdated { total_mb, used_mb }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::VramStatusUpdate { total_mb, used_mb },
+                    });
+                }
                 if let Some(display_msg) = event_to_display_line(&event) {
                     let _ = bus_tx.send(display_msg);
                 }
@@ -335,6 +342,12 @@ impl IpcServer {
                     let _ = bus_tx.send(IpcMessage {
                         id: 0,
                         payload: IpcPayload::ModelStatusUpdate { name: name.clone() },
+                    });
+                }
+                if let Event::System(SystemEvent::VramUsageUpdated { total_mb, used_mb }) = event {
+                    let _ = bus_tx.send(IpcMessage {
+                        id: 0,
+                        payload: IpcPayload::VramStatusUpdate { total_mb, used_mb },
                     });
                 }
                 if let Some(display_msg) = event_to_display_line(&event) {
@@ -1307,13 +1320,7 @@ fn current_user_pipe_identity() -> Option<String> {
         }
 
         let mut bytes_needed: DWORD = 0;
-        let _ = GetTokenInformation(
-            token,
-            TokenUser,
-            ptr::null_mut(),
-            0,
-            &mut bytes_needed,
-        );
+        let _ = GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut bytes_needed);
 
         if bytes_needed == 0 {
             let _ = CloseHandle(token);

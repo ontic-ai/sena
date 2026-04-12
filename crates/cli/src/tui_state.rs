@@ -70,12 +70,33 @@ pub enum MessageRole {
 pub struct Message {
     pub role: MessageRole,
     pub text: String,
+    /// Optional word-level confidence data for voice transcriptions.
+    /// Each tuple is (word_text, confidence_score).
+    pub word_confidences: Option<Vec<(String, f32)>>,
 }
 
 impl Message {
     /// Create a new message.
     pub fn new(role: MessageRole, text: String) -> Self {
-        Self { role, text }
+        Self {
+            role,
+            text,
+            word_confidences: None,
+        }
+    }
+
+    /// Create a new voice transcription message with word-level confidence.
+    pub fn new_voice_transcription(words: Vec<(String, f32)>) -> Self {
+        let text = words
+            .iter()
+            .map(|(w, _)| w.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            role: MessageRole::User,
+            text,
+            word_confidences: Some(words),
+        }
     }
 }
 
@@ -189,6 +210,10 @@ pub struct ShellState<T> {
     pub listen_mode_active: bool,
     /// Session ID of the currently active listen session (0 when inactive).
     pub listen_session_id: u64,
+    /// Current GPU VRAM total in MB (0 = no GPU or detection failed).
+    pub vram_total_mb: u64,
+    /// Current GPU VRAM used in MB.
+    pub vram_used_mb: u64,
 }
 
 impl<T> ShellState<T> {
@@ -225,6 +250,8 @@ impl<T> ShellState<T> {
             waiting_for_inference: false,
             listen_mode_active: false,
             listen_session_id: 0,
+            vram_total_mb: 0,
+            vram_used_mb: 0,
         }
     }
 

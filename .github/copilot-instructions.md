@@ -586,6 +586,7 @@ Every Sena background processing loop MUST be registered in the IPC server's loo
 | `platform_polling` | `PlatformActor` | enabled | Platform signal polling — active window, clipboard, keystroke cadence |
 | `screen_capture` | `PlatformActor` | enabled | Screen capture for vision-capable models — periodic screenshot acquisition |
 | `speech` | `SttActor` / `WakewordActor` | enabled | Speech input loop — wakeword detection and/or continuous STT capture |
+| `vram_monitor` | Boot task | enabled | Real-time VRAM usage monitoring — polls GPU memory every 10s |
 
 ### 17.3 CLI Display Contract
 

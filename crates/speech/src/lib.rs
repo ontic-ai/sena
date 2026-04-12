@@ -6,19 +6,20 @@
 //! # Architecture
 //! - STT and TTS are separate actors (isolation principle)
 //! - All processing is local (no network calls)
-//! - Backend selection: Whisper via candle (STT), Piper or platform APIs (TTS)
+//! - Backend selection: Whisper via whisper-rs (STT), Piper or platform APIs (TTS)
 //! - Mock backends available for testing
 
 pub mod audio_input;
 pub mod audio_output;
-mod candle_whisper;
-pub mod download;
 pub mod error;
+pub mod models;
 pub mod onboarding;
 mod silence_detector;
+pub mod stt;
 pub mod stt_actor;
 pub mod tts_actor;
 pub mod wakeword;
+pub mod worker;
 
 pub use audio_input::list_input_devices;
 pub use error::SpeechError;
@@ -40,7 +41,7 @@ pub struct AudioBuffer {
 /// STT backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SttBackend {
-    /// Whisper via candle (STT).
+    /// Whisper via whisper-rs (STT).
     Whisper,
     /// Mock backend for testing.
     Mock,

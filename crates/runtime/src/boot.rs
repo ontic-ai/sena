@@ -73,6 +73,9 @@ pub enum BootError {
     #[error("embed model download failed: {0}")]
     EmbedModelDownloadFailed(String),
 
+    #[error("whisper model download failed: {0}")]
+    WhisperModelDownloadFailed(String),
+
     #[error("prompt init failed: {0}")]
     PromptInitFailed(String),
 
@@ -255,41 +258,79 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 10: PromptComposer is stateless — no spawn needed.
 
-    // Step 10.5: Speech onboarding (non-fatal).
-    let mut speech_available = config.speech_enabled;
+    // Step 10.5: Ensure whisper model is available before speech actors spawn.
+    // The whisper model is required for STT (speech-to-text).
+    // If the file is missing, download it now (non-blocking — speech can start without STT).
+    // CRITICAL: This must run BEFORE speech actors (Step 11) to prevent race conditions.
+    let whisper_model_path = if config.speech_enabled {
+        match ensure_whisper_model(&bus, &config).await {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!(
+                    "whisper model download failed, STT will be unavailable: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Step 10.6: Speech model check (per-subsystem, non-fatal).
     let speech_model_dir = config
         .speech_model_dir
         .clone()
         .unwrap_or_else(crate::config::default_speech_model_dir);
 
-    if config.speech_enabled
-        && speech::onboarding::speech_onboarding_needed(&speech_model_dir).await
-    {
-        match speech::onboarding::run_speech_onboarding(&bus, &speech_model_dir).await {
-            Ok(_downloaded) => {}
-            Err(e) => {
-                eprintln!("WARN: speech onboarding failed, disabling speech: {}", e);
-                speech_available = false;
-            }
-        }
-    }
+    // Check each speech model independently
+    let whisper_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::whisper_base_en(),
+    )
+    .await;
+    let piper_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::piper_voice(),
+    )
+    .await;
+    let wakeword_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::open_wakeword(),
+    )
+    .await;
 
-    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
-    if speech_available {
+    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn independently based on model availability.
+
+    // Step 11.1: STT Actor (spawn if config.speech_enabled AND whisper model exists)
+    if config.speech_enabled && whisper_model_available {
         let stt_backend = speech::SttBackend::Whisper;
+        let resolved_whisper_path = whisper_model_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| config.whisper_model_path.clone());
 
         let stt_actor = speech::SttActor::new(
             stt_backend,
             config.voice_always_listening,
             config.stt_energy_threshold,
-            config.whisper_model_path.clone(),
+            resolved_whisper_path,
         )
         .with_model_dir(Some(speech_model_dir.clone()))
         .with_microphone_device(config.microphone_device.clone())
         .with_confidence_threshold(config.stt_confidence_threshold);
         spawn_actor(&bus, &mut registry, stt_actor);
         expected_actors.push("stt");
+        tracing::info!("boot: STT actor spawned (whisper model available)");
+    } else if config.speech_enabled {
+        eprintln!(
+            "WARN: whisper model missing at {}, STT disabled. Use download manager to acquire whisper model.",
+            speech_model_dir.display()
+        );
+    }
 
+    // Step 11.2: TTS Actor (spawn if config.speech_enabled AND piper model exists)
+    if config.speech_enabled && piper_model_available {
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
@@ -297,17 +338,31 @@ pub async fn boot() -> Result<Runtime, BootError> {
             .with_queue_depth(config.tts_queue_depth);
         spawn_actor(&bus, &mut registry, tts_actor);
         expected_actors.push("tts");
+        tracing::info!("boot: TTS actor spawned (piper model available)");
+    } else if config.speech_enabled {
+        eprintln!(
+            "WARN: piper model missing at {}, TTS disabled. Use download manager to acquire piper model.",
+            speech_model_dir.display()
+        );
+    }
 
-        if config.wakeword_enabled {
-            let wakeword_config = speech::wakeword::WakewordConfig {
-                sensitivity: config.wakeword_sensitivity,
-                model_path: None,
-                model_dir: Some(speech_model_dir),
-                debounce_secs: 3.0,
-            };
-            let wakeword_actor = speech::WakewordActor::new(wakeword_config);
-            spawn_actor(&bus, &mut registry, wakeword_actor);
-        }
+    // Step 11.3: Wakeword Actor (spawn if config.wakeword_enabled AND wakeword model exists)
+    if config.wakeword_enabled && wakeword_model_available {
+        let wakeword_config = speech::wakeword::WakewordConfig {
+            sensitivity: config.wakeword_sensitivity,
+            model_path: None,
+            model_dir: Some(speech_model_dir),
+            debounce_secs: 3.0,
+        };
+        let wakeword_actor = speech::WakewordActor::new(wakeword_config);
+        spawn_actor(&bus, &mut registry, wakeword_actor);
+        expected_actors.push("wakeword");
+        tracing::info!("boot: Wakeword actor spawned (wakeword model available)");
+    } else if config.wakeword_enabled {
+        eprintln!(
+            "WARN: wakeword model missing at {}, wakeword disabled. Use download manager to acquire wakeword model.",
+            speech_model_dir.display()
+        );
     }
 
     // Step 12: Initialize system tray (non-fatal).
@@ -316,6 +371,65 @@ pub async fn boot() -> Result<Runtime, BootError> {
 
     // Step 12.5: Spawn memory monitor task.
     let memory_monitor_handle = spawn_memory_monitor(Arc::clone(&bus), &config);
+
+    // Step 12.6: Spawn VRAM monitor loop (if VRAM detected).
+    if hw_profile.available_vram_mb > 0 {
+        let bus_vram = Arc::clone(&bus);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let mut enabled = true;
+            let mut shutdown_rx = bus_vram.subscribe_broadcast();
+
+            // Initial state broadcast.
+            let _ = bus_vram
+                .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                    loop_name: "vram_monitor".to_string(),
+                    enabled: true,
+                }))
+                .await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if enabled {
+                            let (used, total) = tokio::task::spawn_blocking(
+                                crate::hardware_profile::poll_vram_usage
+                            ).await.unwrap_or((0, 0));
+
+                            if total > 0 {
+                                let _ = bus_vram
+                                    .broadcast(Event::System(SystemEvent::VramUsageUpdated {
+                                        total_mb: total,
+                                        used_mb: used,
+                                    }))
+                                    .await;
+                            }
+                        }
+                    }
+                    event = shutdown_rx.recv() => {
+                        if let Ok(Event::System(SystemEvent::ShutdownSignal)) = event {
+                            break;
+                        }
+                        if let Ok(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name,
+                            enabled: new_enabled,
+                        })) = event
+                        {
+                            if loop_name == "vram_monitor" && enabled != new_enabled {
+                                enabled = new_enabled;
+                                let _ = bus_vram
+                                    .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                        loop_name: "vram_monitor".to_string(),
+                                        enabled,
+                                    }))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // Step 13: Spawn IPC server (CLI communication endpoint).
     {
@@ -551,6 +665,67 @@ async fn ensure_embed_model(bus: &Arc<EventBus>, config: &SenaConfig) -> Result<
 
     tracing::info!(
         "boot: embed model downloaded to {}",
+        downloaded_path.display()
+    );
+
+    Ok(downloaded_path)
+}
+
+/// Ensures the whisper STT model is present on disk.
+/// Downloads from HuggingFace if the file is missing.
+/// Returns the resolved path to the model file.
+///
+/// This function is called at boot Step 10.5, BEFORE speech actors spawn at Step 11.
+/// This ordering is critical: the STT actor needs the model path at construction time.
+/// If download fails, STT will start in degraded mode (no transcription capability).
+async fn ensure_whisper_model(bus: &Arc<EventBus>, config: &SenaConfig) -> Result<PathBuf, String> {
+    // Determine model directory: use config override or platform default
+    let model_dir = if let Some(ref p) = config.whisper_model_path {
+        // If user set an explicit path, use its parent as the directory
+        p.rsplit_once(std::path::MAIN_SEPARATOR)
+            .map(|(parent, _)| PathBuf::from(parent))
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        // Default: <config_dir>/models/
+        platform::config_dir()
+            .map_err(|e| format!("config dir resolve failed: {}", e))?
+            .join("models")
+    };
+
+    let model = crate::download_manager::ModelManifest::whisper_base_en();
+
+    // Compute full expected path
+    let expected_path = if let Some(ref p) = config.whisper_model_path {
+        PathBuf::from(p)
+    } else {
+        crate::download_manager::ModelCache::cached_path(&model_dir, &model)
+    };
+
+    // Already present and valid — fast path
+    if crate::download_manager::ModelCache::is_cached(&model_dir, &model).await {
+        tracing::info!(
+            "boot: whisper model already cached at {}",
+            expected_path.display()
+        );
+        return Ok(expected_path);
+    }
+
+    tracing::info!(
+        "boot: whisper model not found at {} — downloading ({}MB, non-blocking)",
+        expected_path.display(),
+        model.size_bytes / (1024 * 1024)
+    );
+
+    let client = crate::download_manager::DownloadClient::new()
+        .map_err(|e| format!("download client init: {}", e))?;
+
+    let downloaded_path = client
+        .download_model(bus, &model_dir, &model, 1)
+        .await
+        .map_err(|e| format!("whisper model download: {}", e))?;
+
+    tracing::info!(
+        "boot: whisper model downloaded to {}",
         downloaded_path.display()
     );
 
