@@ -51,4 +51,8 @@ pub enum SpeechError {
     /// Model not found in manifest.
     #[error("model not found: {0}")]
     ModelNotFound(String),
+
+    /// Telemetry write failed.
+    #[error("telemetry write failed: {0}")]
+    TelemetryWriteFailed(String),
 }

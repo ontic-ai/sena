@@ -19,6 +19,7 @@ mod parakeet_stt;
 mod sherpa_stt;
 mod silence_detector;
 pub mod stt_actor;
+pub mod telemetry;
 pub mod tts_actor;
 pub mod wakeword;
 
@@ -27,6 +28,7 @@ pub use error::SpeechError;
 pub use parakeet_stt::ParakeetStt;
 pub use sherpa_stt::SherpaZipformerStt;
 pub use stt_actor::SttActor;
+pub use telemetry::log_stt_telemetry;
 pub use tts_actor::TtsActor;
 pub use wakeword::WakewordActor;
 

@@ -477,8 +477,49 @@ impl SttActor {
         request_id: u64,
         bus: &Arc<EventBus>,
     ) {
+        // Calculate chunk duration from audio buffer
+        let chunk_duration_ms =
+            (buffer.samples.len() as f64 / buffer.sample_rate as f64 * 1000.0) as u64;
+
+        // Track latency (time from transcribe start to result)
+        let start = std::time::Instant::now();
+
         match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(buffer)).await {
             Ok(Ok(result)) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+
+                // Determine backend name and VRAM
+                let (backend_name, vram_mb) = match self.backend {
+                    SttBackend::Whisper => ("whisper", 142),
+                    SttBackend::Sherpa => ("sherpa", 100),
+                    SttBackend::Parakeet => ("parakeet", 480),
+                    SttBackend::Mock => ("mock", 0),
+                };
+
+                // Log telemetry (non-fatal failure — log error but continue)
+                if let Err(e) = crate::telemetry::log_stt_telemetry(
+                    backend_name,
+                    chunk_duration_ms,
+                    latency_ms,
+                    result.confidence as f64,
+                    vram_mb,
+                )
+                .await
+                {
+                    tracing::warn!("telemetry write failed: {}", e);
+                }
+
+                // Broadcast telemetry event
+                let _ = bus
+                    .broadcast(Event::Speech(SpeechEvent::SttTelemetryUpdate {
+                        backend: backend_name.to_string(),
+                        vram_mb: Some(vram_mb as f64),
+                        latency_ms: latency_ms as f64,
+                        avg_confidence: result.confidence as f64,
+                        request_id,
+                    }))
+                    .await;
+
                 if result.confidence >= self.confidence_threshold {
                     let _ = bus
                         .broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
