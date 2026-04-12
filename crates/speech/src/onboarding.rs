@@ -13,6 +13,8 @@ use cpal::traits::HostTrait;
 use crate::error::SpeechError;
 use crate::models::{ModelCache, ModelManifest};
 
+pub use crate::models::ModelInfo;
+
 /// Check if speech onboarding is needed (any required models missing).
 pub async fn speech_onboarding_needed(model_dir: &Path) -> bool {
     for model in ModelManifest::all_models() {
@@ -21,6 +23,11 @@ pub async fn speech_onboarding_needed(model_dir: &Path) -> bool {
         }
     }
     false
+}
+
+/// Check if a single model is cached.
+pub async fn check_model_cached(model_dir: &Path, model: &ModelInfo) -> bool {
+    ModelCache::is_cached(model_dir, model).await
 }
 
 /// Check if required speech models are available and verify audio devices.
@@ -111,5 +118,29 @@ mod tests {
         assert!(!missing.is_empty());
         assert!(missing.contains(&"whisper-base-en-ggml".to_string()));
         assert!(missing.contains(&"piper-en-us-lessac-medium".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_model_cached_returns_false_when_model_missing() {
+        let temp_dir = tempdir().expect("tempdir creation");
+        let model_dir = temp_dir.path();
+        let model = ModelManifest::whisper_base_en();
+
+        // Model not cached → returns false
+        assert!(!check_model_cached(model_dir, &model).await);
+    }
+
+    #[tokio::test]
+    async fn check_model_cached_returns_true_when_model_exists() {
+        let temp_dir = tempdir().expect("tempdir creation");
+        let model_dir = temp_dir.path();
+        let model = ModelManifest::whisper_base_en();
+
+        // Create the model file
+        let model_path = ModelCache::cached_path(model_dir, &model);
+        std::fs::write(&model_path, b"dummy model data").expect("write model file");
+
+        // Model cached → returns true
+        assert!(check_model_cached(model_dir, &model).await);
     }
 }

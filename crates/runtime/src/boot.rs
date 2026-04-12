@@ -277,30 +277,34 @@ pub async fn boot() -> Result<Runtime, BootError> {
         None
     };
 
-    // Step 10.6: Speech model check (non-fatal).
-    // NOTE: Speech model downloads are handled by the runtime's DownloadManager.
-    // This step only checks if models exist. If models are missing, speech will be disabled.
-    let mut speech_available = config.speech_enabled;
+    // Step 10.6: Speech model check (per-subsystem, non-fatal).
     let speech_model_dir = config
         .speech_model_dir
         .clone()
         .unwrap_or_else(crate::config::default_speech_model_dir);
 
-    if config.speech_enabled
-        && speech::onboarding::speech_onboarding_needed(&speech_model_dir).await
-    {
-        eprintln!(
-            "WARN: speech models missing at {}, disabling speech. Use download manager to acquire models.",
-            speech_model_dir.display()
-        );
-        speech_available = false;
-    }
+    // Check each speech model independently
+    let whisper_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::whisper_base_en(),
+    )
+    .await;
+    let piper_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::piper_voice(),
+    )
+    .await;
+    let wakeword_model_available = speech::onboarding::check_model_cached(
+        &speech_model_dir,
+        &speech::models::ModelManifest::open_wakeword(),
+    )
+    .await;
 
-    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn only if onboarding succeeded.
-    if speech_available {
+    // Step 11: Speech actors (STT/TTS/Wakeword) — spawn independently based on model availability.
+
+    // Step 11.1: STT Actor (spawn if config.speech_enabled AND whisper model exists)
+    if config.speech_enabled && whisper_model_available {
         let stt_backend = speech::SttBackend::Whisper;
-
-        // Use the downloaded whisper_model_path if available, otherwise fall back to config.
         let resolved_whisper_path = whisper_model_path
             .as_ref()
             .map(|p| p.display().to_string())
@@ -317,7 +321,16 @@ pub async fn boot() -> Result<Runtime, BootError> {
         .with_confidence_threshold(config.stt_confidence_threshold);
         spawn_actor(&bus, &mut registry, stt_actor);
         expected_actors.push("stt");
+        tracing::info!("boot: STT actor spawned (whisper model available)");
+    } else if config.speech_enabled {
+        eprintln!(
+            "WARN: whisper model missing at {}, STT disabled. Use download manager to acquire whisper model.",
+            speech_model_dir.display()
+        );
+    }
 
+    // Step 11.2: TTS Actor (spawn if config.speech_enabled AND piper model exists)
+    if config.speech_enabled && piper_model_available {
         let tts_actor = speech::TtsActor::new(speech::TtsBackend::Piper)
             .with_voice(config.tts_voice.clone())
             .with_rate(config.tts_rate)
@@ -325,17 +338,31 @@ pub async fn boot() -> Result<Runtime, BootError> {
             .with_queue_depth(config.tts_queue_depth);
         spawn_actor(&bus, &mut registry, tts_actor);
         expected_actors.push("tts");
+        tracing::info!("boot: TTS actor spawned (piper model available)");
+    } else if config.speech_enabled {
+        eprintln!(
+            "WARN: piper model missing at {}, TTS disabled. Use download manager to acquire piper model.",
+            speech_model_dir.display()
+        );
+    }
 
-        if config.wakeword_enabled {
-            let wakeword_config = speech::wakeword::WakewordConfig {
-                sensitivity: config.wakeword_sensitivity,
-                model_path: None,
-                model_dir: Some(speech_model_dir),
-                debounce_secs: 3.0,
-            };
-            let wakeword_actor = speech::WakewordActor::new(wakeword_config);
-            spawn_actor(&bus, &mut registry, wakeword_actor);
-        }
+    // Step 11.3: Wakeword Actor (spawn if config.wakeword_enabled AND wakeword model exists)
+    if config.wakeword_enabled && wakeword_model_available {
+        let wakeword_config = speech::wakeword::WakewordConfig {
+            sensitivity: config.wakeword_sensitivity,
+            model_path: None,
+            model_dir: Some(speech_model_dir),
+            debounce_secs: 3.0,
+        };
+        let wakeword_actor = speech::WakewordActor::new(wakeword_config);
+        spawn_actor(&bus, &mut registry, wakeword_actor);
+        expected_actors.push("wakeword");
+        tracing::info!("boot: Wakeword actor spawned (wakeword model available)");
+    } else if config.wakeword_enabled {
+        eprintln!(
+            "WARN: wakeword model missing at {}, wakeword disabled. Use download manager to acquire wakeword model.",
+            speech_model_dir.display()
+        );
     }
 
     // Step 12: Initialize system tray (non-fatal).
