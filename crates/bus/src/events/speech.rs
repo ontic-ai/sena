@@ -126,6 +126,40 @@ pub enum SpeechEvent {
         /// Session ID that was stopped.
         session_id: u64,
     },
+
+    /// User or system requests STT backend change.
+    SttBackendSwitchRequested {
+        /// Target backend: "whisper", "sherpa", "parakeet"
+        backend: String,
+    },
+
+    /// STT actor confirms backend switch completed.
+    SttBackendSwitchCompleted {
+        /// Backend that is now active.
+        backend: String,
+    },
+
+    /// STT actor reports backend switch failed.
+    SttBackendSwitchFailed {
+        /// Backend that was requested.
+        backend: String,
+        /// Failure reason.
+        reason: String,
+    },
+
+    /// STT actor emits telemetry after each transcription.
+    SttTelemetryUpdate {
+        /// Backend used for this transcription.
+        backend: String,
+        /// VRAM usage in MB (None if not measurable).
+        vram_mb: Option<f64>,
+        /// Time from audio end to text ready in milliseconds.
+        latency_ms: f64,
+        /// Average word confidence [0.0, 1.0].
+        avg_confidence: f64,
+        /// Request ID for correlation.
+        request_id: u64,
+    },
 }
 
 #[cfg(test)]
@@ -220,6 +254,75 @@ mod tests {
             assert_eq!(recoverable, true);
         } else {
             panic!("Expected SpeechOnboardingFailed variant");
+        }
+    }
+
+    #[test]
+    fn stt_backend_switch_requested_constructs_and_clones() {
+        let event = SpeechEvent::SttBackendSwitchRequested {
+            backend: "sherpa".to_string(),
+        };
+        let cloned = event.clone();
+        if let SpeechEvent::SttBackendSwitchRequested { backend } = cloned {
+            assert_eq!(backend, "sherpa");
+        } else {
+            panic!("Expected SttBackendSwitchRequested variant");
+        }
+    }
+
+    #[test]
+    fn stt_backend_switch_completed_constructs_and_clones() {
+        let event = SpeechEvent::SttBackendSwitchCompleted {
+            backend: "whisper".to_string(),
+        };
+        let cloned = event.clone();
+        if let SpeechEvent::SttBackendSwitchCompleted { backend } = cloned {
+            assert_eq!(backend, "whisper");
+        } else {
+            panic!("Expected SttBackendSwitchCompleted variant");
+        }
+    }
+
+    #[test]
+    fn stt_backend_switch_failed_constructs_and_clones() {
+        let event = SpeechEvent::SttBackendSwitchFailed {
+            backend: "parakeet".to_string(),
+            reason: "model not found".to_string(),
+        };
+        let cloned = event.clone();
+        if let SpeechEvent::SttBackendSwitchFailed { backend, reason } = cloned {
+            assert_eq!(backend, "parakeet");
+            assert_eq!(reason, "model not found");
+        } else {
+            panic!("Expected SttBackendSwitchFailed variant");
+        }
+    }
+
+    #[test]
+    fn stt_telemetry_update_constructs_and_clones() {
+        let event = SpeechEvent::SttTelemetryUpdate {
+            backend: "whisper".to_string(),
+            vram_mb: Some(256.0),
+            latency_ms: 120.5,
+            avg_confidence: 0.92,
+            request_id: 42,
+        };
+        let cloned = event.clone();
+        if let SpeechEvent::SttTelemetryUpdate {
+            backend,
+            vram_mb,
+            latency_ms,
+            avg_confidence,
+            request_id,
+        } = cloned
+        {
+            assert_eq!(backend, "whisper");
+            assert_eq!(vram_mb, Some(256.0));
+            assert_eq!(latency_ms, 120.5);
+            assert_eq!(avg_confidence, 0.92);
+            assert_eq!(request_id, 42);
+        } else {
+            panic!("Expected SttTelemetryUpdate variant");
         }
     }
 
