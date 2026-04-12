@@ -55,6 +55,12 @@ impl SttWorker {
     pub async fn spawn(model_path: &str) -> Result<Self, SpeechError> {
         let worker_path = find_stt_worker()?;
 
+        tracing::info!(
+            "worker: spawning stt-worker: {:?} with model: {}",
+            worker_path,
+            model_path
+        );
+
         let mut child = Command::new(&worker_path)
             .arg(model_path)
             .stdin(Stdio::piped())
@@ -62,6 +68,11 @@ impl SttWorker {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| SpeechError::WorkerSpawnFailed(e.to_string()))?;
+
+        tracing::info!(
+            "worker: stt-worker process spawned (pid: {})",
+            child.id().unwrap_or(0)
+        );
 
         let stdin = child.stdin.take().ok_or_else(|| {
             SpeechError::WorkerPipeError("failed to capture worker stdin".to_string())
@@ -85,6 +96,12 @@ impl SttWorker {
     /// # Arguments
     /// - `samples`: PCM f32 samples (16kHz mono, range [-1.0, 1.0])
     pub async fn write_chunk(&mut self, samples: &[f32]) -> Result<(), SpeechError> {
+        tracing::debug!(
+            "worker: writing {} samples ({} bytes) to stdin",
+            samples.len(),
+            samples.len() * 4
+        );
+
         // Write length prefix (u32 sample count, little-endian)
         let len_bytes = (samples.len() as u32).to_le_bytes();
         self.stdin
@@ -106,6 +123,7 @@ impl SttWorker {
             .await
             .map_err(|e| SpeechError::WorkerPipeError(format!("stdin flush failed: {}", e)))?;
 
+        tracing::debug!("worker: chunk written and flushed");
         Ok(())
     }
 
@@ -122,9 +140,11 @@ impl SttWorker {
             .map_err(|e| SpeechError::WorkerPipeError(format!("stdout read failed: {}", e)))?;
 
         if bytes_read == 0 {
-            // EOF — worker stdout closed
+            tracing::warn!("worker: stdout EOF - worker exited");
             return Ok(None);
         }
+
+        tracing::debug!("worker: read line from stdout: {}", line.trim());
 
         let event: WorkerEvent = serde_json::from_str(line.trim()).map_err(|e| {
             SpeechError::WorkerPipeError(format!(
@@ -133,6 +153,8 @@ impl SttWorker {
                 line.trim()
             ))
         })?;
+
+        tracing::debug!("worker: parsed event: {:?}", event);
 
         Ok(Some(event))
     }

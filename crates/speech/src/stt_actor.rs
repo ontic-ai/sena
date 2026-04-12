@@ -136,7 +136,10 @@ impl SttActor {
 
     async fn initialize_backend(&mut self) -> Result<(), SpeechError> {
         let handle = match self.backend {
-            SttBackend::Mock => SttBackendHandle::Mock,
+            SttBackend::Mock => {
+                tracing::info!("stt: using mock backend (no worker process)");
+                SttBackendHandle::Mock
+            }
             SttBackend::Whisper => {
                 // Resolve model path: use whisper_model_path if set, else model_dir/ggml-base.en.bin
                 let model_path = if let Some(ref path) = self.whisper_model_path {
@@ -149,8 +152,12 @@ impl SttActor {
                     ));
                 };
 
+                tracing::info!("stt: spawning stt-worker with model: {}", model_path);
+
                 // Spawn stt-worker child process
                 let mut worker = SttWorker::spawn(&model_path).await?;
+
+                tracing::info!("stt: stt-worker spawned successfully");
 
                 // Wait for "listening" event to confirm worker is ready
                 match worker.read_event().await? {
@@ -231,8 +238,15 @@ impl SttActor {
                 }
             }
             Some(SttBackendHandle::Whisper(worker)) => {
+                tracing::debug!(
+                    "stt: sending {} samples to stt-worker",
+                    buffer.samples.len()
+                );
+
                 // Write audio chunk to worker stdin
                 worker.write_chunk(&buffer.samples).await?;
+
+                tracing::debug!("stt: waiting for worker events...");
 
                 // Read worker events until we get a Completed event
                 let full_text;
@@ -244,6 +258,8 @@ impl SttActor {
                         Some(WorkerEvent::Word {
                             text, confidence, ..
                         }) => {
+                            tracing::debug!("stt: worker emitted word: '{}'", text);
+
                             // Accumulate words (optional — we wait for Completed for full text)
                             words.push(bus::events::speech::TranscribedWord {
                                 text: text.clone(),
@@ -257,11 +273,18 @@ impl SttActor {
                             avg_confidence: conf,
                             ..
                         }) => {
+                            tracing::info!(
+                                "stt: worker completed - text='{}', confidence={:.2}",
+                                text,
+                                conf
+                            );
+
                             full_text = text;
                             avg_confidence = conf;
                             break;
                         }
                         Some(WorkerEvent::Error { reason }) => {
+                            tracing::error!("stt: worker error: {}", reason);
                             return Err(SpeechError::TranscriptionFailed(reason));
                         }
                         Some(WorkerEvent::Stopped) => {
@@ -354,12 +377,33 @@ impl SttActor {
         session_id: u64,
         bus: &Arc<EventBus>,
     ) {
+        tracing::debug!(
+            "listen: received audio buffer ({} samples, {} Hz, {} ch, session={})",
+            buffer.samples.len(),
+            buffer.sample_rate,
+            buffer.channels,
+            session_id
+        );
+
         if let Some(ready_buffer) =
             self.listen_mode_vad
                 .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
         {
+            tracing::info!(
+                "listen: VAD triggered - transcribing {} samples (session={})",
+                ready_buffer.samples.len(),
+                session_id
+            );
+
             match tokio::time::timeout(TRANSCRIPTION_TIMEOUT, self.transcribe(ready_buffer)).await {
                 Ok(Ok(result)) => {
+                    tracing::info!(
+                        "listen: transcription complete - text='{}', confidence={:.2}, session={}",
+                        result.text,
+                        result.confidence,
+                        session_id
+                    );
+
                     if !result.text.trim().is_empty() {
                         let _ = bus
                             .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
@@ -369,6 +413,8 @@ impl SttActor {
                                 session_id,
                             }))
                             .await;
+                    } else {
+                        tracing::debug!("listen: transcription was empty, not emitting event");
                     }
                 }
                 Ok(Err(e)) => tracing::warn!("listen: transcription error: {}", e),

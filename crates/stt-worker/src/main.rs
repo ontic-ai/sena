@@ -127,13 +127,30 @@ impl SttWorker {
     fn process_chunk(&mut self, samples: Vec<f32>) -> Result<(), String> {
         let request_id = self.next_request_id();
 
+        eprintln!(
+            "stt-worker: starting transcription of {} samples (request_id={})",
+            samples.len(),
+            request_id
+        );
+
         // Run transcription
         let segments = self.transcribe(&samples)?;
+
+        eprintln!(
+            "stt-worker: transcription complete - {} segments",
+            segments.len()
+        );
 
         // Emit word events
         let mut sequence = 0u32;
         for seg in &segments {
             let words: Vec<&str> = seg.text.split_whitespace().collect();
+            eprintln!(
+                "stt-worker: segment '{}' confidence={:.2}",
+                seg.text.trim(),
+                seg.confidence
+            );
+
             for word in words {
                 let event = WorkerEvent::Word {
                     text: word.to_string(),
@@ -159,6 +176,11 @@ impl SttWorker {
         } else {
             segments.iter().map(|s| s.confidence).sum::<f32>() / segments.len() as f32
         };
+
+        eprintln!(
+            "stt-worker: final text='{}', avg_confidence={:.2}",
+            full_text, avg_confidence
+        );
 
         let event = WorkerEvent::Completed {
             text: full_text,
@@ -207,8 +229,14 @@ fn read_chunk() -> Result<Option<Vec<f32>>, String> {
 
     let sample_count = u32::from_le_bytes(len_buf);
 
+    eprintln!(
+        "stt-worker: read chunk header - {} samples expected",
+        sample_count
+    );
+
     // Zero-length chunk signals graceful shutdown
     if sample_count == 0 {
+        eprintln!("stt-worker: received shutdown signal (zero-length chunk)");
         return Ok(None);
     }
 
@@ -225,15 +253,20 @@ fn read_chunk() -> Result<Option<Vec<f32>>, String> {
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
+    eprintln!("stt-worker: successfully read {} samples", samples.len());
+
     Ok(Some(samples))
 }
 
 fn main() {
+    eprintln!("stt-worker: starting up");
+
     // Read model path from first command line argument or env var
     let model_path = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("WHISPER_MODEL_PATH").ok())
         .unwrap_or_else(|| {
+            eprintln!("stt-worker: ERROR - no model path provided");
             emit_event(&WorkerEvent::Error {
                 reason: "no model path provided (arg or WHISPER_MODEL_PATH env)".to_string(),
             })
@@ -241,10 +274,16 @@ fn main() {
             std::process::exit(1);
         });
 
+    eprintln!("stt-worker: loading whisper model: {}", model_path);
+
     // Load whisper model
     let mut worker = match SttWorker::load(&model_path) {
-        Ok(w) => w,
+        Ok(w) => {
+            eprintln!("stt-worker: model loaded successfully");
+            w
+        }
         Err(e) => {
+            eprintln!("stt-worker: ERROR - model load failed: {}", e);
             emit_event(&WorkerEvent::Error {
                 reason: format!("model load failed: {}", e),
             })
@@ -259,11 +298,14 @@ fn main() {
         std::process::exit(3);
     }
 
+    eprintln!("stt-worker: ready - waiting for audio chunks on stdin");
+
     // Main loop: read chunks, transcribe, write events
     loop {
         match read_chunk() {
             Ok(Some(samples)) => {
                 if let Err(e) = worker.process_chunk(samples) {
+                    eprintln!("stt-worker: ERROR in process_chunk: {}", e);
                     emit_event(&WorkerEvent::Error {
                         reason: format!("transcription error: {}", e),
                     })
@@ -272,10 +314,12 @@ fn main() {
             }
             Ok(None) => {
                 // Graceful shutdown signal received
+                eprintln!("stt-worker: shutting down gracefully");
                 emit_event(&WorkerEvent::Stopped).ok();
                 std::process::exit(0);
             }
             Err(e) => {
+                eprintln!("stt-worker: ERROR reading chunk: {}", e);
                 emit_event(&WorkerEvent::Error {
                     reason: format!("chunk read error: {}", e),
                 })
