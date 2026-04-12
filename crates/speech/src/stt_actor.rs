@@ -182,22 +182,37 @@ impl SttActor {
             .to_string_lossy()
             .into_owned();
 
-        match tokio::task::spawn_blocking(move || {
-            crate::sherpa_stt::SherpaZipformerStt::load(&encoder, &decoder, &joiner, &tokens)
-        })
-        .await
-        {
-            Ok(Ok(model)) => {
-                let (tx, rx) = std::sync::mpsc::channel::<SherpaCmd>();
-                std::thread::spawn(move || sherpa_worker_loop(model, rx));
-                Some(tx)
+        // Create channels for worker thread communication
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SherpaCmd>();
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), SpeechError>>();
+
+        // Spawn worker thread that creates and owns the model
+        std::thread::spawn(move || {
+            // Load model in this thread (sherpa-onnx types are not Send)
+            match crate::sherpa_stt::SherpaZipformerStt::load(&encoder, &decoder, &joiner, &tokens)
+            {
+                Ok(model) => {
+                    // Signal successful initialization
+                    let _ = init_tx.send(Ok(()));
+                    // Run worker loop
+                    sherpa_worker_loop(model, cmd_rx);
+                }
+                Err(e) => {
+                    // Signal initialization failure
+                    let _ = init_tx.send(Err(e));
+                }
             }
+        });
+
+        // Wait for initialization to complete
+        match init_rx.recv() {
+            Ok(Ok(())) => Some(cmd_tx),
             Ok(Err(e)) => {
                 tracing::warn!("listen: sherpa init failed, falling back to whisper: {}", e);
                 None
             }
             Err(e) => {
-                tracing::warn!("listen: sherpa spawn_blocking panicked: {}", e);
+                tracing::warn!("listen: sherpa worker init channel failed: {}", e);
                 None
             }
         }
@@ -213,7 +228,7 @@ impl SttActor {
         let handle = match self.backend {
             SttBackend::Mock => SttBackendHandle::Mock,
             SttBackend::Whisper => self.initialize_candle_backend().await?,
-            SttBackend::Sherpa => SttBackendHandle::Sherpa,
+            SttBackend::Sherpa => self.initialize_sherpa_backend().await?,
             SttBackend::Parakeet => self.initialize_parakeet_backend().await?,
         };
 
@@ -273,6 +288,76 @@ impl SttActor {
         Ok(SttBackendHandle::Parakeet { tx: cmd_tx })
     }
 
+    async fn initialize_sherpa_backend(&self) -> Result<SttBackendHandle, SpeechError> {
+        let model_dir = self
+            .model_dir
+            .clone()
+            .ok_or_else(|| SpeechError::SttInitFailed("model_dir not configured".to_string()))?;
+
+        let sherpa_model_dir = model_dir.join("sherpa");
+
+        tracing::info!(
+            "initializing Sherpa backend from {}",
+            sherpa_model_dir.display()
+        );
+
+        // Build model file paths
+        let encoder = sherpa_model_dir
+            .join("sherpa_encoder.onnx")
+            .to_str()
+            .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for encoder".to_string()))?
+            .to_string();
+
+        let decoder = sherpa_model_dir
+            .join("sherpa_decoder.onnx")
+            .to_str()
+            .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for decoder".to_string()))?
+            .to_string();
+
+        let joiner = sherpa_model_dir
+            .join("sherpa_joiner.onnx")
+            .to_str()
+            .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for joiner".to_string()))?
+            .to_string();
+
+        let tokens = sherpa_model_dir
+            .join("sherpa_tokens.txt")
+            .to_str()
+            .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for tokens".to_string()))?
+            .to_string();
+
+        // Create channel for worker thread communication
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SherpaCmd>();
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), SpeechError>>();
+
+        // Spawn worker thread that creates and owns the model
+        std::thread::spawn(move || {
+            // Load model in this thread (sherpa-onnx types are not Send)
+            match crate::sherpa_stt::SherpaZipformerStt::load(&encoder, &decoder, &joiner, &tokens)
+            {
+                Ok(model) => {
+                    // Signal successful initialization
+                    let _ = init_tx.send(Ok(()));
+                    // Run worker loop
+                    sherpa_worker_loop(model, cmd_rx);
+                }
+                Err(e) => {
+                    // Signal initialization failure
+                    let _ = init_tx.send(Err(e));
+                }
+            }
+        });
+
+        // Wait for initialization to complete
+        init_rx.recv().map_err(|e| {
+            SpeechError::SttInitFailed(format!("sherpa worker init channel failed: {}", e))
+        })??;
+
+        tracing::info!("Sherpa backend initialized successfully");
+
+        Ok(SttBackendHandle::Sherpa { tx: cmd_tx })
+    }
+
     fn maybe_start_audio_capture(&mut self) -> Result<(), SpeechError> {
         if !self.voice_always_listening {
             return Ok(());
@@ -327,9 +412,35 @@ impl SttActor {
                     SpeechError::TranscriptionFailed(format!("candle worker reply failed: {}", e))
                 })?
             }
-            Some(SttBackendHandle::Sherpa) => Err(SpeechError::TranscriptionFailed(
-                "Sherpa backend not yet implemented".to_string(),
-            )),
+            Some(SttBackendHandle::Sherpa { tx }) => {
+                // Calculate confidence from audio energy before moving samples
+                let rms = crate::silence_detector::calculate_rms(&buffer.samples);
+
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tx.send(SherpaCmd::Decode {
+                    samples: buffer.samples,
+                    reply: reply_tx,
+                })
+                .map_err(|e| {
+                    SpeechError::TranscriptionFailed(format!(
+                        "sherpa worker channel send failed: {}",
+                        e
+                    ))
+                })?;
+
+                let text = reply_rx.await.map_err(|e| {
+                    SpeechError::TranscriptionFailed(format!("sherpa worker reply failed: {}", e))
+                })?;
+
+                // Calculate confidence from audio energy
+                let confidence = if text.trim().is_empty() {
+                    0.0
+                } else {
+                    (rms * 10.0).clamp(0.55, 0.99)
+                };
+
+                Ok(TranscriptionResult { text, confidence })
+            }
             Some(SttBackendHandle::Parakeet { tx }) => {
                 // Convert f32 samples to i16 for parakeet
                 let samples_i16: Vec<i16> = buffer
@@ -837,6 +948,9 @@ impl Actor for SttActor {
             Some(SttBackendHandle::CandleWhisper { tx }) => {
                 let _ = tx.send(WorkerCommand::Shutdown);
             }
+            Some(SttBackendHandle::Sherpa { tx }) => {
+                let _ = tx.send(SherpaCmd::Shutdown);
+            }
             Some(SttBackendHandle::Parakeet { tx }) => {
                 let _ = tx.send(ParakeetCommand::Shutdown);
             }
@@ -852,8 +966,10 @@ enum SttBackendHandle {
     CandleWhisper {
         tx: std::sync::mpsc::Sender<WorkerCommand>,
     },
-    /// Sherpa backend placeholder (implementation in Unit 3).
-    Sherpa,
+    /// Sherpa backend — sherpa-onnx Zipformer ONNX Transducer streaming STT.
+    Sherpa {
+        tx: std::sync::mpsc::Sender<SherpaCmd>,
+    },
     /// Parakeet backend — NVIDIA Parakeet-EOU ONNX streaming STT.
     Parakeet {
         tx: std::sync::mpsc::Sender<ParakeetCommand>,

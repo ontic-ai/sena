@@ -25,6 +25,7 @@ pub mod wakeword;
 pub use audio_input::list_input_devices;
 pub use error::SpeechError;
 pub use parakeet_stt::ParakeetStt;
+pub use sherpa_stt::SherpaZipformerStt;
 pub use stt_actor::SttActor;
 pub use tts_actor::TtsActor;
 pub use wakeword::WakewordActor;
