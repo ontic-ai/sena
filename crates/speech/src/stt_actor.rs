@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use bus::{Actor, ActorError, Event, EventBus, SpeechEvent, SystemEvent};
 
 use crate::audio_input::{AudioInputConfig, AudioInputStream};
-use crate::stt::WhisperPipeline;
+use crate::worker::{SttWorker, WorkerEvent};
 use crate::{AudioBuffer, SpeechError, SttBackend};
 
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -149,28 +149,38 @@ impl SttActor {
                     ));
                 };
 
-                let model_path_clone = model_path.clone();
+                // Spawn stt-worker child process
+                let mut worker = SttWorker::spawn(&model_path).await?;
 
-                // Load model in spawn_blocking (blocking operation)
-                let pipeline =
-                    tokio::task::spawn_blocking(move || WhisperPipeline::load(&model_path_clone))
-                        .await
-                        .map_err(|e| {
-                            SpeechError::SttInitFailed(format!("task join failed: {}", e))
-                        })?
-                        .map_err(SpeechError::SttInitFailed)?;
+                // Wait for "listening" event to confirm worker is ready
+                match worker.read_event().await? {
+                    Some(WorkerEvent::Listening) => {
+                        tracing::info!("stt: worker ready (model: {})", model_path);
+                    }
+                    Some(WorkerEvent::Error { reason }) => {
+                        return Err(SpeechError::SttInitFailed(format!(
+                            "worker failed to initialize: {}",
+                            reason
+                        )));
+                    }
+                    _ => {
+                        return Err(SpeechError::SttInitFailed(
+                            "unexpected worker response during init".to_string(),
+                        ));
+                    }
+                }
 
                 // Emit SttModelLoaded event
                 if let Some(ref bus) = self.bus {
                     let _ = bus
                         .broadcast(Event::Speech(SpeechEvent::SttModelLoaded {
                             model_name: model_path.clone(),
-                            backend: "whisper-rs".to_string(),
+                            backend: "stt-worker".to_string(),
                         }))
                         .await;
                 }
 
-                SttBackendHandle::Whisper(Arc::new(pipeline))
+                SttBackendHandle::Whisper(Box::new(worker))
             }
         };
 
@@ -199,8 +209,11 @@ impl SttActor {
         Ok(())
     }
 
-    async fn transcribe(&self, buffer: AudioBuffer) -> Result<TranscriptionResult, SpeechError> {
-        match self.backend_handle.as_ref() {
+    async fn transcribe(
+        &mut self,
+        buffer: AudioBuffer,
+    ) -> Result<TranscriptionResult, SpeechError> {
+        match self.backend_handle.as_mut() {
             Some(SttBackendHandle::Mock) => {
                 let rms = crate::silence_detector::calculate_rms(&buffer.samples);
                 if rms < 0.001 {
@@ -217,59 +230,56 @@ impl SttActor {
                     })
                 }
             }
-            Some(SttBackendHandle::Whisper(pipeline)) => {
-                let pipeline = Arc::clone(pipeline);
-                let samples = buffer.samples.clone();
+            Some(SttBackendHandle::Whisper(worker)) => {
+                // Write audio chunk to worker stdin
+                worker.write_chunk(&buffer.samples).await?;
 
-                // Run transcription in spawn_blocking (blocking operation)
-                let segments = tokio::task::spawn_blocking(move || pipeline.transcribe(&samples))
-                    .await
-                    .map_err(|e| {
-                        SpeechError::TranscriptionFailed(format!("task join failed: {}", e))
-                    })?
-                    .map_err(SpeechError::TranscriptionFailed)?;
-
-                // Combine all segment texts
-                let text: String = segments
-                    .iter()
-                    .map(|seg| seg.text.trim())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                // Calculate average confidence across segments
-                let avg_confidence = if segments.is_empty() {
-                    0.0
-                } else {
-                    segments.iter().map(|s| s.confidence).sum::<f32>() / segments.len() as f32
-                };
-
-                // Build per-word data from segments with linearly interpolated timestamps
+                // Read worker events until we get a Completed event
+                let full_text;
+                let avg_confidence;
                 let mut words = Vec::new();
-                for seg in &segments {
-                    let seg_words: Vec<&str> = seg.text.split_whitespace().collect();
-                    let word_count = seg_words.len();
-                    if word_count == 0 {
-                        continue;
-                    }
-                    let duration = seg.end_ms.saturating_sub(seg.start_ms);
-                    let word_duration = if word_count > 0 {
-                        duration / word_count as u32
-                    } else {
-                        duration
-                    };
-                    for (i, w) in seg_words.iter().enumerate() {
-                        words.push(bus::events::speech::TranscribedWord {
-                            text: w.to_string(),
-                            confidence: seg.confidence,
-                            start_ms: seg.start_ms + (i as u32) * word_duration,
-                            end_ms: seg.start_ms + ((i as u32) + 1) * word_duration,
-                        });
+
+                loop {
+                    match worker.read_event().await? {
+                        Some(WorkerEvent::Word {
+                            text, confidence, ..
+                        }) => {
+                            // Accumulate words (optional — we wait for Completed for full text)
+                            words.push(bus::events::speech::TranscribedWord {
+                                text: text.clone(),
+                                confidence,
+                                start_ms: 0, // Worker doesn't provide timestamps yet
+                                end_ms: 0,
+                            });
+                        }
+                        Some(WorkerEvent::Completed {
+                            text,
+                            avg_confidence: conf,
+                            ..
+                        }) => {
+                            full_text = text;
+                            avg_confidence = conf;
+                            break;
+                        }
+                        Some(WorkerEvent::Error { reason }) => {
+                            return Err(SpeechError::TranscriptionFailed(reason));
+                        }
+                        Some(WorkerEvent::Stopped) => {
+                            return Err(SpeechError::WorkerCrashed(0));
+                        }
+                        Some(WorkerEvent::Listening) => {
+                            // Unexpected — ignore
+                        }
+                        None => {
+                            return Err(SpeechError::WorkerPipeError(
+                                "worker stdout closed unexpectedly".to_string(),
+                            ));
+                        }
                     }
                 }
 
                 Ok(TranscriptionResult {
-                    text,
+                    text: full_text,
                     confidence: avg_confidence,
                     words,
                 })
@@ -585,6 +595,17 @@ impl Actor for SttActor {
     }
 
     async fn stop(&mut self) -> Result<(), ActorError> {
+        // Shutdown worker gracefully
+        if let Some(SttBackendHandle::Whisper(worker)) = self.backend_handle.as_mut() {
+            if let Err(e) = worker.shutdown().await {
+                tracing::warn!("stt: worker shutdown signal failed: {}", e);
+            }
+            if let Err(e) = tokio::time::timeout(Duration::from_secs(5), worker.wait()).await {
+                tracing::warn!("stt: worker did not exit within 5s: {}", e);
+                let _ = worker.kill().await;
+            }
+        }
+
         self.audio_rx = None;
         self.audio_stream = None;
         self.listen_audio_rx = None;
@@ -598,7 +619,7 @@ impl Actor for SttActor {
 
 enum SttBackendHandle {
     Mock,
-    Whisper(Arc<WhisperPipeline>),
+    Whisper(Box<SttWorker>),
 }
 
 struct TranscriptionResult {

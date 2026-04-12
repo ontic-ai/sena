@@ -1,7 +1,11 @@
 //! Whisper-based speech-to-text pipeline.
 //!
-//! This module provides the core transcription engine using whisper-rs,
-//! which wraps whisper.cpp for local STT processing.
+//! **NOTE: This module is deprecated and kept only for reference.**
+//! whisper-rs now lives exclusively in the stt-worker binary to avoid GGML symbol conflicts.
+//!
+//! This module is no longer compiled or used by the speech crate.
+
+#![allow(dead_code, unused_imports)]
 
 use std::sync::Arc;
 

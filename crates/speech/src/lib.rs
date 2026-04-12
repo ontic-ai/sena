@@ -19,6 +19,7 @@ pub mod stt;
 pub mod stt_actor;
 pub mod tts_actor;
 pub mod wakeword;
+pub mod worker;
 
 pub use audio_input::list_input_devices;
 pub use error::SpeechError;

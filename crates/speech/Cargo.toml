@@ -8,19 +8,18 @@ repository.workspace = true
 
 [dependencies]
 bus = { path = "../bus" }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 # Audio I/O (cross-platform)
 cpal = "0.15"
 
 # TTS backend (platform-native via unified interface)
 tts = "0.26"
-
-# STT backend (whisper.cpp bindings)
-whisper-rs = "0.16.0"
 
 [dev-dependencies]
 tempfile = "3"
