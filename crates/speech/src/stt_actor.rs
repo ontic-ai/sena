@@ -213,6 +213,8 @@ impl SttActor {
         let handle = match self.backend {
             SttBackend::Mock => SttBackendHandle::Mock,
             SttBackend::Whisper => self.initialize_candle_backend().await?,
+            SttBackend::Sherpa => SttBackendHandle::Sherpa,
+            SttBackend::Parakeet => SttBackendHandle::Parakeet,
         };
 
         self.backend_handle = Some(handle);
@@ -295,6 +297,12 @@ impl SttActor {
                     SpeechError::TranscriptionFailed(format!("candle worker reply failed: {}", e))
                 })?
             }
+            Some(SttBackendHandle::Sherpa) => Err(SpeechError::TranscriptionFailed(
+                "Sherpa backend not yet implemented".to_string(),
+            )),
+            Some(SttBackendHandle::Parakeet) => Err(SpeechError::TranscriptionFailed(
+                "Parakeet backend not yet implemented".to_string(),
+            )),
             None => Err(SpeechError::TranscriptionFailed(
                 "STT backend not initialized".to_string(),
             )),
@@ -787,6 +795,10 @@ enum SttBackendHandle {
     CandleWhisper {
         tx: std::sync::mpsc::Sender<WorkerCommand>,
     },
+    /// Sherpa backend placeholder (implementation in Unit 3).
+    Sherpa,
+    /// Parakeet backend placeholder (implementation in Unit 4).
+    Parakeet,
 }
 
 enum WorkerCommand {

@@ -43,6 +43,10 @@ pub struct AudioBuffer {
 pub enum SttBackend {
     /// Whisper via candle (STT).
     Whisper,
+    /// Sherpa-onnx Zipformer streaming STT (ONNX, <600MB VRAM).
+    Sherpa,
+    /// NVIDIA Parakeet streaming STT (.nemo, 1.2-2GB VRAM recommended).
+    Parakeet,
     /// Mock backend for testing.
     Mock,
 }
