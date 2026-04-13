@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use speech::SttBackend;
 
 /// Configuration for Sena runtime and subsystems.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -241,6 +242,12 @@ pub struct SenaConfig {
     /// and auto-downloads on first boot if the file is not present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_model_path: Option<PathBuf>,
+
+    /// STT backend selection.
+    /// Options: "whisper", "sherpa", "parakeet", "mock"
+    /// Default: "whisper"
+    #[serde(default = "default_stt_backend")]
+    pub stt_backend: SttBackend,
 }
 
 /// Configuration for the streaming inference pipeline.
@@ -310,6 +317,7 @@ impl Default for SenaConfig {
             vision_frame_max_age_secs: default_vision_frame_max_age_secs(),
             file_watch_exclude_patterns: default_file_watch_exclude_patterns(),
             embed_model_path: None,
+            stt_backend: default_stt_backend(),
         }
     }
 }
@@ -433,6 +441,9 @@ fn default_file_watch_exclude_patterns() -> Vec<String> {
     {
         vec![".git".to_string(), "node_modules".to_string()]
     }
+}
+fn default_stt_backend() -> SttBackend {
+    SttBackend::Whisper
 }
 
 /// Configuration-related errors.
@@ -610,6 +621,17 @@ pub async fn apply_config_set(key: &str, value: &str) -> Result<(), String> {
             } else {
                 Some(PathBuf::from(value))
             };
+            Ok(())
+        }
+        "stt_backend" => {
+            let backend = match value.to_lowercase().as_str() {
+                "whisper" => SttBackend::Whisper,
+                "sherpa" => SttBackend::Sherpa,
+                "parakeet" => SttBackend::Parakeet,
+                "mock" => SttBackend::Mock,
+                _ => return Err("expected one of: whisper, sherpa, parakeet, mock".to_string()),
+            };
+            config.stt_backend = backend;
             Ok(())
         }
         _ => Err(format!(

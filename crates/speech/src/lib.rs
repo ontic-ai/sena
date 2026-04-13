@@ -32,6 +32,8 @@ pub use telemetry::log_stt_telemetry;
 pub use tts_actor::TtsActor;
 pub use wakeword::WakewordActor;
 
+use serde::{Deserialize, Serialize};
+
 /// Audio buffer for PCM samples.
 #[derive(Debug, Clone)]
 pub struct AudioBuffer {
@@ -44,7 +46,8 @@ pub struct AudioBuffer {
 }
 
 /// STT backend selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SttBackend {
     /// Whisper via candle (STT).
     Whisper,

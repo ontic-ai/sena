@@ -12,6 +12,7 @@ tokio = { workspace = true, features = ["fs"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
 
 # Audio I/O (cross-platform)
 cpal = "0.15"
