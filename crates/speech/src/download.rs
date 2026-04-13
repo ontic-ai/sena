@@ -29,6 +29,8 @@ pub enum ModelType {
     OpenWakeWord,
     /// Sherpa-onnx Zipformer model for STT.
     SherpaZipformerStt,
+    /// NVIDIA Parakeet model for STT.
+    ParakeetStt,
 }
 
 /// Speech model information.
@@ -133,7 +135,7 @@ impl ModelManifest {
     pub fn sherpa_zipformer_encoder() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-encoder-int8".to_string(),
-            filename: "sherpa_encoder.onnx".to_string(),
+            filename: "encoder-epoch-99-avg-1.int8.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/encoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 188_000_000,
@@ -145,7 +147,7 @@ impl ModelManifest {
     pub fn sherpa_zipformer_decoder() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-decoder-int8".to_string(),
-            filename: "sherpa_decoder.onnx".to_string(),
+            filename: "decoder-epoch-99-avg-1.int8.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/decoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 539_000,
@@ -157,7 +159,7 @@ impl ModelManifest {
     pub fn sherpa_zipformer_joiner() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-joiner-int8".to_string(),
-            filename: "sherpa_joiner.onnx".to_string(),
+            filename: "joiner-epoch-99-avg-1.int8.onnx".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/joiner-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 259_000,
@@ -169,11 +171,47 @@ impl ModelManifest {
     pub fn sherpa_zipformer_tokens() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-tokens".to_string(),
-            filename: "sherpa_tokens.txt".to_string(),
+            filename: "tokens.txt".to_string(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/tokens.txt".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 5_050,
             model_type: ModelType::SherpaZipformerStt,
+        }
+    }
+
+    /// Returns the Parakeet encoder ONNX file (~243MB).
+    pub fn parakeet_eou_encoder() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-eou-encoder".to_string(),
+            filename: "encoder.onnx".to_string(),
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/realtime_eou_120m-v1-onnx/encoder.onnx".to_string(),
+            sha256: "d472887cc38a784a5bfc21c2dbe247639edc3b3f9992388d8ceceaec07256b5b".to_string(),
+            size_bytes: 243_000_000,
+            model_type: ModelType::ParakeetStt,
+        }
+    }
+
+    /// Returns the Parakeet decoder_joint ONNX file (~235MB).
+    pub fn parakeet_eou_decoder_joint() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-eou-decoder-joint".to_string(),
+            filename: "decoder_joint.onnx".to_string(),
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/realtime_eou_120m-v1-onnx/decoder_joint.onnx".to_string(),
+            sha256: "9d2553ac043c2fc5f69e970769b0fb8ab9103fbfdeb7d26a1ea9729d4bd2dddd".to_string(),
+            size_bytes: 235_000_000,
+            model_type: ModelType::ParakeetStt,
+        }
+    }
+
+    /// Returns the Parakeet tokenizer JSON file (~2MB).
+    pub fn parakeet_eou_tokenizer() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-eou-tokenizer".to_string(),
+            filename: "tokenizer.json".to_string(),
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/main/realtime_eou_120m-v1-onnx/tokenizer.json".to_string(),
+            sha256: CHECKSUM_UNKNOWN.to_string(),
+            size_bytes: 2_000_000,
+            model_type: ModelType::ParakeetStt,
         }
     }
 
@@ -189,6 +227,9 @@ impl ModelManifest {
             Self::sherpa_zipformer_decoder(),
             Self::sherpa_zipformer_joiner(),
             Self::sherpa_zipformer_tokens(),
+            Self::parakeet_eou_encoder(),
+            Self::parakeet_eou_decoder_joint(),
+            Self::parakeet_eou_tokenizer(),
         ]
     }
 }

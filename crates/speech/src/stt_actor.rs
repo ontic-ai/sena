@@ -306,25 +306,25 @@ impl SttActor {
 
         // Build model file paths
         let encoder = sherpa_model_dir
-            .join("sherpa_encoder.onnx")
+            .join("encoder-epoch-99-avg-1.int8.onnx")
             .to_str()
             .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for encoder".to_string()))?
             .to_string();
 
         let decoder = sherpa_model_dir
-            .join("sherpa_decoder.onnx")
+            .join("decoder-epoch-99-avg-1.int8.onnx")
             .to_str()
             .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for decoder".to_string()))?
             .to_string();
 
         let joiner = sherpa_model_dir
-            .join("sherpa_joiner.onnx")
+            .join("joiner-epoch-99-avg-1.int8.onnx")
             .to_str()
             .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for joiner".to_string()))?
             .to_string();
 
         let tokens = sherpa_model_dir
-            .join("sherpa_tokens.txt")
+            .join("tokens.txt")
             .to_str()
             .ok_or_else(|| SpeechError::SttInitFailed("non-UTF-8 path for tokens".to_string()))?
             .to_string();

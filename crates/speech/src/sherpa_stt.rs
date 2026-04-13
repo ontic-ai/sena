@@ -84,9 +84,9 @@ impl SherpaZipformerStt {
 
     /// Returns true if all required Sherpa ONNX model files exist in the given directory.
     pub fn models_present(model_dir: &Path) -> bool {
-        model_dir.join("sherpa_encoder.onnx").exists()
-            && model_dir.join("sherpa_decoder.onnx").exists()
-            && model_dir.join("sherpa_joiner.onnx").exists()
-            && model_dir.join("sherpa_tokens.txt").exists()
+        model_dir.join("encoder-epoch-99-avg-1.int8.onnx").exists()
+            && model_dir.join("decoder-epoch-99-avg-1.int8.onnx").exists()
+            && model_dir.join("joiner-epoch-99-avg-1.int8.onnx").exists()
+            && model_dir.join("tokens.txt").exists()
     }
 }
