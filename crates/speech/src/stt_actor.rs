@@ -164,63 +164,6 @@ impl SttActor {
         self
     }
 
-    async fn init_sherpa_backend(
-        &self,
-        model_dir: &std::path::Path,
-    ) -> Option<std::sync::mpsc::Sender<SherpaCmd>> {
-        let encoder = model_dir
-            .join("sherpa_encoder.onnx")
-            .to_string_lossy()
-            .into_owned();
-        let decoder = model_dir
-            .join("sherpa_decoder.onnx")
-            .to_string_lossy()
-            .into_owned();
-        let joiner = model_dir
-            .join("sherpa_joiner.onnx")
-            .to_string_lossy()
-            .into_owned();
-        let tokens = model_dir
-            .join("sherpa_tokens.txt")
-            .to_string_lossy()
-            .into_owned();
-
-        // Create channels for worker thread communication
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SherpaCmd>();
-        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), SpeechError>>();
-
-        // Spawn worker thread that creates and owns the model
-        std::thread::spawn(move || {
-            // Load model in this thread (sherpa-onnx types are not Send)
-            match crate::sherpa_stt::SherpaZipformerStt::load(&encoder, &decoder, &joiner, &tokens)
-            {
-                Ok(model) => {
-                    // Signal successful initialization
-                    let _ = init_tx.send(Ok(()));
-                    // Run worker loop
-                    sherpa_worker_loop(model, cmd_rx);
-                }
-                Err(e) => {
-                    // Signal initialization failure
-                    let _ = init_tx.send(Err(e));
-                }
-            }
-        });
-
-        // Wait for initialization to complete
-        match init_rx.recv() {
-            Ok(Ok(())) => Some(cmd_tx),
-            Ok(Err(e)) => {
-                tracing::warn!("listen: sherpa init failed, falling back to whisper: {}", e);
-                None
-            }
-            Err(e) => {
-                tracing::warn!("listen: sherpa worker init channel failed: {}", e);
-                None
-            }
-        }
-    }
-
     fn next_request_id(&mut self) -> u64 {
         let id = self.request_id_counter;
         self.request_id_counter = self.request_id_counter.saturating_add(1);
@@ -269,6 +212,14 @@ impl SttActor {
 
         let parakeet_model_dir = model_dir.join("parakeet");
 
+        // Guard: check model files exist before calling into C library
+        if !crate::parakeet_stt::ParakeetStt::models_present(&parakeet_model_dir) {
+            return Err(SpeechError::SttInitFailed(format!(
+                "Parakeet models not found in {}; run /models download to fetch them",
+                parakeet_model_dir.display()
+            )));
+        }
+
         tracing::info!(
             "initializing Parakeet backend from {}",
             parakeet_model_dir.display()
@@ -298,6 +249,16 @@ impl SttActor {
             .ok_or_else(|| SpeechError::SttInitFailed("model_dir not configured".to_string()))?;
 
         let sherpa_model_dir = model_dir.join("sherpa");
+
+        // Guard: check model files exist before calling into C library.
+        // The sherpa-onnx C++ library will abort() the process on certain errors
+        // (e.g. wrong ONNX format), so we must validate up front.
+        if !crate::sherpa_stt::SherpaZipformerStt::models_present(&sherpa_model_dir) {
+            return Err(SpeechError::SttInitFailed(format!(
+                "Sherpa models not found in {}; run /models download to fetch them",
+                sherpa_model_dir.display()
+            )));
+        }
 
         tracing::info!(
             "initializing Sherpa backend from {}",
@@ -895,15 +856,14 @@ impl Actor for SttActor {
                                 self.listen_audio_stream = None;
                             }
 
-                            // Try to initialise sherpa if models are present.
-                            let sherpa_worker = if let Some(ref dir) = self.model_dir.clone() {
-                                if crate::sherpa_stt::SherpaZipformerStt::models_present(dir) {
-                                    self.init_sherpa_backend(dir).await
-                                } else {
-                                    None
+                            // Use Sherpa for listen-mode streaming only when Sherpa is the
+                            // active, already-initialized backend. Cloning the sender is safe —
+                            // mpsc::Sender is Clone and the worker loop handles commands serially.
+                            let sherpa_worker = match (&self.backend, &self.backend_handle) {
+                                (SttBackend::Sherpa, Some(SttBackendHandle::Sherpa { tx })) => {
+                                    Some(tx.clone())
                                 }
-                            } else {
-                                None
+                                _ => None,
                             };
 
                             let (buffer_duration, backend_label) = if sherpa_worker.is_some() {

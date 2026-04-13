@@ -257,8 +257,15 @@ impl ModelCache {
     }
 
     /// Returns the expected path for a cached model.
+    ///
+    /// Sherpa and Parakeet models are stored in subdirectories to avoid
+    /// naming collisions (e.g. both Whisper and Parakeet use `tokenizer.json`).
     pub fn cached_path(model_dir: &Path, model: &ModelInfo) -> PathBuf {
-        model_dir.join(&model.filename)
+        match model.model_type {
+            ModelType::SherpaZipformerStt => model_dir.join("sherpa").join(&model.filename),
+            ModelType::ParakeetStt => model_dir.join("parakeet").join(&model.filename),
+            _ => model_dir.join(&model.filename),
+        }
     }
 
     /// Lists all cached models in the directory.
@@ -364,12 +371,13 @@ impl DownloadClient {
         model: &ModelInfo,
         request_id: u64,
     ) -> Result<PathBuf, SpeechError> {
-        // Ensure model directory exists
-        fs::create_dir_all(model_dir)
+        let path = ModelCache::cached_path(model_dir, model);
+
+        // Ensure the target directory exists (may be a subdirectory for Sherpa/Parakeet models)
+        let target_dir = path.parent().unwrap_or(model_dir);
+        fs::create_dir_all(target_dir)
             .await
             .map_err(|e| SpeechError::DownloadFailed(format!("create dir: {}", e)))?;
-
-        let path = ModelCache::cached_path(model_dir, model);
         let temp_path = path.with_extension("tmp");
 
         tracing::info!(
@@ -510,7 +518,7 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 9);
+        assert_eq!(models.len(), 12);
 
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
@@ -531,15 +539,39 @@ mod tests {
         let wakeword = &models[4];
         assert_eq!(wakeword.model_type, ModelType::OpenWakeWord);
         assert!(wakeword.filename.ends_with(".tflite"));
+
+        // Verify Sherpa and Parakeet models are present
+        let sherpa_count = models
+            .iter()
+            .filter(|m| m.model_type == ModelType::SherpaZipformerStt)
+            .count();
+        assert_eq!(sherpa_count, 4); // encoder, decoder, joiner, tokens
+
+        let parakeet_count = models
+            .iter()
+            .filter(|m| m.model_type == ModelType::ParakeetStt)
+            .count();
+        assert_eq!(parakeet_count, 3); // encoder, decoder_joint, tokenizer
     }
 
     #[test]
     fn cached_path_returns_correct_path() {
-        let model = ModelManifest::whisper_base_en_safetensors();
         let model_dir = Path::new("/tmp/models");
-        let path = ModelCache::cached_path(model_dir, &model);
 
-        assert_eq!(path, model_dir.join(&model.filename));
+        // Whisper model lands flat in model_dir
+        let whisper = ModelManifest::whisper_base_en_safetensors();
+        let path = ModelCache::cached_path(model_dir, &whisper);
+        assert_eq!(path, model_dir.join(&whisper.filename));
+
+        // Sherpa models land in model_dir/sherpa/
+        let sherpa = ModelManifest::sherpa_zipformer_encoder();
+        let path = ModelCache::cached_path(model_dir, &sherpa);
+        assert_eq!(path, model_dir.join("sherpa").join(&sherpa.filename));
+
+        // Parakeet models land in model_dir/parakeet/
+        let parakeet = ModelManifest::parakeet_eou_encoder();
+        let path = ModelCache::cached_path(model_dir, &parakeet);
+        assert_eq!(path, model_dir.join("parakeet").join(&parakeet.filename));
     }
 
     #[tokio::test]
