@@ -262,7 +262,7 @@ impl ModelCache {
     /// naming collisions (e.g. both Whisper and Parakeet use `tokenizer.json`).
     pub fn cached_path(model_dir: &Path, model: &ModelInfo) -> PathBuf {
         match model.model_type {
-            ModelType::SherpaZipformerStt => model_dir.join("sherpa").join(&model.filename),
+            ModelType::SherpaZipformerStt => model_dir.join("sherpa-streaming").join(&model.filename),
             ModelType::ParakeetStt => model_dir.join("parakeet").join(&model.filename),
             _ => model_dir.join(&model.filename),
         }
@@ -563,10 +563,10 @@ mod tests {
         let path = ModelCache::cached_path(model_dir, &whisper);
         assert_eq!(path, model_dir.join(&whisper.filename));
 
-        // Sherpa models land in model_dir/sherpa/
+        // Sherpa models land in model_dir/sherpa-streaming/
         let sherpa = ModelManifest::sherpa_zipformer_encoder();
         let path = ModelCache::cached_path(model_dir, &sherpa);
-        assert_eq!(path, model_dir.join("sherpa").join(&sherpa.filename));
+        assert_eq!(path, model_dir.join("sherpa-streaming").join(&sherpa.filename));
 
         // Parakeet models land in model_dir/parakeet/
         let parakeet = ModelManifest::parakeet_eou_encoder();

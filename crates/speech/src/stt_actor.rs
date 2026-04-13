@@ -264,7 +264,7 @@ impl SttActor {
             .clone()
             .ok_or_else(|| SpeechError::SttInitFailed("model_dir not configured".to_string()))?;
 
-        let sherpa_model_dir = model_dir.join("sherpa");
+        let sherpa_model_dir = model_dir.join("sherpa-streaming");
 
         // Guard: check model files exist before calling into C library.
         // The sherpa-onnx C++ library will abort() the process on certain errors
@@ -939,10 +939,9 @@ impl Actor for SttActor {
                                     session_id,
                                     self.listen_session_id
                                 );
-                                // Shut down the previous sherpa worker if any.
-                                if let Some(old_tx) = self.sherpa_worker_tx.take() {
-                                    let _ = old_tx.send(SherpaCmd::Shutdown);
-                                }
+                                // Release the listen-mode sherpa sender WITHOUT killing the
+                                // actor-lifetime worker (only stop() and shutdown_backend do that).
+                                self.sherpa_worker_tx = None;
                                 self.sherpa_listen_active = false;
                                 // Shut down the previous parakeet worker if any.
                                 if let Some(old_tx) = self.parakeet_worker_tx.take() {
@@ -983,6 +982,12 @@ impl Actor for SttActor {
                             self.sherpa_worker_tx = sherpa_worker;
                             self.sherpa_listen_active = self.sherpa_worker_tx.is_some();
                             self.listen_last_sherpa = None;
+                            // Reset Sherpa stream so previous session state doesn't bleed in.
+                            if self.sherpa_listen_active {
+                                if let Some(tx) = &self.sherpa_worker_tx {
+                                    let _ = tx.send(SherpaCmd::ResetStream);
+                                }
+                            }
                             self.parakeet_worker_tx = parakeet_worker;
                             self.parakeet_listen_active = self.parakeet_worker_tx.is_some();
                             self.parakeet_chunk_accumulator.clear();
@@ -1007,10 +1012,8 @@ impl Actor for SttActor {
                                 }
                                 Err(e) => {
                                     tracing::error!("listen: failed to start audio capture: {}", e);
-                                    // Clean up sherpa worker if audio failed.
-                                    if let Some(tx) = self.sherpa_worker_tx.take() {
-                                        let _ = tx.send(SherpaCmd::Shutdown);
-                                    }
+                                    // Release sherpa listen reference WITHOUT killing actor-lifetime worker.
+                                    self.sherpa_worker_tx = None;
                                     self.sherpa_listen_active = false;
                                     // Clean up parakeet worker if audio failed.
                                     if let Some(tx) = self.parakeet_worker_tx.take() {
@@ -1028,10 +1031,8 @@ impl Actor for SttActor {
                         }
                         Ok(Event::Speech(SpeechEvent::ListenModeStopRequested { session_id })) => {
                             if self.listen_session_id == Some(session_id) {
-                                // Shut down sherpa worker if active.
-                                if let Some(tx) = self.sherpa_worker_tx.take() {
-                                    let _ = tx.send(SherpaCmd::Shutdown);
-                                }
+                                // Release sherpa listen reference WITHOUT killing the actor-lifetime worker.
+                                self.sherpa_worker_tx = None;
                                 self.sherpa_listen_active = false;
                                 self.listen_last_sherpa = None;
                                 // Shut down parakeet worker if active.
@@ -1253,6 +1254,8 @@ enum SherpaCmd {
         samples: Vec<f32>,
         reply: oneshot::Sender<String>,
     },
+    /// Reset the internal stream for a new listen session.
+    ResetStream,
     Shutdown,
 }
 
@@ -1264,6 +1267,9 @@ fn sherpa_worker_loop(
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SherpaCmd::Shutdown => break,
+            SherpaCmd::ResetStream => {
+                model.reset_stream();
+            }
             SherpaCmd::Decode { samples, reply } => {
                 let text = model.decode_chunk(samples);
                 let _ = reply.send(text);
@@ -1296,9 +1302,13 @@ fn parakeet_worker_loop(
         match command {
             ParakeetCommand::Shutdown => break,
             ParakeetCommand::Chunk { samples, reply } => {
-                let text = model
-                    .decode_chunk_f32(&samples)
-                    .unwrap_or_default();
+                let text = match model.decode_chunk_f32(&samples) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!("parakeet: chunk decode failed: {}", e);
+                        String::new()
+                    }
+                };
                 let _ = reply.send(text);
             }
             ParakeetCommand::Transcribe { samples, reply } => {

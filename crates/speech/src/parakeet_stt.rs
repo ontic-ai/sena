@@ -44,6 +44,12 @@ impl ParakeetStt {
     /// Preferred over `decode_chunk` for streaming paths — avoids the lossy i16 round-trip.
     /// Feed exactly 2560 samples (160ms) per call for proper streaming behaviour.
     pub fn decode_chunk_f32(&mut self, audio: &[f32]) -> Result<String, SpeechError> {
+        if audio.len() != 2560 {
+            tracing::warn!(
+                "parakeet: expected 2560 samples (160ms at 16kHz), got {} — model output may be degraded",
+                audio.len()
+            );
+        }
         tracing::debug!("parakeet: decoding {} samples", audio.len());
 
         // transcribe() expects f32 samples and reset_on_eou flag.

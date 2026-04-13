@@ -82,6 +82,15 @@ impl SherpaZipformerStt {
         text
     }
 
+    /// Reset the internal stream state for a new utterance or new listen session.
+    ///
+    /// Call this between independent transcription sessions so previous
+    /// decoder state does not bleed into the next utterance.
+    pub fn reset_stream(&mut self) {
+        self.stream = self.recognizer.create_stream();
+        tracing::debug!("sherpa-onnx: stream reset for new session");
+    }
+
     /// Returns true if all required Sherpa ONNX model files exist in the given directory.
     pub fn models_present(model_dir: &Path) -> bool {
         model_dir.join("encoder-epoch-99-avg-1.int8.onnx").exists()
