@@ -1870,6 +1870,11 @@ fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
                 ),
             })
         }
+        Event::Speech(SpeechEvent::SttBackendSwitchRequested { backend }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/stt-backend {}", backend),
+            })
+        }
         Event::System(bus::events::SystemEvent::ShutdownSignal) => {
             Ok(IpcPayload::ShutdownRequested)
         }

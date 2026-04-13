@@ -986,6 +986,65 @@ async fn dispatch_slash_command(
                 )],
             }
         }
+        "/stt-backend" => {
+            match parts.get(1).copied() {
+                None => {
+                    // Show current backend + available options
+                    match crate::config::load_or_create_config().await {
+                        Ok(config) => {
+                            vec![
+                                ("━━  STT Backend".to_string(), LineStyle::SystemNotice),
+                                (
+                                    format!("Current: {:?}", config.stt_backend),
+                                    LineStyle::Normal,
+                                ),
+                                (
+                                    "Available: whisper, sherpa, parakeet".to_string(),
+                                    LineStyle::Normal,
+                                ),
+                                (
+                                    "Usage: /stt-backend <backend>".to_string(),
+                                    LineStyle::SystemNotice,
+                                ),
+                            ]
+                        }
+                        Err(e) => {
+                            vec![(format!("Failed to load config: {}", e), LineStyle::Error)]
+                        }
+                    }
+                }
+                Some(backend_str) => {
+                    // Validate backend name
+                    let backend = match backend_str.to_lowercase().as_str() {
+                        "whisper" | "sherpa" | "parakeet" => backend_str.to_lowercase(),
+                        _ => {
+                            return vec![(
+                                "Invalid backend. Use: whisper, sherpa, parakeet".to_string(),
+                                LineStyle::Error,
+                            )];
+                        }
+                    };
+
+                    // Broadcast switch request
+                    if let Err(e) = bus
+                        .broadcast(Event::Speech(SpeechEvent::SttBackendSwitchRequested {
+                            backend: backend.clone(),
+                        }))
+                        .await
+                    {
+                        vec![(
+                            format!("Failed to send backend switch request: {}", e),
+                            LineStyle::Error,
+                        )]
+                    } else {
+                        vec![(
+                            format!("Switching STT backend to {}...", backend),
+                            LineStyle::SystemNotice,
+                        )]
+                    }
+                }
+            }
+        }
         _ if line.starts_with('/') => {
             vec![(
                 format!("Unknown command '{}'. Type /help for commands.", cmd),
@@ -1307,13 +1366,7 @@ fn current_user_pipe_identity() -> Option<String> {
         }
 
         let mut bytes_needed: DWORD = 0;
-        let _ = GetTokenInformation(
-            token,
-            TokenUser,
-            ptr::null_mut(),
-            0,
-            &mut bytes_needed,
-        );
+        let _ = GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut bytes_needed);
 
         if bytes_needed == 0 {
             let _ = CloseHandle(token);
