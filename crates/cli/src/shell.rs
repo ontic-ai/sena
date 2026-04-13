@@ -150,6 +150,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "List microphones or select one (/microphone select <index>)",
         category: CommandCategory::Audio,
     },
+    SlashCommand {
+        command: "/stt-backend",
+        description: "Switch STT backend (/stt-backend <whisper|sherpa|parakeet>)",
+        category: CommandCategory::Audio,
+    },
     // System category
     SlashCommand {
         command: "/screenshot",
@@ -1264,6 +1269,18 @@ impl Shell {
                     "\u{1f3a4} Listen mode stopped.".to_string(),
                 );
             }
+            Event::Speech(SpeechEvent::SttBackendSwitchCompleted { backend }) => {
+                self.add_message(
+                    MessageRole::System,
+                    format!("✓ STT backend switched to: {}", backend),
+                );
+            }
+            Event::Speech(SpeechEvent::SttBackendSwitchFailed { backend, reason }) => {
+                self.add_message(
+                    MessageRole::Warning,
+                    format!("Failed to switch to {}: {}", backend, reason),
+                );
+            }
             other if self.verbose => {
                 if let Some(msg) = verbose_format(&other) {
                     self.add_message(MessageRole::System, msg);
@@ -1730,6 +1747,10 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         }
         "/microphone" => {
             handle_microphone_command(line, transport, target, deps.state).await?;
+            Ok(DispatchResult::Continue)
+        }
+        "/stt-backend" => {
+            handle_stt_backend_command(line, transport, target, deps.state).await?;
             Ok(DispatchResult::Continue)
         }
         "/screenshot" => {
@@ -2226,6 +2247,82 @@ async fn handle_loops_command<T: MessageTransport + ?Sized>(
     Ok(())
 }
 
+async fn handle_stt_backend_command<T: MessageTransport + ?Sized>(
+    line: &str,
+    transport: &mut T,
+    target: &mut DispatchTarget<'_>,
+    state: &mut crate::tui_state::ShellState<SlashDropdown>,
+) -> Result<()> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+
+    match parts.as_slice() {
+        ["/stt-backend"] => {
+            // Show current backend + valid options
+            let config = runtime::config::load_or_create_config().await?;
+            add_message(state, MessageRole::System, "━━  STT Backend");
+            add_message(
+                state,
+                MessageRole::System,
+                &format!("Current: {:?}", config.stt_backend),
+            );
+            add_message(
+                state,
+                MessageRole::System,
+                "Available: whisper, sherpa, parakeet",
+            );
+            add_message(state, MessageRole::System, "Usage: /stt-backend <backend>");
+        }
+        ["/stt-backend", backend_str] => {
+            // Prevent switch during active listen
+            if state.listen_mode_active {
+                add_message(
+                    state,
+                    MessageRole::Warning,
+                    "Cannot switch STT backend during /listen. Stop listening first.",
+                );
+                return Ok(());
+            }
+
+            // Validate backend name
+            let backend = match backend_str.to_lowercase().as_str() {
+                "whisper" | "sherpa" | "parakeet" => backend_str.to_lowercase(),
+                _ => {
+                    add_message(
+                        state,
+                        MessageRole::Warning,
+                        "Invalid backend. Use: whisper, sherpa, parakeet",
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Broadcast switch request
+            transport
+                .send(
+                    target,
+                    Event::Speech(SpeechEvent::SttBackendSwitchRequested {
+                        backend: backend.clone(),
+                    }),
+                )
+                .await?;
+
+            add_message(
+                state,
+                MessageRole::System,
+                &format!("Switching STT backend to {}...", backend),
+            );
+        }
+        _ => {
+            add_message(
+                state,
+                MessageRole::Warning,
+                "Usage: /stt-backend | /stt-backend <whisper|sherpa|parakeet>",
+            );
+        }
+    }
+    Ok(())
+}
+
 fn show_help_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
     add_message(state, MessageRole::System, "━━  Commands");
 
@@ -2342,7 +2439,11 @@ async fn show_status_shared(
         add_message(
             state,
             MessageRole::System,
-            &format!("  {}: {}", name, if enabled { "enabled" } else { "disabled" }),
+            &format!(
+                "  {}: {}",
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            ),
         );
     }
 
@@ -2354,10 +2455,22 @@ async fn show_status_shared(
             .map(|c| c.speech_enabled)
             .unwrap_or(false)
     };
-    let speech_status = if speech_enabled { "enabled" } else { "disabled" };
+    let speech_status = if speech_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
     add_message(state, MessageRole::System, "Speech");
-    add_message(state, MessageRole::System, &format!("  STT: {}", speech_status));
-    add_message(state, MessageRole::System, &format!("  TTS: {}", speech_status));
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  STT: {}", speech_status),
+    );
+    add_message(
+        state,
+        MessageRole::System,
+        &format!("  TTS: {}", speech_status),
+    );
 }
 
 fn copy_last_response_shared(state: &mut crate::tui_state::ShellState<SlashDropdown>) {
