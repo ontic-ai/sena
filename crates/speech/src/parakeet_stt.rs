@@ -35,16 +35,22 @@ impl ParakeetStt {
     ///
     /// Audio is converted from i16 to f32 normalized to [-1.0, 1.0] before processing.
     pub fn decode_chunk(&mut self, audio: &[i16]) -> Result<String, SpeechError> {
+        let audio_f32: Vec<f32> = audio.iter().map(|&s| s as f32 / 32768.0).collect();
+        self.decode_chunk_f32(&audio_f32)
+    }
+
+    /// Decode a chunk of f32 audio samples at 16kHz mono and return transcribed text.
+    ///
+    /// Preferred over `decode_chunk` for streaming paths — avoids the lossy i16 round-trip.
+    /// Feed exactly 2560 samples (160ms) per call for proper streaming behaviour.
+    pub fn decode_chunk_f32(&mut self, audio: &[f32]) -> Result<String, SpeechError> {
         tracing::debug!("parakeet: decoding {} samples", audio.len());
 
-        // Convert i16 samples to f32 normalized to [-1.0, 1.0]
-        let audio_f32: Vec<f32> = audio.iter().map(|&s| s as f32 / 32768.0).collect();
-
-        // transcribe() expects f32 samples and end_of_stream flag
-        // false = not end of stream, this is a chunk in a continuous stream
+        // transcribe() expects f32 samples and reset_on_eou flag.
+        // false = do not reset decoder state on EOU token, keep streaming.
         let text = self
             .model
-            .transcribe(&audio_f32, false)
+            .transcribe(audio, false)
             .map_err(|e| SpeechError::TranscriptionFailed(format!("parakeet decode: {}", e)))?;
 
         if !text.trim().is_empty() {

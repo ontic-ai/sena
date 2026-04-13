@@ -27,6 +27,13 @@ const LISTEN_SHERPA_INTERVAL: Duration = Duration::from_millis(200);
 /// Maximum audio retained for sherpa growing-window decode (8s at 16kHz).
 const LISTEN_SHERPA_MAX_SAMPLES: usize = 16_000 * 8;
 
+/// Audio chunk duration for Parakeet-EOU streaming sessions (160ms — required chunk size).
+const LISTEN_PARAKEET_BUFFER_DURATION_SECS: f32 = 0.16;
+
+/// Exact chunk size required by ParakeetEOU.transcribe() — 160ms at 16kHz.
+/// Feeding larger chunks causes the model to silently discard all but the last 160ms.
+const PARAKEET_CHUNK_SAMPLES: usize = 2_560;
+
 /// Maximum rolling audio retained for listen-mode interim transcriptions (6 seconds at 16kHz).
 const LISTEN_ROLLING_MAX_SAMPLES: usize = 16_000 * 3;
 
@@ -84,6 +91,12 @@ pub struct SttActor {
     sherpa_listen_active: bool,
     /// Time of last sherpa decode in the current listen session.
     listen_last_sherpa: Option<std::time::Instant>,
+    /// Sender to the parakeet worker thread. Some when parakeet is active for listen mode.
+    parakeet_worker_tx: Option<std::sync::mpsc::Sender<ParakeetCommand>>,
+    /// True while parakeet is the active STT for the current listen session.
+    parakeet_listen_active: bool,
+    /// Accumulator for sub-chunk parakeet audio. Drained in 2560-sample (160ms) chunks.
+    parakeet_chunk_accumulator: Vec<f32>,
     /// True while a backend switch is in progress. Suppresses audio processing.
     backend_switching: bool,
 }
@@ -129,6 +142,9 @@ impl SttActor {
             sherpa_worker_tx: None,
             sherpa_listen_active: false,
             listen_last_sherpa: None,
+            parakeet_worker_tx: None,
+            parakeet_listen_active: false,
+            parakeet_chunk_accumulator: Vec::new(),
             backend_switching: false,
         }
     }
@@ -608,6 +624,82 @@ impl SttActor {
                 self.listen_rolling_samples.clear();
                 self.listen_last_sherpa = None;
             }
+        } else if self.parakeet_listen_active {
+            // ── Parakeet streaming path ───────────────────────────────────────────────
+            // Accumulate incoming audio into the chunk buffer.
+            self.parakeet_chunk_accumulator
+                .extend_from_slice(&buffer.samples);
+
+            // Drain 2560-sample (160ms) chunks and decode each one.
+            while self.parakeet_chunk_accumulator.len() >= PARAKEET_CHUNK_SAMPLES {
+                let chunk: Vec<f32> = self
+                    .parakeet_chunk_accumulator
+                    .drain(..PARAKEET_CHUNK_SAMPLES)
+                    .collect();
+
+                if let Some(tx) = &self.parakeet_worker_tx {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let _ = tx.send(ParakeetCommand::Chunk {
+                        samples: chunk,
+                        reply: reply_tx,
+                    });
+                    match tokio::time::timeout(Duration::from_millis(500), reply_rx).await {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
+                            let _ = bus
+                                .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                    text: text.trim().to_string(),
+                                    is_final: false,
+                                    confidence: 0.85,
+                                    session_id,
+                                }))
+                                .await;
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => tracing::warn!("listen[parakeet]: worker channel closed"),
+                        Err(_) => tracing::warn!("listen[parakeet]: chunk decode timeout"),
+                    }
+                }
+            }
+
+            // VAD for final speech-end detection.
+            if let Some(_ready_buffer) =
+                self.listen_mode_vad
+                    .feed(&buffer.samples, buffer.sample_rate, buffer.channels)
+            {
+                // Flush any remaining sub-chunk samples (pad to 2560 with silence).
+                if !self.parakeet_chunk_accumulator.is_empty() {
+                    let mut remaining = self.parakeet_chunk_accumulator.clone();
+                    remaining.resize(PARAKEET_CHUNK_SAMPLES, 0.0_f32);
+
+                    if let Some(tx) = &self.parakeet_worker_tx {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let _ = tx.send(ParakeetCommand::Chunk {
+                            samples: remaining,
+                            reply: reply_tx,
+                        });
+                        match tokio::time::timeout(Duration::from_millis(800), reply_rx).await {
+                            Ok(Ok(text)) if !text.trim().is_empty() => {
+                                let _ = bus
+                                    .broadcast(Event::Speech(
+                                        SpeechEvent::ListenModeTranscription {
+                                            text: text.trim().to_string(),
+                                            is_final: true,
+                                            confidence: 0.85,
+                                            session_id,
+                                        },
+                                    ))
+                                    .await;
+                            }
+                            Ok(Ok(_)) => {}
+                            Ok(Err(_)) => {
+                                tracing::warn!("listen[parakeet]: worker closed on flush")
+                            }
+                            Err(_) => tracing::warn!("listen[parakeet]: flush timeout"),
+                        }
+                    }
+                    self.parakeet_chunk_accumulator.clear();
+                }
+            }
         } else {
             // ── Whisper fallback path ─────────────────────────────────────────────────
             // Accumulate samples in rolling buffer (max 3s at 16kHz).
@@ -852,6 +944,12 @@ impl Actor for SttActor {
                                     let _ = old_tx.send(SherpaCmd::Shutdown);
                                 }
                                 self.sherpa_listen_active = false;
+                                // Shut down the previous parakeet worker if any.
+                                if let Some(old_tx) = self.parakeet_worker_tx.take() {
+                                    let _ = old_tx.send(ParakeetCommand::Shutdown);
+                                }
+                                self.parakeet_listen_active = false;
+                                self.parakeet_chunk_accumulator.clear();
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
                             }
@@ -866,8 +964,18 @@ impl Actor for SttActor {
                                 _ => None,
                             };
 
+                            // Use Parakeet for listen-mode streaming when Parakeet is active.
+                            let parakeet_worker = match (&self.backend, &self.backend_handle) {
+                                (SttBackend::Parakeet, Some(SttBackendHandle::Parakeet { tx })) => {
+                                    Some(tx.clone())
+                                }
+                                _ => None,
+                            };
+
                             let (buffer_duration, backend_label) = if sherpa_worker.is_some() {
                                 (LISTEN_SHERPA_BUFFER_DURATION_SECS, "sherpa-onnx")
+                            } else if parakeet_worker.is_some() {
+                                (LISTEN_PARAKEET_BUFFER_DURATION_SECS, "parakeet streaming")
                             } else {
                                 (LISTEN_WHISPER_BUFFER_DURATION_SECS, "whisper fake-streaming")
                             };
@@ -875,6 +983,9 @@ impl Actor for SttActor {
                             self.sherpa_worker_tx = sherpa_worker;
                             self.sherpa_listen_active = self.sherpa_worker_tx.is_some();
                             self.listen_last_sherpa = None;
+                            self.parakeet_worker_tx = parakeet_worker;
+                            self.parakeet_listen_active = self.parakeet_worker_tx.is_some();
+                            self.parakeet_chunk_accumulator.clear();
 
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
@@ -901,6 +1012,12 @@ impl Actor for SttActor {
                                         let _ = tx.send(SherpaCmd::Shutdown);
                                     }
                                     self.sherpa_listen_active = false;
+                                    // Clean up parakeet worker if audio failed.
+                                    if let Some(tx) = self.parakeet_worker_tx.take() {
+                                        let _ = tx.send(ParakeetCommand::Shutdown);
+                                    }
+                                    self.parakeet_listen_active = false;
+                                    self.parakeet_chunk_accumulator.clear();
                                     let _ = bus
                                         .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
                                             session_id,
@@ -917,6 +1034,12 @@ impl Actor for SttActor {
                                 }
                                 self.sherpa_listen_active = false;
                                 self.listen_last_sherpa = None;
+                                // Shut down parakeet worker if active.
+                                if let Some(tx) = self.parakeet_worker_tx.take() {
+                                    let _ = tx.send(ParakeetCommand::Shutdown);
+                                }
+                                self.parakeet_listen_active = false;
+                                self.parakeet_chunk_accumulator.clear();
                                 self.listen_session_id = None;
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
@@ -1050,6 +1173,12 @@ impl Actor for SttActor {
         if let Some(tx) = self.sherpa_worker_tx.take() {
             let _ = tx.send(SherpaCmd::Shutdown);
         }
+        // Shut down parakeet worker if running.
+        if let Some(tx) = self.parakeet_worker_tx.take() {
+            let _ = tx.send(ParakeetCommand::Shutdown);
+        }
+        self.parakeet_listen_active = false;
+        self.parakeet_chunk_accumulator.clear();
         self.audio_rx = None;
         self.audio_stream = None;
         self.listen_audio_rx = None;
@@ -1149,6 +1278,12 @@ enum ParakeetCommand {
         samples: Vec<i16>,
         reply: oneshot::Sender<Result<TranscriptionResult, SpeechError>>,
     },
+    /// Streaming 160ms chunk for /listen mode.
+    /// Uses f32 directly — no lossy i16 round-trip.
+    Chunk {
+        samples: Vec<f32>,
+        reply: oneshot::Sender<String>,
+    },
     Shutdown,
 }
 
@@ -1160,6 +1295,12 @@ fn parakeet_worker_loop(
     while let Ok(command) = rx.recv() {
         match command {
             ParakeetCommand::Shutdown => break,
+            ParakeetCommand::Chunk { samples, reply } => {
+                let text = model
+                    .decode_chunk_f32(&samples)
+                    .unwrap_or_default();
+                let _ = reply.send(text);
+            }
             ParakeetCommand::Transcribe { samples, reply } => {
                 let result = model.decode_chunk(&samples).map(|text| {
                     let confidence = if text.trim().is_empty() {

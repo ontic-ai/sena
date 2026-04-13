@@ -136,21 +136,21 @@ impl ModelManifest {
         ModelInfo {
             name: "sherpa-zipformer-en-encoder-int8".to_string(),
             filename: "encoder-epoch-99-avg-1.int8.onnx".to_string(),
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/encoder-epoch-99-avg-1.int8.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/encoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 188_000_000,
+            size_bytes: 127_000_000,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
 
-    /// Returns the Zipformer decoder (int8 quantized, ~539KB).
+    /// Returns the Zipformer decoder (int8 quantized, ~541KB).
     pub fn sherpa_zipformer_decoder() -> ModelInfo {
         ModelInfo {
             name: "sherpa-zipformer-en-decoder-int8".to_string(),
             filename: "decoder-epoch-99-avg-1.int8.onnx".to_string(),
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/decoder-epoch-99-avg-1.int8.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/decoder-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
-            size_bytes: 539_000,
+            size_bytes: 541_000,
             model_type: ModelType::SherpaZipformerStt,
         }
     }
@@ -160,7 +160,7 @@ impl ModelManifest {
         ModelInfo {
             name: "sherpa-zipformer-en-joiner-int8".to_string(),
             filename: "joiner-epoch-99-avg-1.int8.onnx".to_string(),
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/joiner-epoch-99-avg-1.int8.onnx".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/joiner-epoch-99-avg-1.int8.onnx".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 259_000,
             model_type: ModelType::SherpaZipformerStt,
@@ -172,7 +172,7 @@ impl ModelManifest {
         ModelInfo {
             name: "sherpa-zipformer-en-tokens".to_string(),
             filename: "tokens.txt".to_string(),
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-04-01/resolve/main/tokens.txt".to_string(),
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-02-21/resolve/main/tokens.txt".to_string(),
             sha256: CHECKSUM_UNKNOWN.to_string(),
             size_bytes: 5_050,
             model_type: ModelType::SherpaZipformerStt,
