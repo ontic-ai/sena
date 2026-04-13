@@ -97,6 +97,10 @@ pub struct SttActor {
     parakeet_listen_active: bool,
     /// Accumulator for sub-chunk parakeet audio. Drained in 2560-sample (160ms) chunks.
     parakeet_chunk_accumulator: Vec<f32>,
+    /// Token text accumulated for the current Parakeet listen utterance.
+    /// Parakeet-EOU emits SentencePiece tokens (e.g. `_hello`) per 160ms chunk;
+    /// this accumulates them into a full sentence for display.
+    parakeet_session_text: String,
     /// True while a backend switch is in progress. Suppresses audio processing.
     backend_switching: bool,
 }
@@ -145,6 +149,7 @@ impl SttActor {
             parakeet_worker_tx: None,
             parakeet_listen_active: false,
             parakeet_chunk_accumulator: Vec::new(),
+            parakeet_session_text: String::new(),
             backend_switching: false,
         }
     }
@@ -644,15 +649,20 @@ impl SttActor {
                         reply: reply_tx,
                     });
                     match tokio::time::timeout(Duration::from_millis(500), reply_rx).await {
-                        Ok(Ok(text)) if !text.trim().is_empty() => {
-                            let _ = bus
-                                .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                                    text: text.trim().to_string(),
-                                    is_final: false,
-                                    confidence: 0.85,
-                                    session_id,
-                                }))
-                                .await;
+                        Ok(Ok(token)) if !token.trim().is_empty() => {
+                            // Accumulate SentencePiece tokens (e.g. "_hello", "_world").
+                            self.parakeet_session_text.push_str(&token);
+                            let display = Self::decode_parakeet_tokens(&self.parakeet_session_text);
+                            if !display.is_empty() {
+                                let _ = bus
+                                    .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                                        text: display,
+                                        is_final: false,
+                                        confidence: 0.85,
+                                        session_id,
+                                    }))
+                                    .await;
+                            }
                         }
                         Ok(Ok(_)) => {}
                         Ok(Err(_)) => tracing::warn!("listen[parakeet]: worker channel closed"),
@@ -678,17 +688,8 @@ impl SttActor {
                             reply: reply_tx,
                         });
                         match tokio::time::timeout(Duration::from_millis(800), reply_rx).await {
-                            Ok(Ok(text)) if !text.trim().is_empty() => {
-                                let _ = bus
-                                    .broadcast(Event::Speech(
-                                        SpeechEvent::ListenModeTranscription {
-                                            text: text.trim().to_string(),
-                                            is_final: true,
-                                            confidence: 0.85,
-                                            session_id,
-                                        },
-                                    ))
-                                    .await;
+                            Ok(Ok(token)) if !token.trim().is_empty() => {
+                                self.parakeet_session_text.push_str(&token);
                             }
                             Ok(Ok(_)) => {}
                             Ok(Err(_)) => {
@@ -697,8 +698,21 @@ impl SttActor {
                             Err(_) => tracing::warn!("listen[parakeet]: flush timeout"),
                         }
                     }
-                    self.parakeet_chunk_accumulator.clear();
                 }
+                // Emit final transcription from accumulated session text.
+                let final_text = Self::decode_parakeet_tokens(&self.parakeet_session_text);
+                if !final_text.is_empty() {
+                    let _ = bus
+                        .broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                            text: final_text,
+                            is_final: true,
+                            confidence: 0.85,
+                            session_id,
+                        }))
+                        .await;
+                }
+                self.parakeet_chunk_accumulator.clear();
+                self.parakeet_session_text.clear();
             }
         } else {
             // ── Whisper fallback path ─────────────────────────────────────────────────
@@ -793,9 +807,19 @@ impl SttActor {
         }
     }
 
+    /// Post-process raw Parakeet-EOU SentencePiece tokens into readable text.
+    ///
+    /// Parakeet emits tokens like `_hello`, `_world` where a leading `_` means
+    /// "space before this word" (the SentencePiece convention). This function
+    /// converts that token stream into a properly spaced string.
+    ///
+    /// Example: `"_my_name_is"` → `"my name is"`.
+    fn decode_parakeet_tokens(tokens: &str) -> String {
+        tokens.replace('_', " ").trim().to_string()
+    }
+
     /// Convert a string backend name to SttBackend enum.
-    fn parse_backend_name(backend_str: &str) -> Result<SttBackend, String> {
-        match backend_str.to_lowercase().as_str() {
+    fn parse_backend_name(backend_str: &str) -> Result<SttBackend, String> {        match backend_str.to_lowercase().as_str() {
             "whisper" => Ok(SttBackend::Whisper),
             "sherpa" => Ok(SttBackend::Sherpa),
             "parakeet" => Ok(SttBackend::Parakeet),
@@ -957,6 +981,7 @@ impl Actor for SttActor {
                                 }
                                 self.parakeet_listen_active = false;
                                 self.parakeet_chunk_accumulator.clear();
+                                self.parakeet_session_text.clear();
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
                             }
@@ -999,6 +1024,7 @@ impl Actor for SttActor {
                             self.parakeet_worker_tx = parakeet_worker;
                             self.parakeet_listen_active = self.parakeet_worker_tx.is_some();
                             self.parakeet_chunk_accumulator.clear();
+                            self.parakeet_session_text.clear();
 
                             let config = AudioInputConfig {
                                 sample_rate: 16_000,
@@ -1029,6 +1055,7 @@ impl Actor for SttActor {
                                     }
                                     self.parakeet_listen_active = false;
                                     self.parakeet_chunk_accumulator.clear();
+                                    self.parakeet_session_text.clear();
                                     let _ = bus
                                         .broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
                                             session_id,
@@ -1049,6 +1076,7 @@ impl Actor for SttActor {
                                 }
                                 self.parakeet_listen_active = false;
                                 self.parakeet_chunk_accumulator.clear();
+                                self.parakeet_session_text.clear();
                                 self.listen_session_id = None;
                                 self.listen_audio_rx = None;
                                 self.listen_audio_stream = None;
@@ -1188,6 +1216,7 @@ impl Actor for SttActor {
         }
         self.parakeet_listen_active = false;
         self.parakeet_chunk_accumulator.clear();
+        self.parakeet_session_text.clear();
         self.audio_rx = None;
         self.audio_stream = None;
         self.listen_audio_rx = None;
