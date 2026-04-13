@@ -702,6 +702,14 @@ impl SttActor {
             }
         } else {
             // ── Whisper fallback path ─────────────────────────────────────────────────
+            // Log a warning if the Parakeet backend is active but its worker isn't set —
+            // this means the backend handle wasn't cloned correctly in ListenModeRequested.
+            if self.backend == SttBackend::Parakeet {
+                tracing::warn!(
+                    "listen[fallback]: Parakeet backend is active but parakeet_listen_active=false; \
+                     falling back to Whisper path — check if Parakeet models are downloaded"
+                );
+            }
             // Accumulate samples in rolling buffer (max 3s at 16kHz).
             self.listen_rolling_samples
                 .extend_from_slice(&buffer.samples);

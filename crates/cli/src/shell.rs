@@ -906,6 +906,23 @@ impl Shell {
         }
     }
 
+    /// Update the last streaming interim message in-place or add a new one.
+    ///
+    /// Used for streaming transcription so interim `[…] text` updates replace each
+    /// other rather than flooding the conversation log with duplicate lines.
+    fn update_or_add_streaming(&mut self, text: String) {
+        let prefix = "[\u{2026}] ";
+        let full = format!("{}{}", prefix, text);
+        // Replace the last message if it is already a streaming interim line.
+        if let Some(last) = self.state.messages.last_mut() {
+            if last.role == MessageRole::System && last.text.starts_with(prefix) {
+                last.text = full;
+                return;
+            }
+        }
+        self.state.messages.push(Message::new(MessageRole::System, full));
+    }
+
     /// Handle bus events and update internal state.
     async fn handle_bus_event(&mut self, event: Event) {
         match event {
@@ -1245,9 +1262,16 @@ impl Shell {
                         format!("[listen ~{:.0}%] {}", confidence * 100.0, text),
                     );
                 } else if is_final {
+                    // Committed utterance: replace any in-flight interim line with the final.
+                    if let Some(last) = self.state.messages.last() {
+                        if last.role == MessageRole::System && last.text.starts_with("[\u{2026}] ") {
+                            self.state.messages.pop();
+                        }
+                    }
                     self.add_message(MessageRole::Sena, text);
                 } else {
-                    self.add_message(MessageRole::System, format!("[\u{2026}] {}", text));
+                    // Streaming interim update — replace in-place, do not flood the log.
+                    self.update_or_add_streaming(text);
                 }
             }
             Event::System(bus::events::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
