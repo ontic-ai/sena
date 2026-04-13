@@ -84,6 +84,8 @@ pub struct SttActor {
     sherpa_listen_active: bool,
     /// Time of last sherpa decode in the current listen session.
     listen_last_sherpa: Option<std::time::Instant>,
+    /// True while a backend switch is in progress. Suppresses audio processing.
+    backend_switching: bool,
 }
 
 impl SttActor {
@@ -127,6 +129,7 @@ impl SttActor {
             sherpa_worker_tx: None,
             sherpa_listen_active: false,
             listen_last_sherpa: None,
+            backend_switching: false,
         }
     }
 
@@ -728,6 +731,41 @@ impl SttActor {
                 .await;
         }
     }
+
+    /// Convert a string backend name to SttBackend enum.
+    fn parse_backend_name(backend_str: &str) -> Result<SttBackend, String> {
+        match backend_str.to_lowercase().as_str() {
+            "whisper" => Ok(SttBackend::Whisper),
+            "sherpa" => Ok(SttBackend::Sherpa),
+            "parakeet" => Ok(SttBackend::Parakeet),
+            "mock" => Ok(SttBackend::Mock),
+            _ => Err(format!(
+                "unknown backend '{}', expected: whisper, sherpa, parakeet, mock",
+                backend_str
+            )),
+        }
+    }
+
+    /// Shut down a backend handle gracefully.
+    async fn shutdown_backend(handle: SttBackendHandle) -> Result<(), SpeechError> {
+        match handle {
+            SttBackendHandle::CandleWhisper { tx } => {
+                tx.send(WorkerCommand::Shutdown).map_err(|_| {
+                    SpeechError::ChannelClosed("whisper worker tx closed".to_string())
+                })?;
+            }
+            SttBackendHandle::Sherpa { tx } => {
+                // Ignore send errors, channel may already be closed.
+                let _ = tx.send(SherpaCmd::Shutdown);
+            }
+            SttBackendHandle::Parakeet { tx } => {
+                // Ignore send errors, channel may already be closed.
+                let _ = tx.send(ParakeetCommand::Shutdown);
+            }
+            SttBackendHandle::Mock => {}
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -934,6 +972,72 @@ impl Actor for SttActor {
                                     .await;
                             }
                         }
+                        Ok(Event::Speech(SpeechEvent::SttBackendSwitchRequested { backend })) => {
+                            tracing::info!("stt: backend switch requested to '{}'", backend);
+
+                            // Parse backend name
+                            let new_backend = match Self::parse_backend_name(&backend) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!("stt: invalid backend name: {}", e);
+                                    let _ = bus.broadcast(Event::Speech(SpeechEvent::SttBackendSwitchFailed {
+                                        backend: backend.clone(),
+                                        reason: e,
+                                    })).await;
+                                    continue;
+                                }
+                            };
+
+                            // Set switching flag to pause audio processing
+                            self.backend_switching = true;
+
+                            // Preserve old backend for rollback
+                            let old_backend = self.backend;
+                            let old_backend_handle = self.backend_handle.take();
+
+                            // Shut down current backend
+                            if let Some(handle) = old_backend_handle {
+                                tracing::debug!("stt: shutting down current backend");
+                                if let Err(e) = Self::shutdown_backend(handle).await {
+                                    tracing::warn!("stt: error shutting down old backend: {}", e);
+                                }
+                            }
+
+                            // Update backend enum
+                            self.backend = new_backend;
+
+                            // Try to initialize new backend
+                            match self.initialize_backend().await {
+                                Ok(()) => {
+                                    tracing::info!("stt: backend switched to {:?}", new_backend);
+                                    let _ = bus.broadcast(Event::Speech(SpeechEvent::SttBackendSwitchCompleted {
+                                        backend: backend.clone(),
+                                    })).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("stt: backend switch failed ({}), rolling back to {:?}", e, old_backend);
+
+                                    // Rollback to old backend
+                                    self.backend = old_backend;
+                                    match self.initialize_backend().await {
+                                        Ok(()) => {
+                                            tracing::info!("stt: rollback to {:?} successful", old_backend);
+                                        }
+                                        Err(rollback_err) => {
+                                            tracing::error!("stt: rollback failed: {}", rollback_err);
+                                        }
+                                    }
+
+                                    let _ = bus.broadcast(Event::Speech(SpeechEvent::SttBackendSwitchFailed {
+                                        backend: backend.clone(),
+                                        reason: e.to_string(),
+                                    })).await;
+                                }
+                            }
+
+                            // Clear switching flag to resume audio processing
+                            self.backend_switching = false;
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => {
@@ -948,10 +1052,12 @@ impl Actor for SttActor {
                         std::future::pending().await
                     }
                 } => {
-                    // Skip always-on processing while listen mode is active or speech loop is disabled.
-                    // Listen mode dispatches its own audio via listen_audio_rx.
+                    // Skip always-on processing while listen mode is active, speech loop is disabled,
+                    // or backend switch is in progress.
                     if let Some(buffer) = audio_buffer {
-                        if !self.listen_mode_active && self.speech_loop_enabled {
+                        if self.backend_switching {
+                            tracing::debug!("skipping audio during backend switch");
+                        } else if !self.listen_mode_active && self.speech_loop_enabled {
                             self.handle_audio_buffer(buffer, &bus).await;
                         }
                     }
@@ -964,8 +1070,13 @@ impl Actor for SttActor {
                     }
                 } => {
                     // Listen mode is independent of speech_loop_enabled (explicit user request)
+                    // but is paused during backend switch.
                     if let (Some(buffer), Some(session_id)) = (listen_buffer, self.listen_session_id) {
-                        self.handle_listen_audio_buffer(buffer, session_id, &bus).await;
+                        if self.backend_switching {
+                            tracing::debug!("skipping listen audio during backend switch");
+                        } else {
+                            self.handle_listen_audio_buffer(buffer, session_id, &bus).await;
+                        }
                     }
                 }
             }
