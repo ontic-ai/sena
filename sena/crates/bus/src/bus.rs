@@ -95,15 +95,51 @@ impl EventBus {
     pub async fn broadcast(&self, event: Event) -> Result<(), BusError> {
         let causal_id = event.causal_id();
         let event_type = match &event {
-            Event::System(e) => format!("System::{:?}", e).split('(').next().unwrap_or("System").to_string(),
-            Event::Platform(e) => format!("Platform::{:?}", e).split('(').next().unwrap_or("Platform").to_string(),
-            Event::CTP(e) => format!("CTP::{:?}", e).split('(').next().unwrap_or("CTP").to_string(),
-            Event::Inference(e) => format!("Inference::{:?}", e).split('(').next().unwrap_or("Inference").to_string(),
-            Event::Memory(e) => format!("Memory::{:?}", e).split('(').next().unwrap_or("Memory").to_string(),
-            Event::Soul(e) => format!("Soul::{:?}", e).split('(').next().unwrap_or("Soul").to_string(),
-            Event::Speech(e) => format!("Speech::{:?}", e).split('(').next().unwrap_or("Speech").to_string(),
-            Event::Model(e) => format!("Model::{:?}", e).split('(').next().unwrap_or("Model").to_string(),
-            Event::Telemetry(e) => format!("Telemetry::{:?}", e).split('(').next().unwrap_or("Telemetry").to_string(),
+            Event::System(e) => format!("System::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("System")
+                .to_string(),
+            Event::Platform(e) => format!("Platform::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Platform")
+                .to_string(),
+            Event::CTP(e) => format!("CTP::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("CTP")
+                .to_string(),
+            Event::Inference(e) => format!("Inference::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Inference")
+                .to_string(),
+            Event::Memory(e) => format!("Memory::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Memory")
+                .to_string(),
+            Event::Soul(e) => format!("Soul::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Soul")
+                .to_string(),
+            Event::Speech(e) => format!("Speech::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Speech")
+                .to_string(),
+            Event::Model(e) => format!("Model::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Model")
+                .to_string(),
+            Event::Telemetry(e) => format!("Telemetry::{:?}", e)
+                .split('(')
+                .next()
+                .unwrap_or("Telemetry")
+                .to_string(),
         };
 
         if let Some(cid) = causal_id {
@@ -171,7 +207,9 @@ mod tests {
         let mut rx2 = bus.subscribe_broadcast();
 
         let event = Event::System(SystemEvent::BootComplete);
-        bus.broadcast(event.clone()).await.expect("broadcast failed");
+        bus.broadcast(event.clone())
+            .await
+            .expect("broadcast failed");
 
         assert!(rx1.recv().await.is_ok());
         assert!(rx2.recv().await.is_ok());
@@ -196,7 +234,8 @@ mod tests {
         let bus = EventBus::new();
         let (tx, mut rx) = mpsc::channel(16);
 
-        bus.register_directed("test_actor", tx).expect("registration failed");
+        bus.register_directed("test_actor", tx)
+            .expect("registration failed");
 
         let event = Event::System(SystemEvent::BootComplete);
         bus.send_directed("test_actor", event)

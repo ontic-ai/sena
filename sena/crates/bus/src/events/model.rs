@@ -4,10 +4,7 @@
 #[derive(Debug, Clone)]
 pub enum ModelEvent {
     /// A model was discovered during scanning.
-    ModelDiscovered {
-        model_name: String,
-        path: String,
-    },
+    ModelDiscovered { model_name: String, path: String },
 
     /// Model registry built successfully.
     RegistryBuilt {
@@ -16,25 +13,16 @@ pub enum ModelEvent {
     },
 
     /// Model discovery failed.
-    DiscoveryFailed {
-        reason: String,
-    },
+    DiscoveryFailed { reason: String },
 
     /// Request to switch to a different model.
-    SwitchRequested {
-        model_name: String,
-    },
+    SwitchRequested { model_name: String },
 
     /// Model switch completed successfully.
-    SwitchCompleted {
-        model_name: String,
-    },
+    SwitchCompleted { model_name: String },
 
     /// Model switch failed.
-    SwitchFailed {
-        model_name: String,
-        reason: String,
-    },
+    SwitchFailed { model_name: String, reason: String },
 }
 
 #[cfg(test)]

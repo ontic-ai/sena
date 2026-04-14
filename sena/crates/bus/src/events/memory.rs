@@ -113,10 +113,7 @@ impl std::fmt::Debug for MemoryEvent {
                 .field("limit", limit)
                 .field("causal_id", causal_id)
                 .finish(),
-            Self::QueryCompleted {
-                chunks,
-                causal_id,
-            } => f
+            Self::QueryCompleted { chunks, causal_id } => f
                 .debug_struct("QueryCompleted")
                 .field("chunks", chunks)
                 .field("causal_id", causal_id)
