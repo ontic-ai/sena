@@ -1,0 +1,25 @@
+[package]
+name = "runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace crates
+bus = { path = "../bus" }
+soul = { path = "../soul" }
+memory = { path = "../memory" }
+platform = { path = "../platform" }
+ctp = { path = "../ctp" }
+inference = { path = "../inference" }
+speech = { path = "../speech" }
+prompt = { path = "../prompt" }
+crypto = { path = "../crypto" }
+
+# External dependencies
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
