@@ -402,6 +402,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: std::time::Instant::now(),
+            soul_identity_signal: None,
         };
 
         let resp = ObservationResponse { snapshot };
@@ -436,6 +437,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: std::time::Instant::now(),
+            soul_identity_signal: None,
         };
 
         let resp = ObservationResponse { snapshot };

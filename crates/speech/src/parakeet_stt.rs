@@ -52,17 +52,12 @@ impl ParakeetStt {
         }
         tracing::debug!("parakeet: decoding {} samples", audio.len());
 
-        // transcribe() expects f32 samples and reset_on_eou flag.
-        // false = do not reset decoder state on EOU token, keep streaming.
         let text = self
             .model
             .transcribe(audio, false)
             .map_err(|e| SpeechError::TranscriptionFailed(format!("parakeet decode: {}", e)))?;
 
-        if !text.trim().is_empty() {
-            tracing::debug!("parakeet: transcribed \"{}\"", text.trim());
-        }
-
+        tracing::debug!("parakeet: decoded token: {:?}", text.trim());
         Ok(text)
     }
 

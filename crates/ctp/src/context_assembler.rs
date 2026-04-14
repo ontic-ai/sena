@@ -100,6 +100,8 @@ impl ContextAssembler {
             user_state: None,
             visual_context,
             timestamp: now,
+            // Preserve cached identity signal from previous snapshot until a new one arrives.
+            soul_identity_signal: previous_snapshot.and_then(|s| s.soul_identity_signal.clone()),
         }
     }
 }

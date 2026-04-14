@@ -103,12 +103,19 @@ pub enum SpeechEvent {
     ///
     /// May be emitted multiple times per utterance:
     /// - `is_final = false`: partial, may be superseded by the next emission.
-    /// - `is_final = true`: confirmed utterance after silence detected.
+    /// - `is_final = true`: confirmed utterance after silence detected or EOU token.
+    /// - `is_new_sentence = true`: first token after a long inactivity gap (≥ 2s with
+    ///   no tokens from the backend), signalling a new logical sentence. The previous
+    ///   in-progress partial should be committed and a new row started. Only meaningful
+    ///   when `is_final = false`.
     ListenModeTranscription {
         /// Transcribed text.
         text: String,
-        /// True when silence detected and this utterance is complete.
+        /// True when silence detected or EOU token fired — utterance is complete.
         is_final: bool,
+        /// True when this partial begins a new sentence after a long inactivity gap.
+        /// Signals the UI to commit the previous row and start a new one.
+        is_new_sentence: bool,
         /// Confidence score [0.0, 1.0].
         confidence: f32,
         /// Session ID from the originating `ListenModeRequested`.
@@ -124,6 +131,17 @@ pub enum SpeechEvent {
     /// Continuous listen session stopped cleanly.
     ListenModeStopped {
         /// Session ID that was stopped.
+        session_id: u64,
+    },
+
+    /// LLM-refined version of a committed listen-mode transcript.
+    ///
+    /// Emitted by InferenceActor after it cleans a `ListenModeTranscription { is_final: true }`
+    /// result. The CLI uses this to silently replace the raw committed green row with cleaner text.
+    TranscriptRefined {
+        /// The LLM-corrected transcript.
+        cleaned_text: String,
+        /// Session ID from the originating `ListenModeTranscription`.
         session_id: u64,
     },
 
@@ -323,6 +341,25 @@ mod tests {
             assert_eq!(request_id, 42);
         } else {
             panic!("Expected SttTelemetryUpdate variant");
+        }
+    }
+
+    #[test]
+    fn transcript_refined_constructs_and_clones() {
+        let event = SpeechEvent::TranscriptRefined {
+            cleaned_text: "Hello, world.".to_string(),
+            session_id: 123,
+        };
+        let cloned = event.clone();
+        if let SpeechEvent::TranscriptRefined {
+            cleaned_text,
+            session_id,
+        } = cloned
+        {
+            assert_eq!(cleaned_text, "Hello, world.");
+            assert_eq!(session_id, 123);
+        } else {
+            panic!("Expected TranscriptRefined variant");
         }
     }
 

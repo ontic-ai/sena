@@ -8,8 +8,10 @@ use bus::events::ctp::ContextSnapshot;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
+use bus::events::inference::InferenceEvent;
 use bus::events::memory::{ContextMemoryQueryRequest, MemoryEvent};
 use bus::events::platform_vision::{PlatformVisionEvent, ScreenCaptureEvent};
+use bus::events::soul::{DistilledIdentitySignal, SoulEvent, TemporalBehaviorPattern};
 use bus::events::transparency::TransparencyQuery;
 use bus::events::{CTPEvent, PlatformEvent, SystemEvent, TransparencyEvent};
 use bus::{Actor, ActorError, Event, EventBus};
@@ -46,6 +48,12 @@ pub struct CTPActor {
     /// Cached memory relevance score from most recent ContextQueryCompleted.
     /// Used for trigger gate evaluation on each tick.
     cached_memory_relevance: f64,
+    /// Latest distilled identity signal received from Soul actor.
+    /// Forwarded into ContextSnapshot.soul_identity_signal on each tick.
+    latest_identity_signal: Option<DistilledIdentitySignal>,
+    /// Latest temporal behavior pattern received from Soul actor.
+    /// Stored for Phase 8 ARI (usage pattern awareness).
+    latest_temporal_pattern: Option<TemporalBehaviorPattern>,
 }
 
 impl CTPActor {
@@ -76,6 +84,8 @@ impl CTPActor {
             boot_complete: false,
             loop_enabled: true,
             cached_memory_relevance: 0.0,
+            latest_identity_signal: None,
+            latest_temporal_pattern: None,
         }
     }
 
@@ -177,6 +187,37 @@ impl Actor for CTPActor {
                                             response.relevance_score
                                         );
                                     }
+                                }
+                                // Soul intelligence: store distilled identity signal for snapshot population.
+                                Event::Soul(SoulEvent::IdentitySignalDistilled(signal)) => {
+                                    tracing::debug!(
+                                        "CTP: received identity signal '{}' = '{}' (confidence {:.2})",
+                                        signal.signal_key, signal.signal_value, signal.confidence
+                                    );
+                                    self.latest_identity_signal = Some(signal);
+                                }
+                                // Soul intelligence: store temporal pattern for Phase 8 ARI.
+                                Event::Soul(SoulEvent::TemporalPatternDetected(pattern)) => {
+                                    tracing::debug!(
+                                        "CTP: received temporal pattern '{}' (freq={}, hour={:?}, day={:?})",
+                                        pattern.behavior_category,
+                                        pattern.frequency,
+                                        pattern.hour_of_day,
+                                        pattern.day_of_week
+                                    );
+                                    self.latest_temporal_pattern = Some(pattern);
+                                }
+                                // Inference settled: log for future in-flight guard (Phase 8).
+                                Event::Inference(InferenceEvent::InferenceRoundCompleted {
+                                    request_id,
+                                    round,
+                                    total_rounds,
+                                    ..
+                                }) => {
+                                    tracing::debug!(
+                                        "CTP: inference round {}/{} completed for request {}",
+                                        round, total_rounds, request_id
+                                    );
                                 }
                                 // Handle shutdown signal
                                 Event::System(SystemEvent::ShutdownSignal) => {
@@ -280,11 +321,15 @@ impl Actor for CTPActor {
 impl CTPActor {
     fn refresh_snapshot(&mut self) -> ContextSnapshot {
         self.buffer.prune();
-        let snapshot = self.assembler.assemble_with_previous(
+        let mut snapshot = self.assembler.assemble_with_previous(
             &self.buffer,
             self.session_start,
             self.latest_snapshot.as_ref(),
         );
+        // Inject latest identity signal from Soul so it flows into every ContextSnapshot.
+        if self.latest_identity_signal.is_some() {
+            snapshot.soul_identity_signal = self.latest_identity_signal.clone();
+        }
         self.latest_snapshot = Some(snapshot.clone());
         snapshot
     }

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use speech::SttBackend;
+use speech::SttBackendKind;
 
 /// Configuration for Sena runtime and subsystems.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,7 +247,7 @@ pub struct SenaConfig {
     /// Options: "whisper", "sherpa", "parakeet", "mock"
     /// Default: "whisper"
     #[serde(default = "default_stt_backend")]
-    pub stt_backend: SttBackend,
+    pub stt_backend: SttBackendKind,
 }
 
 /// Configuration for the streaming inference pipeline.
@@ -442,8 +442,8 @@ fn default_file_watch_exclude_patterns() -> Vec<String> {
         vec![".git".to_string(), "node_modules".to_string()]
     }
 }
-fn default_stt_backend() -> SttBackend {
-    SttBackend::Whisper
+fn default_stt_backend() -> SttBackendKind {
+    SttBackendKind::Whisper
 }
 
 /// Configuration-related errors.
@@ -625,10 +625,10 @@ pub async fn apply_config_set(key: &str, value: &str) -> Result<(), String> {
         }
         "stt_backend" => {
             let backend = match value.to_lowercase().as_str() {
-                "whisper" => SttBackend::Whisper,
-                "sherpa" => SttBackend::Sherpa,
-                "parakeet" => SttBackend::Parakeet,
-                "mock" => SttBackend::Mock,
+                "whisper" => SttBackendKind::Whisper,
+                "sherpa" => SttBackendKind::Sherpa,
+                "parakeet" => SttBackendKind::Parakeet,
+                "mock" => SttBackendKind::Mock,
                 _ => return Err("expected one of: whisper, sherpa, parakeet, mock".to_string()),
             };
             config.stt_backend = backend;

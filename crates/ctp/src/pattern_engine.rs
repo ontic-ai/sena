@@ -326,6 +326,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
+            soul_identity_signal: None,
         }
     }
 

@@ -18,6 +18,7 @@ pub mod onboarding;
 mod parakeet_stt;
 mod sherpa_stt;
 mod silence_detector;
+pub mod stt;
 pub mod stt_actor;
 pub mod telemetry;
 pub mod tts_actor;
@@ -27,6 +28,7 @@ pub use audio_input::list_input_devices;
 pub use error::SpeechError;
 pub use parakeet_stt::ParakeetStt;
 pub use sherpa_stt::SherpaZipformerStt;
+pub use stt::SttBackend;
 pub use stt_actor::SttActor;
 pub use telemetry::log_stt_telemetry;
 pub use tts_actor::TtsActor;
@@ -45,10 +47,13 @@ pub struct AudioBuffer {
     pub channels: u16,
 }
 
-/// STT backend selection.
+/// STT backend kind — used for config and variant selection at construction time.
+///
+/// This enum is configuration-only. After `build_stt_backend()` constructs the
+/// concrete `Box<dyn SttBackend>`, the actor never matches on this enum again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum SttBackend {
+pub enum SttBackendKind {
     /// Whisper via candle (STT).
     Whisper,
     /// Sherpa-onnx Zipformer streaming STT (ONNX, <600MB VRAM).

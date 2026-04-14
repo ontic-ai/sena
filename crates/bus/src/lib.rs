@@ -48,6 +48,7 @@ mod integration_tests {
             user_state: None,
             visual_context: None,
             timestamp: now,
+            soul_identity_signal: None,
         }
     }
 

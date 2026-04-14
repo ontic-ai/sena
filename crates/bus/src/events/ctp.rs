@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::platform::{FileEvent, KeystrokeCadence, WindowContext};
 use super::platform_vision::ImageDigest;
+use super::soul::DistilledIdentitySignal;
 
 /// Type alias for active application context.
 /// Re-uses WindowContext from platform module.
@@ -109,6 +110,9 @@ pub struct ContextSnapshot {
     pub visual_context: Option<VisualContext>,
     /// When this snapshot was captured.
     pub timestamp: Instant,
+    /// Latest distilled identity signal from Soul, if received.
+    /// Populated by CTP actor when Soul emits IdentitySignalDistilled.
+    pub soul_identity_signal: Option<DistilledIdentitySignal>,
 }
 
 /// CTP-layer events.
@@ -182,6 +186,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: now,
+            soul_identity_signal: None,
         };
 
         // Verify construction
@@ -224,6 +229,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: now,
+            soul_identity_signal: None,
         };
 
         let cloned = snapshot.clone();
@@ -305,6 +311,7 @@ mod tests {
             user_state: None,
             visual_context: None,
             timestamp: now,
+            soul_identity_signal: None,
         }
     }
 }
