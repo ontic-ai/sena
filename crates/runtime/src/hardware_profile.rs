@@ -157,6 +157,98 @@ fn detect_vram() -> (u64, bool, bool) {
     (0, false, false)
 }
 
+/// Poll current GPU VRAM usage. Returns (used_mb, total_mb).
+/// Both are 0 if no GPU detected or profiling failed.
+///
+/// This is a **blocking call** \u2014 wrap in `spawn_blocking`.
+pub fn poll_vram_usage() -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    {
+        poll_vram_usage_macos()
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        poll_vram_usage_windows()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        poll_vram_usage_linux()
+    }
+}
+
+/// Poll VRAM usage on macOS. Returns (used_mb, total_mb).
+/// macOS does not provide a reliable way to get used VRAM, so we return (0, total).
+#[cfg(target_os = "macos")]
+fn poll_vram_usage_macos() -> (u64, u64) {
+    let (total, _, _) = detect_vram();
+    // TODO M1.5: macOS does not expose used VRAM via ioreg. Return 0 for now.
+    (0, total)
+}
+
+/// Poll VRAM usage on Windows using nvidia-smi. Returns (used_mb, total_mb).
+#[cfg(target_os = "windows")]
+fn poll_vram_usage_windows() -> (u64, u64) {
+    use std::process::Command;
+
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let parts: Vec<&str> = first_line.split(',').map(|s| s.trim()).collect();
+                if parts.len() == 2 {
+                    if let (Ok(used), Ok(total)) =
+                        (parts[0].parse::<u64>(), parts[1].parse::<u64>())
+                    {
+                        return (used, total);
+                    }
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
+/// Poll VRAM usage on Linux using nvidia-smi. Returns (used_mb, total_mb).
+#[cfg(target_os = "linux")]
+fn poll_vram_usage_linux() -> (u64, u64) {
+    use std::process::Command;
+
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let parts: Vec<&str> = first_line.split(',').map(|s| s.trim()).collect();
+                if parts.len() == 2 {
+                    if let (Ok(used), Ok(total)) =
+                        (parts[0].parse::<u64>(), parts[1].parse::<u64>())
+                    {
+                        return (used, total);
+                    }
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

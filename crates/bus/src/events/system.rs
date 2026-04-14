@@ -105,6 +105,13 @@ pub enum SystemEvent {
         /// Current state after the change.
         enabled: bool,
     },
+    /// Real-time VRAM usage telemetry from the vram_monitor background loop.
+    VramUsageUpdated {
+        /// Total GPU VRAM in megabytes. 0 if no GPU detected.
+        total_mb: u64,
+        /// Currently used VRAM in megabytes.
+        used_mb: u64,
+    },
 }
 
 #[cfg(test)]
@@ -193,6 +200,21 @@ mod tests {
     fn types_are_send() {
         assert_send::<SystemEvent>();
         assert_send::<ActorFailureInfo>();
+    }
+
+    #[test]
+    fn vram_usage_updated_constructs_and_clones() {
+        let event = SystemEvent::VramUsageUpdated {
+            total_mb: 8192,
+            used_mb: 3200,
+        };
+        let cloned = event.clone();
+        if let SystemEvent::VramUsageUpdated { total_mb, used_mb } = cloned {
+            assert_eq!(total_mb, 8192);
+            assert_eq!(used_mb, 3200);
+        } else {
+            panic!("Expected VramUsageUpdated variant");
+        }
     }
 
     #[test]

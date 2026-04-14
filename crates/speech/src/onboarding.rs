@@ -1,16 +1,19 @@
 //! Speech onboarding flow.
 //!
 //! This module handles first-time speech setup: checking for required models,
-//! triggering downloads, verifying audio devices, and reporting status via bus events.
+//! verifying audio devices, and reporting status via bus events.
+//!
+//! NOTE: This module does NOT download models. Downloads are handled by the
+//! runtime's DownloadManager. This module only checks if models exist.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use bus::{DownloadEvent, Event, EventBus, SpeechEvent};
 use cpal::traits::HostTrait;
 
-use crate::download::{DownloadClient, ModelCache, ModelManifest};
 use crate::error::SpeechError;
+use crate::models::{ModelCache, ModelManifest};
+
+pub use crate::models::ModelInfo;
 
 /// Check if speech onboarding is needed (any required models missing).
 pub async fn speech_onboarding_needed(model_dir: &Path) -> bool {
@@ -22,98 +25,39 @@ pub async fn speech_onboarding_needed(model_dir: &Path) -> bool {
     false
 }
 
-/// Run the speech onboarding flow: download missing models, verify audio devices.
+/// Check if a single model is cached.
+pub async fn check_model_cached(model_dir: &Path, model: &ModelInfo) -> bool {
+    ModelCache::is_cached(model_dir, model).await
+}
+
+/// Check if required speech models are available and verify audio devices.
 ///
-/// Emits bus events for progress tracking:
-/// - SpeechOnboardingStarted
-/// - ModelDownloadStarted/Progress/Completed/Failed (per model)
-/// - SpeechOnboardingCompleted { models_downloaded }
-/// - SpeechOnboardingFailed { reason, recoverable }
-pub async fn run_speech_onboarding(
-    bus: &Arc<EventBus>,
-    model_dir: &Path,
-) -> Result<Vec<String>, SpeechError> {
-    // Emit onboarding started
-    let _ = bus
-        .broadcast(Event::Speech(SpeechEvent::SpeechOnboardingStarted))
-        .await;
-
-    // Create model directory if missing
-    tokio::fs::create_dir_all(model_dir)
-        .await
-        .map_err(|e| SpeechError::DownloadFailed(format!("cannot create model dir: {e}")))?;
-
-    let client = DownloadClient::new()?;
-    let mut downloaded = Vec::new();
-    let mut request_id = 9000u64; // onboarding request IDs
-
-    for model in ModelManifest::all_models() {
-        if ModelCache::is_cached(model_dir, &model).await {
-            continue; // already cached, skip
-        }
-
-        request_id += 1;
-        match client
-            .download_model(bus, model_dir, &model, request_id)
-            .await
-        {
-            Ok(_path) => {
-                downloaded.push(model.name.clone());
-            }
-            Err(e) => {
-                // Non-critical: if one model fails, continue with others
-                // The specific Failed event was already emitted by download_model
-                // Log but continue
-                let _ = bus
-                    .broadcast(Event::Download(DownloadEvent::Failed {
-                        model_name: model.name.clone(),
-                        reason: e.to_string(),
-                        request_id,
-                    }))
-                    .await;
-            }
-        }
-    }
-
+/// NOTE: This function does NOT download models. It only checks if they exist.
+/// Model downloads are handled by the runtime's DownloadManager.
+///
+/// Returns list of missing model names if any models are not cached.
+pub async fn check_speech_models(model_dir: &Path) -> Result<Vec<String>, SpeechError> {
     // Verify audio devices (non-blocking check)
     let _has_input = check_audio_input_device();
     let _has_output = check_audio_output_device();
 
-    // After download loop, verify required models are cached
-    let whisper_cached =
-        ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en_safetensors()).await;
+    // Check required models are cached
+    let whisper_cached = ModelCache::is_cached(model_dir, &ModelManifest::whisper_base_en()).await;
     let piper_cached = ModelCache::is_cached(model_dir, &ModelManifest::piper_voice()).await;
 
-    // At minimum, TTS (Piper) is required. STT (Whisper) is required if voice input is desired.
-    // For Phase 5, both are considered required.
-    if !whisper_cached || !piper_cached {
-        let mut missing = Vec::new();
-        if !whisper_cached {
-            missing.push("whisper-base-en");
-        }
-        if !piper_cached {
-            missing.push("piper-en-us-lessac-medium");
-        }
-        let reason = format!(
-            "Required speech models still missing after onboarding: {}",
-            missing.join(", ")
-        );
-        let _ = bus
-            .broadcast(Event::Speech(SpeechEvent::SpeechOnboardingFailed {
-                reason: reason.clone(),
-                recoverable: true,
-            }))
-            .await;
-        return Err(SpeechError::DownloadFailed(reason));
+    let mut missing = Vec::new();
+    if !whisper_cached {
+        missing.push("whisper-base-en-ggml".to_string());
+    }
+    if !piper_cached {
+        missing.push("piper-en-us-lessac-medium".to_string());
     }
 
-    let _ = bus
-        .broadcast(Event::Speech(SpeechEvent::SpeechOnboardingCompleted {
-            models_downloaded: downloaded.clone(),
-        }))
-        .await;
+    if !missing.is_empty() {
+        tracing::warn!("speech models missing: {:?}", missing);
+    }
 
-    Ok(downloaded)
+    Ok(missing)
 }
 
 /// Check if an audio input device (microphone) is available.
@@ -161,5 +105,42 @@ mod tests {
     fn check_audio_output_device_does_not_crash() {
         // Just verify the function doesn't panic
         let _result = check_audio_output_device();
+    }
+
+    #[tokio::test]
+    async fn check_speech_models_returns_missing_when_models_not_cached() {
+        let temp_dir = tempdir().expect("tempdir creation");
+        let model_dir = temp_dir.path();
+
+        let missing = check_speech_models(model_dir)
+            .await
+            .expect("check succeeded");
+        assert!(!missing.is_empty());
+        assert!(missing.contains(&"whisper-base-en-ggml".to_string()));
+        assert!(missing.contains(&"piper-en-us-lessac-medium".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_model_cached_returns_false_when_model_missing() {
+        let temp_dir = tempdir().expect("tempdir creation");
+        let model_dir = temp_dir.path();
+        let model = ModelManifest::whisper_base_en();
+
+        // Model not cached → returns false
+        assert!(!check_model_cached(model_dir, &model).await);
+    }
+
+    #[tokio::test]
+    async fn check_model_cached_returns_true_when_model_exists() {
+        let temp_dir = tempdir().expect("tempdir creation");
+        let model_dir = temp_dir.path();
+        let model = ModelManifest::whisper_base_en();
+
+        // Create the model file
+        let model_path = ModelCache::cached_path(model_dir, &model);
+        std::fs::write(&model_path, b"dummy model data").expect("write model file");
+
+        // Model cached → returns true
+        assert!(check_model_cached(model_dir, &model).await);
     }
 }

@@ -20,6 +20,7 @@ pub mod tray;
 
 pub use boot::{boot, BootError, Runtime};
 pub use config::{save_config, ConfigError, SenaConfig};
+pub use download_manager::ModelManifest;
 pub use inference::suppress_llama_logs;
 pub use models::{discover_models, ollama_models_dir, InferenceError, ModelRegistry};
 pub use registry::ActorRegistry;

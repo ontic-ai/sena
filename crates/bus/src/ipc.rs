@@ -74,6 +74,14 @@ pub enum IpcPayload {
         enabled: bool,
     },
 
+    /// Daemon → CLI: real-time VRAM usage update.
+    VramStatusUpdate {
+        /// Total GPU VRAM in megabytes.
+        total_mb: u64,
+        /// Currently used VRAM in megabytes.
+        used_mb: u64,
+    },
+
     /// CLI → Daemon: request graceful shutdown.
     /// Only sent by a CLI instance that auto-started the daemon (tracked by `cli_started_daemon`).
     /// Must NOT be sent when connecting to a pre-existing daemon.

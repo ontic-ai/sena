@@ -577,6 +577,8 @@ async fn speech_to_inference_to_tts_completes() {
         text: "What is Rust?".to_string(),
         confidence: 0.9,
         request_id: 1,
+        words: vec![],
+        average_confidence: 0.9,
     })).await.unwrap();
     
     // Wait for InferenceCompleted

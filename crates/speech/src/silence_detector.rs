@@ -50,6 +50,11 @@ impl SilenceDetector {
         let now = Instant::now();
         let chunk_duration = samples.len() as f32 / (sample_rate as f32 * channels as f32);
 
+        tracing::debug!(
+            "vad: rms={:.4}, threshold={:.4}, is_voice={}, speech_started={}, total_voice_secs={:.2}, chunk_dur={:.2}s",
+            rms, self.energy_threshold, is_voice, self.speech_started, self.total_voice_duration_secs, chunk_duration
+        );
+
         if is_voice {
             if !self.speech_started {
                 self.speech_started = true;
@@ -67,6 +72,11 @@ impl SilenceDetector {
                     && !self.accumulated_samples.is_empty()
                     && self.total_voice_duration_secs >= self.min_speech_duration_secs
                 {
+                    tracing::info!(
+                        "vad: speech complete! {} samples ready for transcription (voice_dur={:.2}s, silence={:.2}s)",
+                        self.accumulated_samples.len(), self.total_voice_duration_secs, silence_secs
+                    );
+
                     let buffer = crate::AudioBuffer {
                         samples: self.accumulated_samples.clone(),
                         sample_rate,
