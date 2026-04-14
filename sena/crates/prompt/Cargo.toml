@@ -1,0 +1,29 @@
+[package]
+name = "prompt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Event bus for typed events
+bus = { path = "../bus" }
+
+# Memory for retrieval context
+memory = { path = "../memory" }
+
+# Soul for persona and identity context
+soul = { path = "../soul" }
+
+# CTP for context snapshots
+ctp = { path = "../ctp" }
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Serialization (for PromptTrace, Provenance)
+serde.workspace = true
