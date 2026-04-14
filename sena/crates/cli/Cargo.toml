@@ -1,0 +1,21 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sena"
+path = "src/main.rs"
+
+[dependencies]
+bus = { path = "../bus" }
+runtime = { path = "../runtime" }
+
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+ratatui.workspace = true
