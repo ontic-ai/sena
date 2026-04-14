@@ -1,0 +1,16 @@
+[package]
+name = "memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+soul = { path = "../soul" }
+crypto = { path = "../crypto" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
