@@ -172,6 +172,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         category: CommandCategory::System,
     },
     SlashCommand {
+        command: "/export",
+        description: "Request Soul export (/export [path])",
+        category: CommandCategory::System,
+    },
+    SlashCommand {
         command: "/help",
         description: "Show all commands",
         category: CommandCategory::System,
@@ -303,6 +308,9 @@ struct Shell {
     voice_enabled: bool,
     /// Last emitted download-progress bucket (0..=10) keyed by request ID.
     download_progress: HashMap<u64, u64>,
+    /// Maps session_id → message index for pending LLM transcript refinements.
+    /// Cleared when TranscriptRefined arrives or when the entry count exceeds the cap.
+    pending_refinements: HashMap<u64, usize>,
 }
 
 impl Shell {
@@ -329,6 +337,7 @@ impl Shell {
             runtime,
             voice_enabled,
             download_progress: HashMap::new(),
+            pending_refinements: HashMap::new(),
         }
     }
 
@@ -1253,6 +1262,7 @@ impl Shell {
             Event::Speech(SpeechEvent::ListenModeTranscription {
                 text,
                 is_final,
+                is_new_sentence,
                 confidence,
                 session_id,
             }) if session_id == self.state.listen_session_id => {
@@ -1262,15 +1272,41 @@ impl Shell {
                         format!("[listen ~{:.0}%] {}", confidence * 100.0, text),
                     );
                 } else if is_final {
-                    // Committed utterance: replace any in-flight interim line with the final.
+                    // VAD flush commit: turn gray row green.
                     if let Some(last) = self.state.messages.last() {
                         if last.role == MessageRole::System && last.text.starts_with("[\u{2026}] ") {
                             self.state.messages.pop();
                         }
                     }
                     self.add_message(MessageRole::Sena, text);
+                    // Record the message index for LLM refinement replacement.
+                    let msg_idx = self.state.messages.len() - 1;
+                    // Cap to prevent unbounded growth when model is never loaded.
+                    const MAX_PENDING_REFINEMENTS: usize = 20;
+                    if self.pending_refinements.len() >= MAX_PENDING_REFINEMENTS {
+                        if let Some(&oldest) = self.pending_refinements.keys().min() {
+                            self.pending_refinements.remove(&oldest);
+                        }
+                    }
+                    self.pending_refinements.insert(session_id, msg_idx);
+                } else if is_new_sentence {
+                    // Long inactivity gap: commit the in-progress gray row as green,
+                    // then start a new gray row with the first token of the new sentence.
+                    let prefix = "[\u{2026}] ";
+                    if let Some(last) = self.state.messages.last() {
+                        if last.role == MessageRole::System && last.text.starts_with(prefix) {
+                            let committed = last.text[prefix.len()..].to_string();
+                            let idx = self.state.messages.len() - 1;
+                            self.state.messages[idx].role = MessageRole::Sena;
+                            self.state.messages[idx].text = committed;
+                        }
+                    }
+                    // Start a fresh gray streaming row for the new sentence.
+                    self.state
+                        .messages
+                        .push(Message::new(MessageRole::System, format!("{}{}", prefix, text)));
                 } else {
-                    // Streaming interim update — replace in-place, do not flood the log.
+                    // Streaming partial — replace in-place.
                     self.update_or_add_streaming(text);
                 }
             }
@@ -1282,6 +1318,18 @@ impl Shell {
                         MessageRole::System,
                         format!("[verbose] Loop {}: {}", loop_name, status),
                     );
+                }
+            }
+            Event::Speech(SpeechEvent::TranscriptRefined {
+                cleaned_text,
+                session_id,
+            }) => {
+                if let Some(idx) = self.pending_refinements.remove(&session_id) {
+                    if let Some(msg) = self.state.messages.get_mut(idx) {
+                        if msg.role == MessageRole::Sena {
+                            msg.text = cleaned_text;
+                        }
+                    }
                 }
             }
             Event::Speech(SpeechEvent::ListenModeStopped { session_id })
@@ -1596,6 +1644,7 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
         return Ok(DispatchResult::Continue);
     }
 
+    let parts: Vec<&str> = line.split_whitespace().collect();
     let lower = line.to_lowercase();
     let cmd = lower.split_whitespace().next().unwrap_or("");
     match cmd {
@@ -1807,6 +1856,26 @@ async fn dispatch_command<T: MessageTransport + ?Sized>(
             show_status_shared(deps.runtime, deps.state).await;
             Ok(DispatchResult::Continue)
         }
+        "/export" => {
+            let path = parts
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("sena-soul-export.json"));
+            transport
+                .send(
+                    target,
+                    Event::Soul(bus::events::soul::SoulEvent::ExportRequested {
+                        path: path.clone(),
+                    }),
+                )
+                .await?;
+            add_message(
+                deps.state,
+                MessageRole::System,
+                &format!("Requested Soul export to {}", path.display()),
+            );
+            Ok(DispatchResult::Continue)
+        }
         "/help" | "/h" => {
             show_help_shared(deps.state);
             Ok(DispatchResult::Continue)
@@ -1897,6 +1966,11 @@ fn event_to_ipc_payload(event: &Event) -> Result<IpcPayload> {
         Event::Speech(SpeechEvent::SttBackendSwitchRequested { backend }) => {
             Ok(IpcPayload::SlashCommand {
                 line: format!("/stt-backend {}", backend),
+            })
+        }
+        Event::Soul(bus::events::soul::SoulEvent::ExportRequested { path }) => {
+            Ok(IpcPayload::SlashCommand {
+                line: format!("/export {}", path.display()),
             })
         }
         Event::System(bus::events::SystemEvent::ShutdownSignal) => {

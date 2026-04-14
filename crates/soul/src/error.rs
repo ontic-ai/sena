@@ -5,6 +5,9 @@ pub enum SoulError {
     #[error("database error: {0}")]
     Database(String),
 
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+
     #[error("encryption error: {0}")]
     Encryption(#[from] CryptoError),
 

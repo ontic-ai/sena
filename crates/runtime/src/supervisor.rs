@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use bus::{Event, InferenceEvent, SystemEvent};
+use bus::{Event, InferenceEvent, MemoryEvent, SpeechEvent, SystemEvent};
 
 use crate::analytics::TokenTuner;
 use crate::boot::{BootError, Runtime};
@@ -210,6 +210,29 @@ pub async fn supervision_loop(runtime: Runtime) -> Result<(), crate::shutdown::S
                                 }
                             }
                         }
+                    }
+                    Ok(Event::Speech(SpeechEvent::SttTelemetryUpdate {
+                        backend,
+                        vram_mb,
+                        latency_ms,
+                        avg_confidence,
+                        request_id,
+                    })) => {
+                        tracing::debug!(
+                            "runtime: stt telemetry backend={} request_id={} vram_mb={:?} latency_ms={:.2} avg_confidence={:.3}",
+                            backend,
+                            request_id,
+                            vram_mb,
+                            latency_ms,
+                            avg_confidence
+                        );
+                    }
+                    Ok(Event::Memory(MemoryEvent::SemanticIngestComplete(evt))) => {
+                        tracing::debug!(
+                            "runtime: semantic ingest complete node_id={} request_id={}",
+                            evt.node_id,
+                            evt.request_id
+                        );
                     }
                     Ok(Event::System(SystemEvent::ActorFailed(info))) => {
                         let count = failure_counts.entry(info.actor_name).or_insert(0);

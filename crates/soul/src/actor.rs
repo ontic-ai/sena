@@ -525,6 +525,11 @@ impl SoulActor {
         Ok(())
     }
 
+    fn handle_export_requested(&mut self, _path: std::path::PathBuf) -> Result<(), SoulError> {
+        // TODO: implement export logic.
+        Err(SoulError::NotImplemented("export".into()))
+    }
+
     /// Periodically harvest distilled signals and preferences.
     ///
     /// Called after every N absorbed events or explicitly after preference updates.
@@ -820,16 +825,12 @@ impl Actor for SoulActor {
                                     let _ = self.handle_rich_summary_requested(token_budget, request_id, &bus);
                                 }
                                 SoulEvent::PreferenceLearningUpdate { signal, .. } => {
+                                    // TODO M8.5: emitted by Soul pattern crystallization
+                                    // on UsagePatternUpdated — wire in Phase 8
                                     let _ = self.handle_preference_learning_update(&signal, &bus);
                                 }
                                 SoulEvent::ExportRequested { path } => {
-                                    // TODO M6: implement full export (event log + identity signals → JSON).
-                                    let _ = bus
-                                        .broadcast(Event::Soul(SoulEvent::ExportFailed {
-                                            reason: "Soul export not yet implemented (M6)".to_string(),
-                                        }))
-                                        .await;
-                                    let _ = path; // suppress unused warning until M6
+                                    let _ = self.handle_export_requested(path);
                                 }
                                 _ => {}
                             }

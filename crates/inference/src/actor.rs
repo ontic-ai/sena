@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bus::events::ctp::{CTPEvent, ContextSnapshot};
 use bus::events::inference::Priority;
 use bus::events::memory::{MemoryChunk, MemoryQueryRequest, MemoryWriteRequest};
-use bus::events::soul::{IdentitySignalEmitted, SoulSummary, SoulSummaryRequested};
+use bus::events::soul::{IdentitySignalEmitted, RichSoulSummary, SoulSummary};
 use bus::events::transparency::{TransparencyEvent, TransparencyQuery};
 use bus::events::InferenceEvent;
 use bus::{Actor, ActorError, Event, EventBus, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent};
@@ -97,6 +97,8 @@ pub struct InferenceActor {
     embed_model_path: Option<PathBuf>,
     /// Dedicated embedding backend (lazy-initialized on first WorkKind::Embed use).
     embed_backend: Option<Arc<Mutex<Box<dyn LlmBackend>>>>,
+    /// Cached RichSoulSummary from the most recent SoulEvent::RichSummaryReady broadcast.
+    latest_rich_summary: Option<RichSoulSummary>,
 }
 
 impl InferenceActor {
@@ -136,6 +138,7 @@ impl InferenceActor {
             streaming_max_sentence_chars: 400,
             embed_model_path: None,
             embed_backend: None,
+            latest_rich_summary: None,
         }
     }
 
@@ -876,6 +879,20 @@ impl InferenceActor {
         parts.join("\n\n")
     }
 
+    fn rich_summary_to_legacy(summary: &RichSoulSummary) -> SoulSummary {
+        let content = summary
+            .sections
+            .iter()
+            .map(|s| s.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        SoulSummary {
+            content,
+            event_count: summary.sections.len(),
+            request_id: summary.request_id,
+        }
+    }
+
     fn active_hours_range_utc(now: SystemTime) -> String {
         let hour = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -945,7 +962,12 @@ impl InferenceActor {
         let soul_summary = self
             .query_soul_with_timeout(bus, soul_request_id, SINGLE_ROUND_MEMORY_TIMEOUT)
             .await
-            .ok();
+            .ok()
+            .or_else(|| {
+                self.latest_rich_summary
+                    .as_ref()
+                    .map(Self::rich_summary_to_legacy)
+            });
 
         // Acquire vision frame if model is vision-capable
         let vision_base64: Option<String> = self
@@ -1101,7 +1123,12 @@ impl InferenceActor {
         let soul_summary = self
             .query_soul_with_timeout(bus, soul_request_id, SINGLE_ROUND_MEMORY_TIMEOUT)
             .await
-            .ok();
+            .ok()
+            .or_else(|| {
+                self.latest_rich_summary
+                    .as_ref()
+                    .map(Self::rich_summary_to_legacy)
+            });
 
         // Acquire vision frame if model is vision-capable
         let vision_base64: Option<String> = self
@@ -1382,14 +1409,12 @@ impl InferenceActor {
     ) -> Result<SoulSummary, String> {
         let mut rx = bus.subscribe_broadcast();
 
-        // TODO Phase 7B: switch to RichSummaryRequested for section-based prompt assembly
         bus.send_directed(
             "soul",
-            Event::Soul(SoulEvent::SummaryRequested(SoulSummaryRequested {
-                max_events: 20,
+            Event::Soul(SoulEvent::RichSummaryRequested {
+                token_budget: 2048,
                 request_id,
-                max_chars: None,
-            })),
+            }),
         )
         .await
         .map_err(|e| format!("soul summary dispatch failed: {}", e))?;
@@ -1404,10 +1429,12 @@ impl InferenceActor {
             tokio::select! {
                 event = rx.recv() => {
                     match event {
-                        Ok(Event::Soul(SoulEvent::SummaryReady(summary)))
+                        Ok(Event::Soul(SoulEvent::RichSummaryReady(summary)))
                             if summary.request_id == request_id =>
                         {
-                            return Ok(summary);
+                            // Convert RichSoulSummary sections to flat SoulSummary for
+                            // backward compat with build_enriched_prompt.
+                            return Ok(Self::rich_summary_to_legacy(&summary));
                         }
                         Ok(_) => continue,
                         Err(_) => return Err("bus closed".to_string()),
@@ -1843,6 +1870,78 @@ impl Actor for InferenceActor {
                                 }
                             }
                         }
+                        Ok(Event::Speech(SpeechEvent::ListenModeTranscription {
+                            is_final,
+                            text,
+                            session_id,
+                            ..
+                        })) if is_final => {
+                            // Transcript cleanup: LLM-based correction of STT acoustic errors.
+                            // Only process final transcripts when model is ready.
+                            let model_is_ready = self
+                                .backend
+                                .lock()
+                                .map(|g| g.is_loaded())
+                                .unwrap_or(false);
+                            if !model_is_ready {
+                                continue;
+                            }
+
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+
+                        let cleanup_prompt = text::transcript_cleanup_prompt(&text);
+
+                        let template = self
+                            .current_model_name
+                            .as_ref()
+                            .map(|name| ChatTemplate::detect_from_model_name(name))
+                            .unwrap_or(ChatTemplate::Raw);
+                        let wrapped = template.wrap(&cleanup_prompt);
+
+                        let max_tokens = (text.split_whitespace().count() * 2).clamp(64, 256);
+
+                        let (adjusted_max_tokens, _) = match Self::calculate_adjusted_max_tokens(
+                            &wrapped,
+                            max_tokens,
+                            self.inference_ctx_size as usize,
+                        ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!("transcript cleanup: prompt too large: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            let params = InferenceParams {
+                                request_id: uuid::Uuid::new_v4(),
+                                prompt: wrapped,
+                                temperature: 0.1,
+                                top_p: 0.9,
+                                max_tokens: adjusted_max_tokens,
+                                ctx_size: self.inference_ctx_size,
+                            };
+
+                            let backend_clone = self.backend.clone();
+                            match Self::complete_with_overflow_retry(backend_clone, params).await {
+                                Ok(cleaned) => {
+                                    let cleaned = cleaned.trim().to_string();
+                                    if !cleaned.is_empty() {
+                                        let _ = bus
+                                            .broadcast(Event::Speech(SpeechEvent::TranscriptRefined {
+                                                cleaned_text: cleaned,
+                                                session_id,
+                                            }))
+                                            .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("transcript cleanup failed for session {}: {}", session_id, e);
+                                }
+                            }
+                        }
                         Ok(Event::Transparency(TransparencyEvent::QueryRequested(
                             TransparencyQuery::InferenceExplanation,
                         ))) => {
@@ -1880,6 +1979,20 @@ impl Actor for InferenceActor {
                                     ))
                                     .await;
                             });
+                        }
+                        Ok(Event::Soul(SoulEvent::RichSummaryReady(summary))) => {
+                            tracing::debug!(
+                                "inference: cached RichSoulSummary {} sections request_id={}",
+                                summary.sections.len(),
+                                summary.request_id
+                            );
+                            self.latest_rich_summary = Some(summary);
+                        }
+                        Ok(Event::Memory(MemoryEvent::WriteCompleted(ref wc))) => {
+                            tracing::debug!(
+                                "inference: memory confirmed write request_id={}",
+                                wc.request_id
+                            );
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(ActorError::ChannelClosed("bus channel closed".to_string()));

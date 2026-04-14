@@ -805,6 +805,26 @@ async fn dispatch_slash_command(
                 LineStyle::SystemNotice,
             )]
         }
+        "/export" => {
+            let path = parts
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("sena-soul-export.json"));
+            if let Err(e) = bus
+                .broadcast(Event::Soul(SoulEvent::ExportRequested { path: path.clone() }))
+                .await
+            {
+                vec![(
+                    format!("Failed to request Soul export: {}", e),
+                    LineStyle::Error,
+                )]
+            } else {
+                vec![(
+                    format!("Requested Soul export to {}", path.display()),
+                    LineStyle::SystemNotice,
+                )]
+            }
+        }
         "/help" | "/h" => {
             vec![
                 ("━━  Commands".to_string(), LineStyle::SystemNotice),
@@ -835,6 +855,10 @@ async fn dispatch_slash_command(
                 ),
                 (
                     "/loops                 — Show and toggle background loops".to_string(),
+                    LineStyle::Normal,
+                ),
+                (
+                    "/export [path]         — Request Soul export (stub)".to_string(),
                     LineStyle::Normal,
                 ),
                 (
