@@ -4373,12 +4373,13 @@ dependencies = [
  "async-trait",
  "bus",
  "cpal",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tts",
- "whisper-rs",
 ]
 
 [[package]]
@@ -4438,6 +4439,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "stt-worker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "whisper-rs",
 ]
 
 [[package]]

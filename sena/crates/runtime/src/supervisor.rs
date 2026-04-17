@@ -170,32 +170,43 @@ async fn await_shutdown_or_health_checks(
     let mut rx = boot_result.bus.subscribe_broadcast();
 
     loop {
-        match rx.recv().await {
-            Ok(Event::System(SystemEvent::ShutdownSignal))
-            | Ok(Event::System(SystemEvent::ShutdownRequested)) => {
-                info!("SUPERVISOR: shutdown signal received");
+        tokio::select! {
+            // Ctrl+C — broadcast ShutdownSignal and exit cleanly.
+            _ = tokio::signal::ctrl_c() => {
+                info!("SUPERVISOR: Ctrl+C received — broadcasting ShutdownSignal");
+                let _ = boot_result
+                    .bus
+                    .broadcast(Event::System(SystemEvent::ShutdownSignal))
+                    .await;
                 return Ok(());
             }
-            Ok(Event::System(SystemEvent::HealthCheckRequest { .. })) => {
-                info!("SUPERVISOR: health check request received");
-                handle_health_check_request(boot_result, actor_registry).await;
-            }
-            Ok(Event::System(SystemEvent::ActorFailed { actor, reason })) => {
-                warn!(actor = %actor, reason = %reason, "SUPERVISOR: actor failed");
-                // Find the static str for the actor name (if it's one we know)
-                for &expected_actor in &boot_result.expected_actors {
-                    if expected_actor == actor.as_str() {
-                        actor_registry.mark_failed(expected_actor, reason.clone());
-                        break;
+            event = rx.recv() => match event {
+                Ok(Event::System(SystemEvent::ShutdownSignal))
+                | Ok(Event::System(SystemEvent::ShutdownRequested)) => {
+                    info!("SUPERVISOR: shutdown signal received");
+                    return Ok(());
+                }
+                Ok(Event::System(SystemEvent::HealthCheckRequest { .. })) => {
+                    info!("SUPERVISOR: health check request received");
+                    handle_health_check_request(boot_result, actor_registry).await;
+                }
+                Ok(Event::System(SystemEvent::ActorFailed { actor, reason })) => {
+                    warn!(actor = %actor, reason = %reason, "SUPERVISOR: actor failed");
+                    // Find the static str for the actor name (if it's one we know)
+                    for &expected_actor in &boot_result.expected_actors {
+                        if expected_actor == actor.as_str() {
+                            actor_registry.mark_failed(expected_actor, reason.clone());
+                            break;
+                        }
                     }
                 }
-            }
-            Ok(_) => continue,
-            Err(e) => {
-                return Err(RuntimeError::SupervisionFailed(format!(
-                    "broadcast channel error: {}",
-                    e
-                )));
+                Ok(_) => continue,
+                Err(e) => {
+                    return Err(RuntimeError::SupervisionFailed(format!(
+                        "broadcast channel error: {}",
+                        e
+                    )));
+                }
             }
         }
     }
