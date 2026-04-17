@@ -189,6 +189,46 @@ impl SttActor {
 
                 SttBackendHandle::Whisper(Box::new(worker))
             }
+            SttBackend::Parakeet => {
+                // Resolve model directory
+                let model_dir = self.model_dir.as_ref().ok_or_else(|| {
+                    SpeechError::SttInitFailed(
+                        "no model directory configured for Parakeet".to_string(),
+                    )
+                })?;
+
+                let validated_dir =
+                    crate::parakeet_backend::ParakeetSttBackend::resolve_model_dir(model_dir)?;
+
+                tracing::info!(
+                    "stt: loading parakeet model from {}",
+                    validated_dir.display()
+                );
+
+                // Load model in spawn_blocking (blocking ONNX initialization)
+                let model_dir_clone = validated_dir.clone();
+                let backend = tokio::task::spawn_blocking(move || {
+                    crate::parakeet_backend::ParakeetSttBackend::load_from_dir(&model_dir_clone)
+                })
+                .await
+                .map_err(|e| {
+                    SpeechError::SttInitFailed(format!("parakeet load task panicked: {}", e))
+                })??;
+
+                tracing::info!("stt: parakeet backend initialized");
+
+                // Emit SttModelLoaded event
+                if let Some(ref bus) = self.bus {
+                    let _ = bus
+                        .broadcast(Event::Speech(SpeechEvent::SttModelLoaded {
+                            model_name: "parakeet-nemotron-int8".to_string(),
+                            backend: "parakeet-rs".to_string(),
+                        }))
+                        .await;
+                }
+
+                SttBackendHandle::Parakeet(Box::new(backend))
+            }
         };
 
         self.backend_handle = Some(handle);
@@ -305,6 +345,92 @@ impl SttActor {
                     text: full_text,
                     confidence: avg_confidence,
                     words,
+                })
+            }
+            Some(SttBackendHandle::Parakeet(backend)) => {
+                tracing::debug!(
+                    "stt: transcribing {} samples with parakeet",
+                    buffer.samples.len()
+                );
+
+                // Get reference to backend for spawn_blocking
+                // The backend contains Arc<Mutex<>> internally so cloning Arcs is safe
+                let samples = buffer.samples.clone();
+
+                // Create new Arcs pointing to same data for the closure
+                let model = Arc::clone(&backend.model);
+                let state = Arc::clone(&backend.state);
+
+                // Feed samples and flush in spawn_blocking (parakeet inference is blocking)
+                let text = tokio::task::spawn_blocking(move || -> Result<String, SpeechError> {
+                    // Feed all samples
+                    {
+                        let mut model_guard = model.lock().map_err(|e| {
+                            SpeechError::TranscriptionFailed(format!("model lock poisoned: {}", e))
+                        })?;
+
+                        let mut state_guard = state.lock().map_err(|e| {
+                            SpeechError::TranscriptionFailed(format!("state lock poisoned: {}", e))
+                        })?;
+
+                        // Nemotron transcribe_chunk expects &[f32] directly
+                        let partial_text = model_guard.transcribe_chunk(&samples).map_err(|e| {
+                            SpeechError::TranscriptionFailed(format!(
+                                "parakeet transcribe_chunk failed: {}",
+                                e
+                            ))
+                        })?;
+
+                        state_guard.samples_fed += samples.len();
+
+                        if !partial_text.is_empty() {
+                            state_guard.partial_text.push_str(&partial_text);
+                        }
+                    }
+
+                    // Flush/finalize: return accumulated text
+                    let state_guard = state.lock().map_err(|e| {
+                        SpeechError::TranscriptionFailed(format!("state lock poisoned: {}", e))
+                    })?;
+
+                    let final_text = state_guard.partial_text.clone();
+
+                    tracing::info!(
+                        "parakeet: flush complete - final text='{}' ({} samples total)",
+                        final_text,
+                        state_guard.samples_fed
+                    );
+
+                    Ok(final_text)
+                })
+                .await
+                .map_err(|e| {
+                    SpeechError::TranscriptionFailed(format!("parakeet task panicked: {}", e))
+                })??;
+
+                // Reset state for next utterance
+                {
+                    let mut state_guard = backend.state.lock().map_err(|e| {
+                        SpeechError::TranscriptionFailed(format!("state lock poisoned: {}", e))
+                    })?;
+                    state_guard.partial_text.clear();
+                    state_guard.samples_fed = 0;
+                }
+
+                // Parakeet doesn't expose confidence or word-level data in current API
+                // Use a default confidence of 0.8 (reasonable for streaming model)
+                let confidence = if text.trim().is_empty() { 0.1 } else { 0.8 };
+
+                tracing::info!(
+                    "stt: parakeet completed - text='{}', confidence={:.2}",
+                    text,
+                    confidence
+                );
+
+                Ok(TranscriptionResult {
+                    text,
+                    confidence,
+                    words: vec![], // Parakeet doesn't provide word-level timestamps yet
                 })
             }
             None => Err(SpeechError::TranscriptionFailed(
@@ -666,6 +792,7 @@ impl Actor for SttActor {
 enum SttBackendHandle {
     Mock,
     Whisper(Box<SttWorker>),
+    Parakeet(Box<crate::parakeet_backend::ParakeetSttBackend>),
 }
 
 struct TranscriptionResult {

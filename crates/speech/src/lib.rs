@@ -14,6 +14,7 @@ pub mod audio_output;
 pub mod error;
 pub mod models;
 pub mod onboarding;
+pub mod parakeet_backend;
 mod silence_detector;
 pub mod stt;
 pub mod stt_actor;
@@ -43,6 +44,8 @@ pub struct AudioBuffer {
 pub enum SttBackend {
     /// Whisper via whisper-rs (STT).
     Whisper,
+    /// Parakeet/Nemotron INT8 streaming STT backend.
+    Parakeet,
     /// Mock backend for testing.
     Mock,
 }
