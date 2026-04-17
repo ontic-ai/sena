@@ -196,7 +196,10 @@ async fn spawn_actors(
     handles.push((platform_name, platform_handle));
 
     // Step 8: CTP actor spawn
-    let (ctp_actor, _signal_tx) = builder::build_ctp_actor()?;
+    // _ctp_signal_tx: kept alive for session duration so the channel endpoint
+    // does not close prematurely. CTP uses the bus path in production; this
+    // sender is available for future direct signal injection if needed.
+    let (ctp_actor, _ctp_signal_tx) = builder::build_ctp_actor()?;
     let ctp_name: &'static str = "ctp";
     expected.push(ctp_name);
     let ctp_handle = spawn_ctp_actor(ctp_actor, bus.clone());
@@ -359,42 +362,44 @@ fn spawn_inference_actor(
     })
 }
 
+/// Intervals for platform signal polling.
+mod poll_intervals {
+    use std::time::Duration;
+    /// Active window polling — 250 ms.
+    pub const WINDOW: Duration = Duration::from_millis(250);
+    /// Clipboard polling — 500 ms.
+    pub const CLIPBOARD: Duration = Duration::from_millis(500);
+    /// Keystroke cadence polling — 100 ms.
+    pub const KEYSTROKE: Duration = Duration::from_millis(100);
+}
+
 /// Spawn platform actor in a tokio task.
 ///
-/// Note: PlatformActor does not yet implement the Actor trait in BONES.
-/// This is a stub spawn that logs the intent but does not call actor methods.
+/// Calls the actor's run_polling_loop which polls the native backend at
+/// configured intervals and broadcasts PlatformEvent on the EventBus.
 fn spawn_platform_actor(
-    _actor: platform::PlatformActor,
+    actor: platform::PlatformActor,
     bus: std::sync::Arc<EventBus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let name = "platform";
-        tracing::info!(
-            actor = name,
-            "Actor task started (stub: Actor trait not yet implemented)"
-        );
+        tracing::info!(actor = name, "Platform actor started");
 
-        // Emit ActorReady immediately (stub)
+        // Emit ActorReady
         let _ = bus
             .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
             .await;
 
-        // Stub: wait for shutdown signal instead of running actor loop
-        let mut rx = bus.subscribe_broadcast();
-        loop {
-            match rx.recv().await {
-                Ok(Event::System(SystemEvent::ShutdownSignal))
-                | Ok(Event::System(SystemEvent::ShutdownRequested))
-                | Ok(Event::System(SystemEvent::ShutdownInitiated)) => {
-                    tracing::info!(actor = name, "Shutdown signal received");
-                    break;
-                }
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
+        actor
+            .run_polling_loop(
+                bus,
+                poll_intervals::WINDOW,
+                poll_intervals::CLIPBOARD,
+                poll_intervals::KEYSTROKE,
+            )
+            .await;
 
-        tracing::info!(actor = name, "Actor task stopped");
+        tracing::info!(actor = name, "Platform actor stopped");
     })
 }
 

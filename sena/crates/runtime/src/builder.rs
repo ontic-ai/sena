@@ -149,12 +149,24 @@ impl inference::InferenceBackend for StubInferenceBackend {
     }
 }
 
-/// Build the platform actor with a stub backend.
+/// Build the platform actor with the native OS backend.
+///
+/// Falls back to stub backend if native backend construction fails.
 pub fn build_platform_actor() -> Result<platform::PlatformActor, RuntimeError> {
-    tracing::debug!("building platform actor with stub backend");
-    let backend = Box::new(StubPlatformBackend);
-    let actor = platform::PlatformActor::new(backend);
-    Ok(actor)
+    match platform::PlatformActor::native() {
+        Ok(actor) => {
+            tracing::info!("platform actor: using NativeBackend");
+            Ok(actor)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "platform actor: NativeBackend failed, falling back to StubPlatformBackend"
+            );
+            let backend = Box::new(StubPlatformBackend);
+            Ok(platform::PlatformActor::new(backend))
+        }
+    }
 }
 
 /// Build the soul actor with a stub store.

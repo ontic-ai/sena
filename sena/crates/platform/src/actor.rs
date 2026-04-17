@@ -6,9 +6,12 @@ use crate::backends::NativeBackend;
 use crate::error::PlatformError;
 use crate::monitor::VisionFrameCache;
 use crate::types::{ClipboardDigest, FileEvent, KeystrokeCadence, PlatformSignal, WindowContext};
+use bus::{Event, EventBus};
+use bus::events::platform::PlatformEvent;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 /// Platform actor — holds a native backend and manages signal broadcasting.
 pub struct PlatformActor {
@@ -113,6 +116,101 @@ impl PlatformActor {
                 "unexpected signal type".to_string(),
             )),
         }
+    }
+
+    /// Run the platform polling loop until a shutdown signal is received.
+    ///
+    /// Polls all backend signals at their configured intervals and broadcasts
+    /// results on both the actor's internal channels AND the shared EventBus.
+    /// This is the production entry point called by the runtime boot sequence.
+    pub async fn run_polling_loop(
+        &self,
+        bus: Arc<EventBus>,
+        window_interval: Duration,
+        clipboard_interval: Duration,
+        keystroke_interval: Duration,
+    ) {
+        use bus::events::system::SystemEvent;
+
+        let mut shutdown_rx = bus.subscribe_broadcast();
+        let mut window_tick = tokio::time::interval(window_interval);
+        let mut clipboard_tick = tokio::time::interval(clipboard_interval);
+        let mut keystroke_tick = tokio::time::interval(keystroke_interval);
+
+        // Track last-seen window to deduplicate bus broadcasts.
+        let mut last_app: Option<String> = None;
+        let mut last_clipboard_count: Option<usize> = None;
+
+        loop {
+            tokio::select! {
+                result = shutdown_rx.recv() => {
+                    match result {
+                        Ok(Event::System(SystemEvent::ShutdownSignal))
+                        | Ok(Event::System(SystemEvent::ShutdownRequested))
+                        | Ok(Event::System(SystemEvent::ShutdownInitiated)) => {
+                            info!("PlatformActor: shutdown signal received");
+                            break;
+                        }
+                        Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+
+                _ = window_tick.tick() => {
+                    match self.backend.active_window() {
+                        Ok(PlatformSignal::Window(ctx)) => {
+                            // Only broadcast on change
+                            let changed = last_app.as_deref() != Some(ctx.app_name.as_str());
+                            if changed {
+                                debug!(app = %ctx.app_name, "PlatformActor: window changed");
+                                last_app = Some(ctx.app_name.clone());
+                                let _ = self.window_tx.send(ctx.clone());
+                                let _ = bus.broadcast(
+                                    Event::Platform(PlatformEvent::ActiveWindowChanged(ctx))
+                                ).await;
+                            }
+                        }
+                        Err(e) => debug!(error = %e, "platform: window poll error"),
+                        _ => {}
+                    }
+                }
+
+                _ = clipboard_tick.tick() => {
+                    match self.backend.clipboard_content() {
+                        Ok(PlatformSignal::Clipboard(digest)) => {
+                            let changed = last_clipboard_count != Some(digest.char_count);
+                            if changed {
+                                debug!(chars = digest.char_count, "PlatformActor: clipboard changed");
+                                last_clipboard_count = Some(digest.char_count);
+                                let _ = self.clipboard_tx.send(digest.clone());
+                                let _ = bus.broadcast(
+                                    Event::Platform(PlatformEvent::ClipboardChanged(digest))
+                                ).await;
+                            }
+                        }
+                        Err(PlatformError::ClipboardFailed(msg)) if msg.contains("no change") => {}
+                        Err(e) => debug!(error = %e, "platform: clipboard poll error"),
+                        _ => {}
+                    }
+                }
+
+                _ = keystroke_tick.tick() => {
+                    match self.backend.keystroke_cadence() {
+                        Ok(PlatformSignal::Keystroke(cadence)) => {
+                            let _ = self.keystroke_tx.send(cadence.clone());
+                            let _ = bus.broadcast(
+                                Event::Platform(PlatformEvent::KeystrokeCadenceUpdated(cadence))
+                            ).await;
+                        }
+                        Err(PlatformError::KeystrokeCadenceFailed(msg)) if msg.contains("no keystroke") => {}
+                        Err(e) => debug!(error = %e, "platform: keystroke poll error"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        warn!("PlatformActor polling loop exited");
     }
 }
 
