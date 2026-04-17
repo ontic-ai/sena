@@ -1,0 +1,43 @@
+[package]
+name = "platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+
+# Clipboard access (all platforms)
+arboard = "3.4"
+
+# File watching (all platforms)
+notify = "6.1"
+
+# Keystroke timing detection (all platforms)
+rdev = "0.5"
+
+# SHA-256 hashing for clipboard digest
+sha2 = "0.10"
+
+# Windows-specific dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Power",
+] }
+
+# macOS-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+
+# Linux-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }

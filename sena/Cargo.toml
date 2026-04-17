@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/bus", "crates/cli", "crates/crypto", "crates/text", "crates/soul", "crates/memory", "crates/platform", "crates/ctp", "crates/inference", "crates/prompt", "crates/speech", "crates/runtime"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["kura120"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ontic-ai/sena"
+
+[workspace.dependencies]
+tokio = { version = "1.41", features = ["full"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+toml = "1.1.2"
+anyhow = "1.0"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+ratatui = "0.29"
+redb = "2.4"
+ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.2" }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = "0.4"

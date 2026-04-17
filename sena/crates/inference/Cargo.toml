@@ -1,0 +1,21 @@
+[package]
+name = "inference"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+text = { path = "../text" }
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3.8"

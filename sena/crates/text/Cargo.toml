@@ -1,0 +1,13 @@
+[package]
+name = "text"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1.5"

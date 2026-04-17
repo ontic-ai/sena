@@ -1,0 +1,24 @@
+[package]
+name = "soul"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+crypto = { path = "../crypto" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+redb = { workspace = true }
+rand = "0.8"
+hex = "0.4"
+
+[dependencies.serde_json]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.17"
