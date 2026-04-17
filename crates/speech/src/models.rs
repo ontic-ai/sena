@@ -15,6 +15,8 @@ pub enum ModelType {
     PiperTts,
     /// OpenWakeWord model for wakeword detection.
     OpenWakeWord,
+    /// Parakeet/Nemotron INT8 streaming STT model.
+    ParakeetStt,
 }
 
 /// Speech model information.
@@ -79,12 +81,51 @@ impl ModelManifest {
         }
     }
 
+    /// Returns the Parakeet/Nemotron INT8 encoder ONNX model for streaming STT.
+    pub fn parakeet_encoder() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-int8-encoder".to_string(),
+            filename: "encoder.onnx".to_string(),
+            url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/encoder.onnx".to_string(),
+            sha256: "d24be4aff18dd9d2aa3433cb89c5a457df5015abf79e06a63dde76b1cd6386bb".to_string(),
+            size_bytes: 15_000_000, // ~15MB
+            model_type: ModelType::ParakeetStt,
+        }
+    }
+
+    /// Returns the Parakeet/Nemotron INT8 decoder+joint ONNX model for streaming STT.
+    pub fn parakeet_decoder_joint() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-int8-decoder-joint".to_string(),
+            filename: "decoder_joint.onnx".to_string(),
+            url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/decoder_joint.onnx".to_string(),
+            sha256: "c86d527e4ae27251a741609eaddd4429ba5c32050e2f532cea1052d9e21f4f09".to_string(),
+            size_bytes: 95_000_000, // ~95MB
+            model_type: ModelType::ParakeetStt,
+        }
+    }
+
+    /// Returns the Parakeet/Nemotron INT8 tokenizer model for streaming STT.
+    pub fn parakeet_tokenizer() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-int8-tokenizer".to_string(),
+            filename: "tokenizer.model".to_string(),
+            url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model".to_string(),
+            sha256: "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9".to_string(),
+            size_bytes: 500_000, // ~500KB
+            model_type: ModelType::ParakeetStt,
+        }
+    }
+
     /// Returns all known models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
             Self::whisper_base_en(),
             Self::piper_voice(),
             Self::open_wakeword(),
+            Self::parakeet_encoder(),
+            Self::parakeet_decoder_joint(),
+            Self::parakeet_tokenizer(),
         ]
     }
 }
@@ -129,7 +170,7 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 6);
 
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
@@ -142,6 +183,39 @@ mod tests {
         let wakeword = &models[2];
         assert_eq!(wakeword.model_type, ModelType::OpenWakeWord);
         assert!(wakeword.filename.ends_with(".tflite"));
+
+        let parakeet_encoder = &models[3];
+        assert_eq!(parakeet_encoder.model_type, ModelType::ParakeetStt);
+        assert_eq!(parakeet_encoder.filename, "encoder.onnx");
+
+        let parakeet_decoder = &models[4];
+        assert_eq!(parakeet_decoder.model_type, ModelType::ParakeetStt);
+        assert_eq!(parakeet_decoder.filename, "decoder_joint.onnx");
+
+        let parakeet_tokenizer = &models[5];
+        assert_eq!(parakeet_tokenizer.model_type, ModelType::ParakeetStt);
+        assert_eq!(parakeet_tokenizer.filename, "tokenizer.model");
+    }
+
+    #[test]
+    fn parakeet_models_have_correct_checksums() {
+        let encoder = ModelManifest::parakeet_encoder();
+        assert_eq!(
+            encoder.sha256,
+            "d24be4aff18dd9d2aa3433cb89c5a457df5015abf79e06a63dde76b1cd6386bb"
+        );
+
+        let decoder = ModelManifest::parakeet_decoder_joint();
+        assert_eq!(
+            decoder.sha256,
+            "c86d527e4ae27251a741609eaddd4429ba5c32050e2f532cea1052d9e21f4f09"
+        );
+
+        let tokenizer = ModelManifest::parakeet_tokenizer();
+        assert_eq!(
+            tokenizer.sha256,
+            "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9"
+        );
     }
 
     #[test]
