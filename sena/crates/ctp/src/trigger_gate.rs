@@ -44,15 +44,15 @@ impl TriggerGate {
     /// 2. The snapshot's significance score exceeds the sensitivity threshold.
     pub fn should_trigger(&mut self, snapshot: &ContextSnapshot, patterns: &[SignalPattern]) -> bool {
         // Enforce minimum interval
-        if let Some(last) = self.last_trigger {
-            if last.elapsed() < self.min_interval {
-                debug!(
-                    elapsed_secs = last.elapsed().as_secs(),
-                    min_secs = self.min_interval.as_secs(),
-                    "trigger gate: cooldown not elapsed"
-                );
-                return false;
-            }
+        if let Some(last) = self.last_trigger
+            && last.elapsed() < self.min_interval
+        {
+            debug!(
+                elapsed_secs = last.elapsed().as_secs(),
+                min_secs = self.min_interval.as_secs(),
+                "trigger gate: cooldown not elapsed"
+            );
+            return false;
         }
 
         // Compute significance score from snapshot signals

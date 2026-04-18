@@ -17,22 +17,17 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 /// Configuration for the prompt actor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PromptConfig {
     /// Token budget applied during prompt assembly.
     ///
-    /// `None` means no enforced limit (the composer's default applies).
+    /// If None, no token limit is enforced.
     pub token_limit: Option<usize>,
-}
-
-impl Default for PromptConfig {
-    fn default() -> Self {
-        Self { token_limit: None }
-    }
 }
 
 /// Prompt actor — owns a composer and assembles prompts on bus events.
 pub struct PromptActor {
+    #[allow(dead_code)]
     composer: Box<dyn PromptComposer>,
     config: PromptConfig,
     rx: Option<broadcast::Receiver<Event>>,

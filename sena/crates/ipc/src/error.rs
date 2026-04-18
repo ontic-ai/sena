@@ -34,4 +34,16 @@ pub enum IpcError {
     /// Platform not supported for IPC.
     #[error("IPC not supported on this platform (Windows only in Phase 1)")]
     PlatformNotSupported,
+
+    /// Invalid command payload.
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
+
+    /// Command not ready (daemon not fully booted or feature not implemented).
+    #[error("command not ready: {0}")]
+    CommandNotReady(String),
+
+    /// Internal daemon error.
+    #[error("internal error: {0}")]
+    Internal(String),
 }

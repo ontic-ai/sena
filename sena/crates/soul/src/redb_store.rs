@@ -74,10 +74,10 @@ impl SoulStore for RedbSoulStore {
 
         for event in recent.iter().rev() {
             let line = format!("- {}\n", event.description);
-            if let Some(limit) = max_chars {
-                if content.len() + line.len() > limit {
-                    break;
-                }
+            if let Some(limit) = max_chars
+                && content.len() + line.len() > limit
+            {
+                break;
             }
             content.push_str(&line);
         }

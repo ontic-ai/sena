@@ -11,20 +11,15 @@ use std::time::SystemTime;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Work cadence preference derived from behavioral observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkCadence {
     /// Short bursts of intense activity.
     Burst,
     /// Consistent steady pace.
+    #[default]
     Steady,
     /// Long uninterrupted focus sessions.
     LongFocus,
-}
-
-impl Default for WorkCadence {
-    fn default() -> Self {
-        Self::Steady
-    }
 }
 
 /// An entry in the window context history.

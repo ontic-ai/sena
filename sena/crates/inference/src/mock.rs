@@ -8,7 +8,6 @@ use crate::error::InferenceError;
 use crate::stream::InferenceStream;
 use crate::types::{BackendType, InferenceParams};
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tracing::debug;
 
 /// Configuration for the mock backend.

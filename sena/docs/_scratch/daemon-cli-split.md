@@ -197,7 +197,195 @@ Summary: TBD
 - Add `CommandRegistry` to `Runtime` struct for handler registration during boot
 - CLI must use `ipc::IpcClient` to communicate with daemon; no in-process boot path
 
-### Phase 2: Supervision Loop (Pending)
+### Phase 2: Daemon Process and IPC Server Integration (In Progress)
+**Date:** 2026-04-18 (Active)  
+**Commit(s):** TBD
+
+**Summary:**
+
+Phase 2 creates the daemon binary (`crates/daemon`) as a separate process that owns all actors, runs the supervision loop, and provides an IPC server for command dispatch. The CLI remains in-process for this phase (Phase 3+ will convert CLI to IPC client).
+
+**Implemented:**
+- Created `crates/daemon` binary crate with typed error handling (no anyhow)
+- Daemon boots runtime via `runtime::boot()` and spawns supervision loop
+- IPC server integration: `IpcServer` runs on Windows named pipe `\\.\pipe\sena`
+- Command registry with 14 registered handlers covering all expected Phase 2 command names:
+  - Runtime: `runtime.ping`, `runtime.status`, `runtime.shutdown`
+  - Inference: `inference.list_models`, `inference.load_model`, `inference.status`, `inference.run`
+  - Speech: `speech.listen_start`, `speech.listen_stop`, `speech.status`
+  - Memory: `memory.stats`, `memory.query`
+  - Config: `config.get`, `config.set`
+  - Events: `events.subscribe`, `events.unsubscribe`
+- System tray implementation (Windows only):
+  - Main-thread tray loop with menu: Launch CLI, Config Editor, Open Models Folder, Shutdown
+  - Uses `PredefinedMenuItem::separator()` for proper menu separator
+  - Magenta fallback icon (32x32 solid color) — no .ico asset available in Phase 2
+  - Explicit Windows message pump handling (50ms polling loop)
+- Runtime state tracking: boot time, ready flag for uptime and status queries
+- Graceful shutdown: shutdown command sends signal to daemon main loop, which broadcasts `ShutdownInitiated` on bus
+
+**Phase 2 Limitations (tracked for Phase 3+ resolution):**
+1. **Tray icon**: No assets/logo.ico file exists. Using magenta fallback. ICO decoding not implemented.
+   - To fix: Add logo.ico to assets/, use `include_bytes!` for embedded asset, implement ICO decode or use `ico` crate.
+2. **CLI launch**: Temporary Phase 2 behavior — daemon and CLI are the same binary ("sena"). Launch action spawns "sena cli" in new terminal.
+   - Path handling is safe (no unwrap), but non-UTF8 paths will fail with clear error.
+   - To fix in Phase 3: Separate CLI binary, update launch logic to spawn the renamed CLI binary.
+3. **Supervision readiness**: `runtime_state.mark_ready()` is called immediately after boot, not after supervision confirms all actors are healthy.
+   - To fix in Phase 3: Wire `wait_for_readiness()` function, wait for all expected actors to emit `ActorReady`, then mark ready.
+4. **runtime.status**: Returns `{"status": "booting"|"ready", "uptime_seconds": N}` based on simple ready flag, not actual actor health.
+   - To fix in Phase 3: Query supervisor for per-actor health, return structured status with actor states.
+5. **runtime.shutdown**: Sends signal to private shutdown channel. Daemon main loop broadcasts `ShutdownInitiated` on shutdown.
+   - To fix in Phase 3: Also broadcast `ShutdownRequested` event on bus from the handler for observability before sending private signal.
+6. **Command handlers not fully wired**: Most command handlers return `CommandNotReady` errors with clear messages:
+   - `inference.load_model`, `inference.run` — inference dispatch via bus events not wired
+   - `speech.listen_start`, `speech.listen_stop` — speech loop control via bus events not wired
+   - `memory.query` — memory query via bus events not wired
+   - `config.set` — config write subsystem not wired
+   - `events.subscribe`, `events.unsubscribe` — event subscription mechanism not wired
+   - To fix in Phase 3+: Wire bus event dispatch, implement response collection, return real results.
+7. **CLI still in-process**: CLI boots runtime directly. No IPC connection.
+   - To fix in Phase 4: CLI detects running daemon, connects via IPC, dispatches commands, renders responses.
+
+**Architecture compliance fixes applied (arch-guard blockers resolved):**
+- [x] Removed `anyhow` dependency from daemon — replaced with typed `DaemonError` enum
+- [x] Removed `unwrap()` from `launch_cli()` — safe UTF-8 path conversion with clear error
+- [x] Fixed `commands/mod.rs` violation — replaced with `commands/handlers.rs` module
+- [x] Tray separator — using `PredefinedMenuItem::separator()` instead of disabled menu item
+
+**Prompt alignment fixes applied:**
+- [x] `runtime.ping` returns `{"pong": true, "uptime_seconds": N}` as specified
+- [x] `runtime.status` returns clearly Phase-2-temporary structure (simple ready flag, not actor health)
+- [x] All expected command names registered (even if some return `CommandNotReady`)
+- [x] Tray limitations documented in code comments and this scratch file
+- [x] CLI launch behavior documented with Phase 2 temporariness noted
+
+**Critical decisions:**
+1. **Daemon error handling**: Created typed `DaemonError` enum instead of using anyhow. All error conversions explicit.
+2. **Command registration**: All 14 expected command names registered, even if not fully implemented. Unimplemented commands return `IpcError::CommandNotReady` with descriptive messages.
+3. **Tray message pump**: Explicit acknowledgment that tray-icon does NOT pump Windows messages internally — daemon must do it in the tray loop.
+4. **Supervisor readiness**: Deferred to Phase 3. Phase 2 uses simple boolean flag set immediately after boot.
+
+**Follow-up work for Phase 3 (Supervision Readiness Fix):**
+- Implement `wait_for_readiness()` in `crates/runtime/src/supervisor.rs`
+- Track expected actors via `Runtime.expected_actors` field
+- Move `BootComplete` broadcast to post-readiness (after supervision confirms all actors healthy)
+- Wire `runtime.status` to query supervisor for per-actor health
+- Wire `runtime.shutdown` to also broadcast `ShutdownRequested` on bus before private channel signal
+
+**Follow-up work for Phase 4 (CLI as IPC Client):**
+- Implement daemon detection in CLI (check pipe existence + connectivity)
+- Implement IPC client connection in CLI (`run_with_ipc()` replaces `run_with_runtime()`)
+- Map all slash commands to IPC command dispatch
+- Handle daemon not running: auto-start daemon, wait for readiness, connect
+- Remove CLI's in-process runtime boot path entirely
+**Date:** 2026-04-18  
+**Commit(s):** TBD (pending commit)
+
+**Summary:**
+
+Created `crates/daemon/` as a standalone binary package that owns the Sena runtime lifecycle.
+The daemon boots the runtime, registers IPC command handlers, spawns the IPC server on a
+background Tokio task, and provides a system tray with menu items for user interaction.
+
+**Implemented:**
+
+1. **Package structure:**
+   - `crates/daemon/Cargo.toml` with package name `sena`, binary name `sena`
+   - Dependencies: runtime, ipc, bus, tokio, tracing, async-trait, anyhow, serde_json, tray-icon
+
+2. **Command handler modules** (`crates/daemon/src/commands/`):
+   - `runtime_commands.rs`: PingHandler, StatusHandler, ShutdownHandler
+   - `inference_commands.rs`: ListModelsHandler, RunInferenceHandler (stubs with typed errors)
+   - `speech_commands.rs`: SpeechStatusHandler (stub)
+   - `memory_commands.rs`: MemoryStatsHandler (stub)
+   - `config_commands.rs`: ConfigGetHandler, ConfigSetHandler (stubs with typed errors)
+   - `events_commands.rs`: EventsSubscribeHandler, EventsUnsubscribeHandler (stubs)
+   - `mod.rs`: `register_all()` function registers 11 command handlers with IPC registry
+
+3. **RuntimeState shared state:**
+   - Daemon-owned struct with boot time, readiness flag
+   - Shared across command handlers via Arc cloning
+   - Passed to StatusHandler to report uptime and readiness status
+
+4. **System tray module** (`crates/daemon/src/tray.rs`):
+   - Main-thread tray loop (Windows only)
+   - Menu items: Launch CLI, Config Editor, Open Models Folder, Shutdown Sena
+   - Tooltip updates via `std::sync::mpsc` channel
+   - Icon loading from `assets/logo.ico` with magenta 32x32 fallback on failure
+   - Message pump handling via sleep loop (tray-icon handles Windows messages internally)
+
+5. **Daemon main.rs:**
+   - Boots runtime via `runtime::boot()`
+   - Registers all IPC command handlers
+   - Spawns IPC server in Tokio background task
+   - Updates tray tooltip ("Sena — Booting..." → "Sena — Ready")
+   - Handles tray actions (Launch CLI, Open Models, Shutdown)
+   - Runs supervision loop in background
+   - Blocks on main thread tray loop
+   - Handles graceful shutdown on tray exit or shutdown command
+
+6. **IPC error variants added:**
+   - `InvalidPayload`: command payload validation failures
+   - `CommandNotReady`: daemon not booted or feature not implemented
+   - `Internal`: internal daemon errors (e.g., shutdown channel closed)
+
+7. **Dependency fixes:**
+   - Fixed clippy errors in `inference`, `prompt`, `soul`, `ctp` crates
+   - All workspace crates now pass `cargo clippy -- -D warnings`
+
+**Critical decisions:**
+
+1. **Temporary binary name collision:**
+   - Both `crates/daemon` and `crates/cli` produce a binary named `sena`
+   - This is acceptable for Phase 2; Phase 3 will rename CLI binary to `sena-cli` or similar
+   - Logged in this doc as a known limitation for Phase 2
+
+2. **Command handler stubs with typed errors:**
+   - Handlers that require capabilities not yet implemented (inference dispatch, config subsystem,
+     event subscription) return `IpcError::CommandNotReady` with descriptive messages rather
+     than fake success responses
+   - This preserves type safety and makes the limitation observable to CLI clients
+
+3. **Daemon-owned shared state:**
+   - `RuntimeState` is a minimal shared state struct owned by daemon
+   - Populated from boot result and bus events (readiness signal)
+   - Sufficient for Phase 2 status/ping commands without violating actor isolation
+   - Phase 4 will move command registration into owning crates; this is intentionally deferred
+
+4. **Tray icon loading limitation:**
+   - ICO decoding not implemented in Phase 2
+   - Always falls back to magenta 32x32 solid-color icon
+   - `assets/logo.ico` path logic is present but unused until ICO decoder added
+
+5. **Launch CLI action:**
+   - Launches `sena.exe cli` in new console window
+   - Temporarily assumes CLI binary is also named `sena.exe` (same collision as above)
+   - Will be updated in Phase 3 when CLI binary is renamed
+
+**Verification:**
+
+- `cargo build -p sena`: clean
+- `cargo clippy -p sena -- -D warnings`: clean
+- `cargo fmt -p sena --check`: clean
+- No tests added (command handler logic is minimal stubs; real tests come in Phase 3+ integration)
+
+**Follow-up constraints for next Phase 2 unit (readiness/health timeout fix):**
+
+- Daemon currently marks `runtime_state.mark_ready()` immediately after boot without waiting
+  for supervision readiness gate to pass
+- StatusHandler reports "ready" immediately, which is inaccurate if actors are still booting
+- Next unit must wire supervision `BootComplete` event to daemon state so StatusHandler reflects
+  true readiness
+
+**Phase 2 remaining units:**
+
+- Readiness/health timeout fix (wire supervision BootComplete to daemon RuntimeState)
+- Full Phase 2 verification (daemon runs, IPC server accepts connections, ping/status work)
+- Update this doc with Phase 2 complete summary
+
+---
+
+### Phase 3: CLI as IPC Client (Pending)
 **Date:** TBD  
 **Commit(s):** TBD
 ### D2: IPC Crate as Leaf Node
