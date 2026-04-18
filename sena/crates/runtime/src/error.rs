@@ -1,5 +1,6 @@
 //! Runtime errors.
 
+use crate::download_manager::DownloadError;
 use bus::BusError;
 use crypto::CryptoError;
 use soul::SoulError;
@@ -22,6 +23,10 @@ pub enum RuntimeError {
     /// Bus initialization failed.
     #[error("bus init failed: {0}")]
     BusInitFailed(#[from] BusError),
+
+    /// Model download or verification failed.
+    #[error("model download failed: {0}")]
+    ModelDownloadFailed(#[from] DownloadError),
 
     /// Actor spawn failed.
     #[error("actor spawn failed: {actor_name}: {reason}")]

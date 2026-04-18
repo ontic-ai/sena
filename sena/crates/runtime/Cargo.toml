@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["llama"]
+llama = ["infer/llama", "inference/llama"]
+
 [dependencies]
 # Workspace crates
 bus = { path = "../bus" }
@@ -17,9 +21,17 @@ inference = { path = "../inference" }
 speech = { path = "../speech" }
 prompt = { path = "../prompt" }
 crypto = { path = "../crypto" }
+infer = { workspace = true }
 
 # External dependencies
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+serde.workspace = true
+reqwest = { version = "0.12", features = ["stream"] }
+sha2 = "0.10"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3.8"

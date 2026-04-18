@@ -1,72 +1,128 @@
 //! Daemon IPC layer — CLI ↔ daemon communication.
 
 use crate::error::CliError;
-use serde::{Deserialize, Serialize};
+use runtime::{IpcClientHandle, IpcCommand as RuntimeCommand, IpcEvent, IpcResponse};
 
-/// Events sent from daemon to CLI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DaemonEvent {
-    /// Daemon is ready.
+/// Internal daemon event wrapper for CLI — private formatting helper.
+#[derive(Debug, Clone)]
+pub(crate) enum DaemonEvent {
     DaemonReady,
-    /// Daemon is shutting down.
     DaemonShuttingDown,
-    /// Runtime status update.
-    StatusUpdate { message: String },
-    /// Actor lifecycle event.
-    ActorEvent { actor_name: String, status: String },
+    StatusUpdate {
+        actors: Vec<bus::events::system::ActorHealth>,
+        uptime_seconds: u64,
+    },
+    Pong,
+    Acknowledged,
+    LoopStatusChanged {
+        loop_name: String,
+        enabled: bool,
+    },
+    LoopsListed {
+        loops: Vec<runtime::LoopInfo>,
+    },
+    DebugInfo {
+        info: String,
+    },
+    VerboseSet {
+        enabled: bool,
+    },
+    MemoryStats {
+        stats: String,
+    },
+    ConfigDump {
+        config: String,
+    },
 }
 
-/// Commands sent from CLI to daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CliCommand {
-    /// Request daemon status.
+/// Internal CLI command wrapper — private, delegates to runtime::IpcCommand.
+#[derive(Debug, Clone)]
+pub(crate) enum CliCommand {
     Status,
-    /// Request graceful shutdown.
     Shutdown,
-    /// Ping the daemon.
     Ping,
-    /// Toggle a background loop.
-    ToggleLoop { loop_name: String },
-    /// List all background loops.
+    ToggleLoop { loop_name: String, enabled: bool },
     ListLoops,
+    DebugInfo,
+    SetVerbose { enabled: bool },
+    MemoryStats,
+    ConfigDump,
 }
 
-/// IPC client handle.
-///
-/// This is the CLI's connection to the daemon.
-#[cfg(target_os = "windows")]
+/// IPC client wrapping the runtime's in-process IPC handle.
 pub struct IpcClient {
-    _placeholder: (),
+    handle: IpcClientHandle,
 }
 
-#[cfg(target_os = "windows")]
 impl IpcClient {
-    /// Connect to the daemon.
-    pub async fn connect() -> Result<Self, CliError> {
-        // Windows IPC stub — no actual connection yet
-        tracing::info!("IpcClient::connect() stub called (Windows)");
-        Ok(Self { _placeholder: () })
+    /// Create a new IPC client from the runtime's client handle.
+    pub fn new(handle: IpcClientHandle) -> Self {
+        Self { handle }
     }
 
     /// Send a command to the daemon.
-    pub async fn send_command(&self, _command: CliCommand) -> Result<(), CliError> {
-        // Stub — no actual send yet
-        tracing::info!("IpcClient::send_command() stub called");
+    pub(crate) async fn send_command(&self, command: CliCommand) -> Result<(), CliError> {
+        let runtime_cmd = match command {
+            CliCommand::Status => RuntimeCommand::StatusRequest,
+            CliCommand::Shutdown => RuntimeCommand::ShutdownRequest,
+            CliCommand::Ping => RuntimeCommand::Ping,
+            CliCommand::ToggleLoop { loop_name, enabled } => {
+                RuntimeCommand::ToggleLoop { loop_name, enabled }
+            }
+            CliCommand::ListLoops => RuntimeCommand::ListLoops,
+            CliCommand::DebugInfo => RuntimeCommand::DebugInfo,
+            CliCommand::SetVerbose { enabled } => RuntimeCommand::SetVerbose { enabled },
+            CliCommand::MemoryStats => RuntimeCommand::MemoryStats,
+            CliCommand::ConfigDump => RuntimeCommand::ConfigDump,
+        };
+
+        self.handle
+            .command_tx
+            .send(runtime_cmd)
+            .map_err(|e| CliError::IpcSendFailed(e.to_string()))?;
+
         Ok(())
     }
 
     /// Receive the next daemon event.
-    pub async fn recv_event(&mut self) -> Result<Option<DaemonEvent>, CliError> {
-        // Stub — no actual receive yet
-        // Return None to indicate no event available
-        Ok(None)
+    pub(crate) async fn recv_event(&mut self) -> Result<Option<DaemonEvent>, CliError> {
+        match self.handle.response_rx.try_recv() {
+            Ok(response) => Ok(Some(map_response_to_event(response))),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                Err(CliError::IpcConnectionFailed("channel closed".to_string()))
+            }
+        }
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-compile_error!(
-    "CLI IPC is currently only implemented for Windows. Non-Windows IPC support is planned for a future release."
-);
+/// Map runtime IpcResponse to CLI DaemonEvent.
+fn map_response_to_event(response: IpcResponse) -> DaemonEvent {
+    match response {
+        IpcResponse::Status {
+            actors,
+            uptime_seconds,
+        } => DaemonEvent::StatusUpdate {
+            actors,
+            uptime_seconds,
+        },
+        IpcResponse::ShutdownAcknowledged => DaemonEvent::DaemonShuttingDown,
+        IpcResponse::Pong => DaemonEvent::Pong,
+        IpcResponse::Ok => DaemonEvent::Acknowledged,
+        IpcResponse::LoopsList { loops } => DaemonEvent::LoopsListed { loops },
+        IpcResponse::DebugInfo { info } => DaemonEvent::DebugInfo { info },
+        IpcResponse::VerboseSet { enabled } => DaemonEvent::VerboseSet { enabled },
+        IpcResponse::MemoryStats { stats } => DaemonEvent::MemoryStats { stats },
+        IpcResponse::ConfigDump { config } => DaemonEvent::ConfigDump { config },
+        IpcResponse::Event(event) => match event {
+            IpcEvent::BootComplete => DaemonEvent::DaemonReady,
+            IpcEvent::ShutdownInitiated => DaemonEvent::DaemonShuttingDown,
+            IpcEvent::LoopStatusChanged { loop_name, enabled } => {
+                DaemonEvent::LoopStatusChanged { loop_name, enabled }
+            }
+        },
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -84,12 +140,5 @@ mod tests {
         let cmd = CliCommand::Status;
         let cloned = cmd.clone();
         assert!(matches!(cloned, CliCommand::Status));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn ipc_client_connects() {
-        let result = IpcClient::connect().await;
-        assert!(result.is_ok());
     }
 }

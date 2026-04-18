@@ -54,7 +54,7 @@ impl CtpActor {
             bus_rx: None,
             signal_buffer: SignalBuffer::new(Duration::from_secs(300)), // 5-minute window
             context_assembler: ContextAssembler::new(),
-            trigger_gate: TriggerGate::new(Duration::from_secs(600)) // 10-minute default interval
+            trigger_gate: TriggerGate::new(Duration::from_secs(30)) // 30-second default interval
                 .with_sensitivity(0.5),
             pattern_engine: PatternEngine::new(),
             user_state_classifier: UserStateClassifier::new(),
@@ -226,7 +226,7 @@ impl CtpActor {
 
 impl Actor for CtpActor {
     fn name(&self) -> &'static str {
-        "CtpActor"
+        "ctp"
     }
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {
@@ -296,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn actor_constructs() {
         let (actor, _signal_tx) = CtpActor::new();
-        assert_eq!(actor.name(), "CtpActor");
+        assert_eq!(actor.name(), "ctp");
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use crate::types::{AudioStream, PendingSentence};
 use bus::causal::CausalId;
 use bus::events::{InferenceEvent, SoulEvent, SpeechEvent, SystemEvent};
 use bus::{Actor, ActorError, Event, EventBus};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -121,12 +122,13 @@ impl TtsActor {
             }
         }
 
-        // Insert sentence into queue (ready for stub, not ready for real impl)
+        // Insert sentence into queue (not yet synthesized)
+        // Synthesis happens on-demand in play_ready_sentences
         let pending = PendingSentence {
             text: text.clone(),
             sentence_index,
-            audio: Some(vec![0u8; text.len() * 100]), // Stub audio
-            ready: true,                              // Stub: immediately ready
+            audio: None, // Will be synthesized when played
+            ready: true, // Ready for synthesis
         };
         self.queue.insert(sentence_index, pending);
 
@@ -160,7 +162,8 @@ impl TtsActor {
 
         self.is_speaking = true;
 
-        // Synthesize speech (stub)
+        // Synthesize speech
+        // NOTE: Backend should complete synthesis quickly or be async internally
         match self.backend.synthesize(&text) {
             Ok(audio) => {
                 debug!(
@@ -170,13 +173,40 @@ impl TtsActor {
                     "Speech synthesized"
                 );
 
-                // Stub: immediately emit completion without actual playback
-                bus.broadcast(Event::Speech(SpeechEvent::SpeakingCompleted { causal_id }))
+                // Play the audio in spawn_blocking (contains thread::sleep)
+                let audio_clone = audio.clone();
+                match tokio::task::spawn_blocking(move || Self::play_audio_blocking(&audio_clone))
                     .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                {
+                    Ok(Ok(())) => {
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeakingCompleted { causal_id }))
+                            .await
+                            .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
 
-                self.is_speaking = false;
-                info!(causal_id = ?causal_id, "Speech output completed");
+                        self.is_speaking = false;
+                        info!(causal_id = ?causal_id, "Speech output completed");
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %e, causal_id = ?causal_id, "Audio playback failed");
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                            reason: format!("Playback failed: {}", e),
+                            causal_id,
+                        }))
+                        .await
+                        .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                        self.is_speaking = false;
+                    }
+                    Err(e) => {
+                        error!(error = %e, causal_id = ?causal_id, "Playback task panicked");
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                            reason: format!("Playback panicked: {}", e),
+                            causal_id,
+                        }))
+                        .await
+                        .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                        self.is_speaking = false;
+                    }
+                }
             }
             Err(e) => {
                 error!(error = %e, causal_id = ?causal_id, "Speech synthesis failed");
@@ -216,7 +246,7 @@ impl TtsActor {
 
         // Play each ready sentence in order
         for index in indices_to_play {
-            if let Some(_sentence) = self.queue.remove(&index) {
+            if let Some(sentence) = self.queue.remove(&index) {
                 debug!(sentence_index = %index, "Playing sentence");
 
                 if !self.is_speaking {
@@ -226,10 +256,56 @@ impl TtsActor {
                     self.is_speaking = true;
                 }
 
-                // Stub: actual playback would happen here
-                // In a real implementation: send audio to cpal output stream
-
-                debug!(sentence_index = %index, "Sentence playback complete");
+                // Synthesize sentence audio
+                // NOTE: Backend should complete synthesis quickly or be async internally
+                match self.backend.synthesize(&sentence.text) {
+                    Ok(audio) => {
+                        // Play the audio in spawn_blocking (contains thread::sleep)
+                        let audio_clone = audio.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            Self::play_audio_blocking(&audio_clone)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                debug!(sentence_index = %index, "Sentence playback complete");
+                            }
+                            Ok(Err(e)) => {
+                                error!(error = %e, sentence_index = %index, "Audio playback failed");
+                                bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                                    reason: format!("Playback failed: {}", e),
+                                    causal_id,
+                                }))
+                                .await
+                                .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                                self.is_speaking = false;
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                error!(error = %e, sentence_index = %index, "Playback task panicked");
+                                bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                                    reason: format!("Playback panicked: {}", e),
+                                    causal_id,
+                                }))
+                                .await
+                                .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                                self.is_speaking = false;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, sentence_index = %index, "Synthesis failed");
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                            reason: e.to_string(),
+                            causal_id,
+                        }))
+                        .await
+                        .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                        self.is_speaking = false;
+                        return Ok(());
+                    }
+                }
             }
         }
 
@@ -240,6 +316,63 @@ impl TtsActor {
                 .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
             self.is_speaking = false;
         }
+
+        Ok(())
+    }
+
+    /// Play audio using cpal output device (blocking — must be called from spawn_blocking).
+    fn play_audio_blocking(audio: &AudioStream) -> Result<(), SpeechActorError> {
+        if audio.is_empty() {
+            return Ok(());
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| SpeechActorError::AudioDevice("No default output device".to_string()))?;
+
+        let supported_config = device.default_output_config().map_err(|e| {
+            SpeechActorError::AudioDevice(format!("Failed to get default output config: {}", e))
+        })?;
+
+        let config = cpal::StreamConfig {
+            channels: 1,
+            sample_rate: supported_config.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let samples = audio.samples.clone();
+        let mut sample_index = 0;
+        let sample_count = samples.len();
+
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = if sample_index < sample_count {
+                            let s = samples[sample_index];
+                            sample_index += 1;
+                            s
+                        } else {
+                            0.0
+                        };
+                    }
+                },
+                |err| error!("Audio output stream error: {}", err),
+                None,
+            )
+            .map_err(|e| {
+                SpeechActorError::AudioDevice(format!("Failed to build output stream: {}", e))
+            })?;
+
+        stream.play().map_err(|e| {
+            SpeechActorError::AudioDevice(format!("Failed to start output stream: {}", e))
+        })?;
+
+        // Block until playback completes
+        let duration = std::time::Duration::from_millis(audio.duration_ms() + 100);
+        std::thread::sleep(duration);
 
         Ok(())
     }

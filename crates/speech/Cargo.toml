@@ -21,8 +21,5 @@ cpal = "0.15"
 # TTS backend (platform-native via unified interface)
 tts = "0.26"
 
-# Parakeet/Nemotron INT8 streaming STT backend
-parakeet-rs = "0.3.4"
-
 [dev-dependencies]
 tempfile = "3"

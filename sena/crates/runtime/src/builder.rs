@@ -1,9 +1,10 @@
 //! Actor builder functions — construct actor instances with their backends.
 
 use crate::error::RuntimeError;
-use inference::InferenceError;
+use infer::{BackendType as InferBackendType, ModelRegistry as InferModelRegistry};
 use platform::PlatformError;
 use soul::SoulError;
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Stub platform backend implementation.
@@ -113,42 +114,6 @@ impl soul::SoulStore for StubSoulStore {
     }
 }
 
-/// Stub inference backend implementation.
-struct StubInferenceBackend;
-
-#[async_trait::async_trait]
-impl inference::InferenceBackend for StubInferenceBackend {
-    fn backend_type(&self) -> inference::BackendType {
-        inference::BackendType::Mock
-    }
-
-    fn is_loaded(&self) -> bool {
-        false
-    }
-
-    async fn infer(
-        &self,
-        _prompt: String,
-        _params: inference::InferenceParams,
-    ) -> Result<inference::InferenceStream, InferenceError> {
-        Err(InferenceError::ModelNotLoaded)
-    }
-
-    fn complete(
-        &self,
-        _prompt: &str,
-        _params: &inference::InferenceParams,
-    ) -> Result<String, InferenceError> {
-        Err(InferenceError::ModelNotLoaded)
-    }
-
-    // embed() and extract() use default trait implementations
-
-    async fn shutdown(&mut self) -> Result<(), InferenceError> {
-        Ok(())
-    }
-}
-
 /// Build the platform actor with the native OS backend.
 ///
 /// Falls back to stub backend if native backend construction fails.
@@ -185,43 +150,151 @@ pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
     Ok(actor)
 }
 
-/// Build the inference actor with a stub backend.
-pub fn build_inference_actor() -> Result<inference::InferenceActor, RuntimeError> {
-    tracing::debug!("building inference actor with stub backend");
-    let backend = Box::new(StubInferenceBackend);
-    let actor = inference::InferenceActor::new(backend);
-    Ok(actor)
+/// Build the inference actor from discovered model registry.
+///
+/// - With `llama` feature enabled and at least one model available:
+///   constructs infer backend via `infer::auto_backend`.
+/// - If no model is available, or `llama` feature is disabled:
+///   falls back to `inference::MockBackend`.
+pub fn build_inference_actor(
+    registry: &InferModelRegistry,
+) -> Result<inference::InferenceActor, RuntimeError> {
+    #[cfg(feature = "llama")]
+    infer::suppress_llama_logs();
+
+    #[cfg(feature = "llama")]
+    {
+        if registry.is_empty() {
+            tracing::warn!("no models found — inference actor using MockBackend");
+            let backend = Box::new(inference::MockBackend::default_loaded());
+            return Ok(inference::InferenceActor::new(backend));
+        }
+
+        let backend_type = InferBackendType::auto_detect();
+        let mut candidates: Vec<_> = registry.models().iter().collect();
+        candidates.sort_by_key(|model| {
+            let is_embedding_model = model.name.to_ascii_lowercase().contains("embed");
+            (is_embedding_model, model.size_bytes)
+        });
+
+        for model in candidates {
+            tracing::info!(
+                model = %model.name,
+                path = ?model.path,
+                size_bytes = model.size_bytes,
+                ?backend_type,
+                "inference actor: attempting infer backend"
+            );
+
+            match infer::auto_backend(&model.path, backend_type) {
+                Ok(infer_backend) => {
+                    let adapter = inference::LlamaAdapter::from_infer_backend(infer_backend);
+                    return Ok(inference::InferenceActor::new(Box::new(adapter)));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        model = %model.name,
+                        path = ?model.path,
+                        error = %e,
+                        "inference actor: model load failed, trying next candidate"
+                    );
+                }
+            }
+        }
+
+        tracing::warn!("all discovered models failed to load — inference actor using MockBackend");
+        let backend = Box::new(inference::MockBackend::default_loaded());
+        Ok(inference::InferenceActor::new(backend))
+    }
+
+    #[cfg(not(feature = "llama"))]
+    {
+        let _ = registry;
+        tracing::warn!("llama feature disabled — inference actor using MockBackend");
+        let backend = Box::new(inference::MockBackend::default_loaded());
+        Ok(inference::InferenceActor::new(backend))
+    }
 }
 
 /// Build the CTP actor.
 ///
-/// Returns (actor, signal_tx) where signal_tx can be used to send signals to CTP.
-pub fn build_ctp_actor() -> Result<
-    (
-        ctp::CtpActor,
-        tokio::sync::mpsc::UnboundedSender<ctp::CtpSignal>,
-    ),
-    RuntimeError,
-> {
+/// The production runtime path ingests CTP signals from the bus; direct
+/// signal injection sender is test-only and is therefore not returned here.
+pub fn build_ctp_actor() -> Result<ctp::CtpActor, RuntimeError> {
     tracing::debug!("building CTP actor");
-    let (actor, signal_tx) = ctp::CtpActor::new();
-    Ok((actor, signal_tx))
-}
-
-/// Build the STT actor with a stub backend.
-pub fn build_stt_actor() -> Result<speech::SttActor, RuntimeError> {
-    tracing::debug!("building STT actor with stub backend");
-    let backend = Box::new(speech::StubSttBackend::new(1600));
-    let actor = speech::SttActor::new(backend);
+    let (actor, _signal_tx) = ctp::CtpActor::new();
     Ok(actor)
 }
 
-/// Build the TTS actor with a stub backend.
-pub fn build_tts_actor() -> Result<speech::TtsActor, RuntimeError> {
-    tracing::debug!("building TTS actor with stub backend");
-    let backend = Box::new(speech::StubTtsBackend::new(16000));
-    let actor = speech::TtsActor::new(backend);
-    Ok(actor)
+/// Build the STT actor with Parakeet backend or stub fallback.
+///
+/// Attempts to construct ParakeetSttBackend from models_dir. Falls back to
+/// StubSttBackend with tracing::warn! if construction fails.
+pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeError> {
+    let encoder_path = models_dir.join("encoder.onnx");
+    let decoder_path = models_dir.join("decoder_joint.onnx");
+    let tokenizer_path = models_dir.join("tokenizer.model");
+
+    match speech::ParakeetSttBackend::new(
+        encoder_path.clone(),
+        decoder_path.clone(),
+        tokenizer_path.clone(),
+    ) {
+        Ok(backend) => {
+            tracing::info!(
+                encoder = ?encoder_path,
+                decoder = ?decoder_path,
+                tokenizer = ?tokenizer_path,
+                "STT actor: using ParakeetSttBackend"
+            );
+            let actor = speech::SttActor::new(Box::new(backend));
+            Ok(actor)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                encoder = ?encoder_path,
+                decoder = ?decoder_path,
+                tokenizer = ?tokenizer_path,
+                "STT actor: ParakeetSttBackend construction failed, falling back to StubSttBackend"
+            );
+            let backend = Box::new(speech::StubSttBackend::new(1600));
+            let actor = speech::SttActor::new(backend);
+            Ok(actor)
+        }
+    }
+}
+
+/// Build the TTS actor with Piper backend or stub fallback.
+///
+/// Attempts to construct PiperTtsBackend from models_dir. Falls back to
+/// StubTtsBackend with tracing::warn! if construction fails.
+pub fn build_tts_actor(models_dir: &Path) -> Result<speech::TtsActor, RuntimeError> {
+    let model_path = models_dir.join("en_US-lessac-high.onnx");
+    let config_path = models_dir.join("en_US-lessac-high.onnx.json");
+
+    match speech::PiperTtsBackend::new(model_path.clone(), config_path.clone()) {
+        Ok(backend) => {
+            tracing::info!(
+                model = ?model_path,
+                config = ?config_path,
+                "TTS actor: using PiperTtsBackend"
+            );
+            let actor = speech::TtsActor::new(Box::new(backend));
+            Ok(actor)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                model = ?model_path,
+                config = ?config_path,
+                "TTS actor: PiperTtsBackend construction failed, falling back to StubTtsBackend"
+            );
+            let backend = Box::new(speech::StubTtsBackend::new(16000));
+            let actor = speech::TtsActor::new(backend);
+            Ok(actor)
+        }
+    }
 }
 
 /// Build the Prompt actor with a stub composer.
@@ -235,6 +308,8 @@ pub fn build_prompt_actor() -> Result<prompt::PromptActor, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use infer::{ModelInfo as InferModelInfo, Quantization as InferQuantization};
+    use std::path::PathBuf;
 
     #[test]
     fn platform_actor_builds() {
@@ -256,7 +331,20 @@ mod tests {
 
     #[test]
     fn inference_actor_builds() {
-        let result = build_inference_actor();
+        let result = build_inference_actor(&infer::ModelRegistry::new());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inference_actor_falls_back_to_mock_when_model_load_fails() {
+        let registry = infer::ModelRegistry::from_models(vec![InferModelInfo {
+            name: "missing-model".to_string(),
+            path: PathBuf::from("C:/does-not-exist/missing.gguf"),
+            size_bytes: 1,
+            quantization: InferQuantization::Unknown("unknown".to_string()),
+        }]);
+
+        let result = build_inference_actor(&registry);
         assert!(result.is_ok());
     }
 
@@ -268,13 +356,15 @@ mod tests {
 
     #[test]
     fn stt_actor_builds() {
-        let result = build_stt_actor();
+        let models_dir = std::path::Path::new(".");
+        let result = build_stt_actor(models_dir);
         assert!(result.is_ok());
     }
 
     #[test]
     fn tts_actor_builds() {
-        let result = build_tts_actor();
+        let models_dir = std::path::Path::new(".");
+        let result = build_tts_actor(models_dir);
         assert!(result.is_ok());
     }
 

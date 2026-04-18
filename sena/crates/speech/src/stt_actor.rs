@@ -6,11 +6,10 @@ use crate::types::SttEvent;
 use bus::causal::CausalId;
 use bus::events::{SpeechEvent, SystemEvent};
 use bus::{Actor, ActorError, Event, EventBus};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
-use tokio::sync::broadcast;
-#[cfg(test)]
-use tracing::debug;
-use tracing::{error, info, warn};
+use tokio::sync::{broadcast, mpsc};
+use tracing::{debug, error, info, warn};
 
 /// Default minimum confidence threshold for valid transcriptions.
 const DEFAULT_MIN_CONFIDENCE_THRESHOLD: f32 = 0.65;
@@ -31,6 +30,10 @@ pub struct SttActor {
     shutdown_requested: bool,
     listen_mode_active: bool,
     listen_mode_causal_id: Option<CausalId>,
+    /// Audio chunk receiver from cpal callback thread.
+    audio_rx: Option<mpsc::UnboundedReceiver<AudioChunk>>,
+    /// Audio stream handle (kept alive during capture).
+    audio_stream: Option<cpal::Stream>,
 }
 
 impl SttActor {
@@ -44,6 +47,8 @@ impl SttActor {
             shutdown_requested: false,
             listen_mode_active: false,
             listen_mode_causal_id: None,
+            audio_rx: None,
+            audio_stream: None,
         }
     }
 
@@ -64,11 +69,27 @@ impl SttActor {
                 info!("Listen mode requested");
                 self.listen_mode_active = true;
                 self.listen_mode_causal_id = Some(causal_id);
+
+                // Start audio capture
+                if let Err(e) = self.start_audio_capture() {
+                    error!(error = %e, "Failed to start audio capture");
+                    if let Some(bus) = &self.bus {
+                        let _ = bus
+                            .broadcast(Event::Speech(SpeechEvent::TranscriptionFailed {
+                                reason: format!("Failed to start audio capture: {}", e),
+                                causal_id,
+                            }))
+                            .await;
+                    }
+                }
             }
             Event::Speech(SpeechEvent::ListenModeStopRequested { causal_id }) => {
                 info!("Listen mode stop requested");
                 self.listen_mode_active = false;
                 self.listen_mode_causal_id = None;
+
+                // Stop audio capture
+                self.stop_audio_capture();
 
                 if let Some(bus) = &self.bus {
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeStopped { causal_id }))
@@ -81,9 +102,90 @@ impl SttActor {
         Ok(())
     }
 
+    /// Start audio capture from the default microphone.
+    fn start_audio_capture(&mut self) -> Result<(), SpeechActorError> {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| SpeechActorError::AudioDevice("No default input device".to_string()))?;
+
+        let config = device.default_input_config().map_err(|e| {
+            SpeechActorError::AudioDevice(format!("Failed to get input config: {}", e))
+        })?;
+
+        info!(device_id = ?device.id(), config = ?config, "Starting audio capture");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                self.build_input_stream::<f32>(&device, &config.into(), tx)?
+            }
+            cpal::SampleFormat::I16 => {
+                self.build_input_stream::<i16>(&device, &config.into(), tx)?
+            }
+            cpal::SampleFormat::U16 => {
+                self.build_input_stream::<u16>(&device, &config.into(), tx)?
+            }
+            _ => {
+                return Err(SpeechActorError::AudioDevice(
+                    "Unsupported sample format".to_string(),
+                ));
+            }
+        };
+
+        stream
+            .play()
+            .map_err(|e| SpeechActorError::AudioDevice(format!("Failed to start stream: {}", e)))?;
+
+        self.audio_rx = Some(rx);
+        self.audio_stream = Some(stream);
+
+        Ok(())
+    }
+
+    /// Build an input stream for a specific sample format.
+    fn build_input_stream<T>(
+        &self,
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        tx: mpsc::UnboundedSender<AudioChunk>,
+    ) -> Result<cpal::Stream, SpeechActorError>
+    where
+        T: cpal::Sample + cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        let err_fn = |err| error!("Audio stream error: {}", err);
+
+        let stream = device
+            .build_input_stream(
+                config,
+                move |data: &[T], _: &cpal::InputCallbackInfo| {
+                    let samples: Vec<f32> =
+                        data.iter().map(|&s| cpal::Sample::from_sample(s)).collect();
+                    let chunk = AudioChunk { samples };
+                    let _ = tx.send(chunk);
+                },
+                err_fn,
+                None,
+            )
+            .map_err(|e| SpeechActorError::AudioDevice(format!("Failed to build stream: {}", e)))?;
+
+        Ok(stream)
+    }
+
+    /// Stop audio capture.
+    fn stop_audio_capture(&mut self) {
+        if let Some(stream) = self.audio_stream.take() {
+            let _ = stream.pause();
+            drop(stream);
+        }
+        self.audio_rx = None;
+        info!("Audio capture stopped");
+    }
+
     /// Handle backend STT events.
-    #[cfg(test)]
-    async fn handle_stt_event(&self, event: SttEvent) -> Result<(), SpeechActorError> {
+    async fn handle_stt_event(&mut self, event: SttEvent) -> Result<(), SpeechActorError> {
         let bus = self
             .bus
             .as_ref()
@@ -112,10 +214,30 @@ impl SttActor {
                     .await
                     .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
                 } else if self.listen_mode_active {
-                    // In listen mode, emit listen mode transcription event
+                    // In listen mode, emit both ListenModeTranscription (for visibility)
+                    // and TranscriptionCompleted (for inference pipeline)
+                    let listen_causal_id = match self.listen_mode_causal_id {
+                        Some(id) => id,
+                        None => {
+                            warn!(
+                                "listen_mode_active but no causal_id stored — using generated id"
+                            );
+                            causal_id
+                        }
+                    };
+
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                        text: text.clone(),
+                        causal_id: listen_causal_id,
+                    }))
+                    .await
+                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+
+                    // Also emit TranscriptionCompleted so inference pipeline can react
+                    bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
                         text,
-                        causal_id: self.listen_mode_causal_id.unwrap_or(causal_id),
+                        confidence,
+                        causal_id: listen_causal_id,
                     }))
                     .await
                     .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
@@ -200,6 +322,29 @@ impl Actor for SttActor {
                         error!(error = %e, "Failed to handle bus event");
                     }
                 }
+                Some(chunk) = async {
+                    if let Some(ref mut audio_rx) = self.audio_rx {
+                        audio_rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    // Feed audio chunk to backend
+                    // NOTE: Backend feed() should be non-blocking or minimal-blocking.
+                    // Heavy inference work should be async internally to avoid blocking the actor.
+                    match self.backend.feed(&chunk.samples) {
+                        Ok(events) => {
+                            for event in events {
+                                if let Err(e) = self.handle_stt_event(event).await {
+                                    error!(error = %e, "Failed to handle STT event");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Backend feed failed");
+                        }
+                    }
+                }
             }
         }
 
@@ -210,7 +355,11 @@ impl Actor for SttActor {
     async fn stop(&mut self) -> Result<(), ActorError> {
         info!("STT actor stopping");
 
+        // Stop audio capture
+        self.stop_audio_capture();
+
         // Flush backend
+        // NOTE: Backend flush() should complete quickly or be async internally
         if let Err(e) = self.backend.flush() {
             warn!(error = %e, "Failed to flush STT backend");
         }

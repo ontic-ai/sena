@@ -1,6 +1,6 @@
 use crate::error::MemoryError;
-use crypto::MasterKey;
 use crypto::working_file;
+use crypto::MasterKey;
 use std::path::{Path, PathBuf};
 
 /// Manages encrypted storage for ech0's persistent files.

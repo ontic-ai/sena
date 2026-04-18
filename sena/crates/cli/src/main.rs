@@ -21,13 +21,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Boot the runtime (steps 1-11 per architecture §4.1).
-    let boot_result = runtime::boot().await.map_err(|e| {
+    let mut boot_result = runtime::boot().await.map_err(|e| {
         error!("Boot failed: {}", e);
         anyhow::anyhow!("Runtime boot failed: {}", e)
     })?;
 
-    // Clone the bus before moving boot_result into the supervision loop.
+    // Clone the bus before moving boot_result components.
     let bus = boot_result.bus.clone();
+
+    // Extract IPC client handle for the shell.
+    // The handle is wrapped in Option so we can take it cleanly.
+    let ipc_handle = boot_result.ipc_client_handle.take().ok_or_else(|| {
+        error!("IPC client handle missing after boot — critical failure");
+        anyhow::anyhow!("IPC client handle unexpectedly absent after boot")
+    })?;
+
+    // Create IPC client for the shell.
+    let ipc_client = daemon_ipc::IpcClient::new(ipc_handle);
+
+    // Create shell with the IPC client.
+    let shell = Shell::new(ipc_client);
 
     // Run supervision loop and shell concurrently — neither blocks the other.
     // When either completes (shutdown or shell exit) the other is cancelled.
@@ -38,10 +51,7 @@ async fn main() -> anyhow::Result<()> {
                 return Err(anyhow::anyhow!("Runtime supervision failed: {}", e));
             }
         }
-        result = async {
-            let mut shell = Shell::new().await?;
-            shell.run().await
-        } => {
+        result = shell.run() => {
             // Shell exited — broadcast shutdown so supervision loop also exits.
             let _ = bus
                 .broadcast(bus::Event::System(bus::SystemEvent::ShutdownSignal))

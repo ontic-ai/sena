@@ -6,6 +6,14 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["llama"]
+llama = ["infer/llama"]
+vulkan = ["infer/vulkan"]
+cuda = ["infer/cuda"]
+metal = ["infer/metal"]
+
+
 [dependencies]
 bus = { path = "../bus" }
 text = { path = "../text" }
@@ -16,6 +24,8 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 futures = "0.3"
+infer = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"

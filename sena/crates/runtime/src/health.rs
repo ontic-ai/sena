@@ -64,7 +64,10 @@ impl ActorRegistry {
     /// Mark an actor as failed with the given reason.  
     /// If the actor is not yet registered, it is inserted in a failed state.
     pub fn mark_failed(&mut self, name: &'static str, reason: String) {
-        let entry = self.entries.entry(name).or_insert_with(|| ActorEntry::new(name));
+        let entry = self
+            .entries
+            .entry(name)
+            .or_insert_with(|| ActorEntry::new(name));
         entry.status = ActorStatus::Failed { reason };
     }
 

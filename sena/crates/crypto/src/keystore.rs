@@ -60,7 +60,8 @@ impl KeyStore for KeyringStore {
 
         tracing::debug!(
             "stored master key in keyring: service={}, username={}",
-            service, username
+            service,
+            username
         );
         Ok(())
     }
@@ -93,7 +94,8 @@ impl KeyStore for KeyringStore {
 
         tracing::debug!(
             "retrieved master key from keyring: service={}, username={}",
-            service, username
+            service,
+            username
         );
         Ok(MasterKey::from_bytes(arr))
     }
@@ -112,7 +114,8 @@ impl KeyStore for KeyringStore {
 
         tracing::debug!(
             "deleted master key from keyring: service={}, username={}",
-            service, username
+            service,
+            username
         );
         Ok(())
     }
@@ -133,13 +136,19 @@ mod tests {
 
         let store_result = store.store(service, username, &key);
         if store_result.is_err() {
-            eprintln!("Skipping keyring test - keyring unavailable: {:?}", store_result.err());
+            eprintln!(
+                "Skipping keyring test - keyring unavailable: {:?}",
+                store_result.err()
+            );
             return;
         }
 
         let retrieve_result = store.retrieve(service, username);
         if retrieve_result.is_err() {
-            eprintln!("Skipping keyring test - retrieve failed: {:?}", retrieve_result.err());
+            eprintln!(
+                "Skipping keyring test - retrieve failed: {:?}",
+                retrieve_result.err()
+            );
             let _ = store.delete(service, username);
             return;
         }

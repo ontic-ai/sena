@@ -11,9 +11,11 @@
 //! Order is strict:
 //! 1. Config load
 //! 2. Encryption init
+//!    2.5. Model download (Phase 4)
 //! 3. EventBus init
 //! 4. Soul init
 //! 5. Core actors spawn (Platform, Soul, Memory, Inference, CTP, Speech)
+//! 6. IPC server spawn (Phase 5)
 //!
 //! After boot, the supervisor waits for all expected actors to emit ActorReady,
 //! then broadcasts BootComplete.
@@ -25,6 +27,7 @@
 
 pub mod boot;
 pub mod builder;
+pub mod download_manager;
 pub mod error;
 pub mod health;
 pub mod ipc_server;
@@ -33,7 +36,9 @@ pub mod supervisor;
 pub use boot::{BootResult, boot};
 pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};
-pub use ipc_server::{IpcCommand, IpcServer, spawn_ipc_server};
+pub use ipc_server::{
+    IpcClientHandle, IpcCommand, IpcEvent, IpcResponse, IpcServer, LoopInfo, spawn_ipc_server,
+};
 pub use supervisor::supervision_loop;
 
 #[cfg(test)]

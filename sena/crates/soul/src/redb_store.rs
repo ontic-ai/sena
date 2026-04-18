@@ -74,10 +74,10 @@ impl SoulStore for RedbSoulStore {
 
         for event in recent.iter().rev() {
             let line = format!("- {}\n", event.description);
-            if let Some(limit) = max_chars {
-                if content.len() + line.len() > limit {
-                    break;
-                }
+            if let Some(limit) = max_chars
+                && content.len() + line.len() > limit
+            {
+                break;
             }
             content.push_str(&line);
         }
@@ -165,11 +165,7 @@ mod tests {
         store.initialize().expect("initialize should succeed");
 
         let row_id = store
-            .write_event(
-                "test event".to_string(),
-                None,
-                SystemTime::UNIX_EPOCH,
-            )
+            .write_event("test event".to_string(), None, SystemTime::UNIX_EPOCH)
             .expect("write should succeed");
 
         assert_eq!(row_id, 1);
@@ -181,8 +177,12 @@ mod tests {
     #[test]
     fn redb_store_identity_signals() {
         let mut store = RedbSoulStore::new("/tmp/test-soul.db");
-        store.write_identity_signal("key", "value").expect("write should succeed");
-        let val = store.read_identity_signal("key").expect("read should succeed");
+        store
+            .write_identity_signal("key", "value")
+            .expect("write should succeed");
+        let val = store
+            .read_identity_signal("key")
+            .expect("read should succeed");
         assert_eq!(val, Some("value".to_string()));
     }
 }

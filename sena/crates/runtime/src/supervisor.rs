@@ -283,6 +283,14 @@ mod tests {
     use bus::EventBus;
     use std::sync::Arc;
 
+    // Helper to create a mock IpcClientHandle for tests
+    fn mock_ipc_client_handle() -> crate::ipc_server::IpcClientHandle {
+        let (server, client_handle) = crate::ipc_server::IpcServer::new(Arc::new(EventBus::new()));
+        // Drop server to prevent it from running
+        drop(server);
+        client_handle
+    }
+
     #[tokio::test]
     async fn supervision_loop_completes_with_no_actors() {
         let boot_result = BootResult {
@@ -290,6 +298,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            ipc_client_handle: Some(mock_ipc_client_handle()),
         };
 
         // Spawn a task to send shutdown signal after a short delay
@@ -312,6 +321,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            ipc_client_handle: Some(mock_ipc_client_handle()),
         };
 
         let result = await_readiness_gate(&boot_result).await;
@@ -325,6 +335,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],
+            ipc_client_handle: Some(mock_ipc_client_handle()),
         };
 
         // Don't send ActorReady — should timeout (but we use a short timeout for testing)

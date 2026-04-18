@@ -28,17 +28,21 @@ impl std::fmt::Debug for WorkItem {
 impl std::fmt::Debug for WorkKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkKind::Inference { source, causal_id, .. } => f
+            WorkKind::Inference {
+                source, causal_id, ..
+            } => f
                 .debug_struct("Inference")
                 .field("source", source)
                 .field("causal_id", causal_id)
                 .finish(),
-            WorkKind::Embed { causal_id, .. } => {
-                f.debug_struct("Embed").field("causal_id", causal_id).finish()
-            }
-            WorkKind::Extract { causal_id, .. } => {
-                f.debug_struct("Extract").field("causal_id", causal_id).finish()
-            }
+            WorkKind::Embed { causal_id, .. } => f
+                .debug_struct("Embed")
+                .field("causal_id", causal_id)
+                .finish(),
+            WorkKind::Extract { causal_id, .. } => f
+                .debug_struct("Extract")
+                .field("causal_id", causal_id)
+                .finish(),
         }
     }
 }
@@ -145,7 +149,8 @@ mod tests {
     #[test]
     fn queue_dequeues_high_before_normal() {
         let mut q = InferenceQueue::new(10);
-        q.enqueue(make_item(Priority::Normal)).expect("enqueue normal");
+        q.enqueue(make_item(Priority::Normal))
+            .expect("enqueue normal");
         q.enqueue(make_item(Priority::High)).expect("enqueue high");
         let item = q.dequeue().expect("dequeue should return item");
         assert_eq!(item.priority, Priority::High);
@@ -155,7 +160,8 @@ mod tests {
     fn queue_dequeues_normal_before_low() {
         let mut q = InferenceQueue::new(10);
         q.enqueue(make_item(Priority::Low)).expect("enqueue low");
-        q.enqueue(make_item(Priority::Normal)).expect("enqueue normal");
+        q.enqueue(make_item(Priority::Normal))
+            .expect("enqueue normal");
         let item = q.dequeue().expect("dequeue should return item");
         assert_eq!(item.priority, Priority::Normal);
     }
@@ -163,9 +169,13 @@ mod tests {
     #[test]
     fn queue_rejects_when_full() {
         let mut q = InferenceQueue::new(1);
-        q.enqueue(make_item(Priority::Normal)).expect("first enqueue should succeed");
+        q.enqueue(make_item(Priority::Normal))
+            .expect("first enqueue should succeed");
         let result = q.enqueue(make_item(Priority::Normal));
-        assert!(result.is_err(), "second enqueue should fail when at capacity");
+        assert!(
+            result.is_err(),
+            "second enqueue should fail when at capacity"
+        );
     }
 
     #[test]

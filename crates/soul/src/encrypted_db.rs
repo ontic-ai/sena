@@ -1,6 +1,6 @@
 use crate::error::SoulError;
-use crypto::MasterKey;
 use crypto::working_file;
+use crypto::MasterKey;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]

@@ -1321,7 +1321,10 @@ impl Shell {
                     "[speech] TTS playback complete".to_string(),
                 );
             }
-            Event::Speech(SpeechEvent::SttModelLoaded { model_name, backend }) => {
+            Event::Speech(SpeechEvent::SttModelLoaded {
+                model_name,
+                backend,
+            }) => {
                 self.add_message(
                     MessageRole::System,
                     format!("[speech] STT model loaded: {} ({})", model_name, backend),

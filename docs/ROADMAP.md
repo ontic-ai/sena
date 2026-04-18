@@ -10,6 +10,460 @@ Each phase has an explicit **entry gate** (what must be true before the phase st
 
 Phases are sequential. Parallelism within a phase is allowed. Parallelism across phases is not.
 
+CURRENT BONES PHASING AND PROMPT:
+You are wiring the sena/crates/ workspace from a structurally complete
+but fully stubbed system into a running one. The diagnostic report at
+docs/_scratch/diagnostic_report.md identifies every gap. Work through
+the phases below in strict order. Compile and verify after each phase
+before proceeding. Do not combine phases.
+
+Read the diagnostic report in full before writing a single line of code.
+Read every file you intend to modify before modifying it.
+
+---
+
+PHASE 1 — MAKE THE TERMINAL ALIVE
+Target: `cargo run --bin sena` produces visible output and accepts input.
+
+STEP 1.1 — Tracing configuration
+In crates/cli/src/main.rs, replace:
+  tracing_subscriber::fmt::init();
+With:
+  tracing_subscriber::fmt()
+      .with_env_filter(
+          tracing_subscriber::EnvFilter::try_from_default_env()
+              .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+      )
+      .with_target(false)
+      .with_writer(std::io::stdout)
+      .init();
+
+This makes INFO the default level without RUST_LOG set, and routes all
+tracing output to stdout so it appears in the terminal.
+
+STEP 1.2 — Launch the shell concurrently with the supervision loop
+In crates/cli/src/main.rs, after boot() succeeds, run the shell and
+supervision loop concurrently using tokio::select! or tokio::join!.
+The shell should run in parallel with supervision — neither blocks the
+other. When either completes (shutdown or shell exit), the other is
+cancelled and the process exits cleanly.
+
+Read crates/cli/src/shell.rs in full to understand Shell::new() and
+shell.run() before wiring them.
+
+STEP 1.3 — Ctrl+C shutdown bridge
+In crates/runtime/src/supervisor.rs (or main.rs if cleaner), add a
+tokio::signal::ctrl_c() listener that broadcasts SystemEvent::ShutdownSignal
+on the bus when triggered. This must run as part of the supervision loop
+so Ctrl+C initiates the graceful shutdown sequence rather than killing
+the process with SIGKILL.
+
+VERIFY Phase 1:
+  - `cargo run --bin sena` shows boot log lines on stdout
+  - The shell prompt appears and accepts input
+  - Ctrl+C triggers a clean shutdown log and exits with code 0
+  - cargo build --workspace clean
+
+---
+
+PHASE 2 — WIRE PLATFORM AND CTP
+Target: platform events flow → CTP assembles snapshots → ThoughtEventTriggered
+emits on the bus.
+
+STEP 2.1 — Fix the platform actor spawn
+Read crates/runtime/src/boot.rs, specifically spawn_platform_actor().
+The current stub discards _actor entirely and runs a bare shutdown loop.
+
+Rewrite spawn_platform_actor() to:
+  1. Call actor.start() to initialize the backend
+  2. Enter a real polling loop that calls the backend's poll methods
+     (active_window, clipboard, keystroke_cadence) on a configurable
+     interval (default: 250ms for active_window, 500ms for clipboard,
+     100ms for keystroke_cadence)
+  3. Broadcast the resulting PlatformEvent on the bus after each poll
+  4. Break on ShutdownSignal
+
+Read crates/platform/src/ in full before writing the polling loop.
+Understand what each poll method returns and what PlatformEvent variants
+map to each result.
+
+STEP 2.2 — Switch platform to NativeBackend
+In crates/runtime/src/builder.rs, build_platform_actor() currently
+constructs StubPlatformBackend. Change it to construct
+platform::NativeBackend (the platform-native alias, e.g. WindowsBackend
+on Windows). Read backends.rs to confirm the correct type alias.
+
+If NativeBackend::new() requires initialization (e.g. rdev listener for
+keystrokes), perform that initialization inside build_platform_actor()
+or inside actor.start(). Read the WindowsBackend implementation to
+understand what setup is required.
+
+STEP 2.3 — Fix CTP signal_tx
+In crates/runtime/src/boot.rs, line ~195:
+  let (ctp_actor, _signal_tx) = builder::build_ctp_actor()?;
+
+The _signal_tx is dropped immediately. Either:
+  a) Store signal_tx in the runtime state so it lives for the duration
+     of the session, OR
+  b) If signal_tx is not yet used by any caller, remove it from
+     build_ctp_actor()'s return type and simplify to:
+     let ctp_actor = builder::build_ctp_actor()?;
+
+Read crates/ctp/src/ in full to determine whether signal_tx is used
+anywhere in the run loop. If it is used for manual signal injection
+from tests only, option (b) is correct for production. If it is used
+in production signal paths, option (a) is correct.
+
+Do not drop the sender if any production code path uses it.
+
+VERIFY Phase 2:
+  - PlatformEvent::ActiveWindowChanged appears in the event stream
+    within 1 second of boot on a real desktop
+  - CTP receives platform events (add tracing::debug! to CTP's event
+    handler temporarily to confirm)
+  - ThoughtEventTriggered appears on the bus within the cooldown window
+    (30 seconds default) after boot
+  - cargo build --workspace clean, cargo test --workspace passes
+
+---
+
+PHASE 3 — WIRE REAL INFERENCE BACKEND
+Target: LlamaBackend from ontic/infer is bridged into Sena's actor
+system, wired at runtime, and discovers models.
+
+CONTEXT — the ontic/infer crate
+The `infer` crate is a standalone Ontic crate that provides the
+InferenceBackend trait, LlamaBackend (feature-gated), MockBackend, and
+model discovery utilities. It is bus-agnostic. Sena's crates/inference
+crate is bus-aware and wraps infer's backends into the actor system.
+Do NOT re-implement LlamaBackend from scratch. Bridge the existing one.
+
+The public API relevant to this phase (from infer's lib.rs):
+  - infer::InferenceBackend — the core trait
+  - infer::LlamaBackend — production backend (#[cfg(feature = "llama")])
+  - infer::MockBackend / infer::MockConfig — test backend
+  - infer::InferenceParams — parameters struct passed to complete/infer
+  - infer::BackendType — enum for selecting backend variant
+  - infer::BackendType::auto_detect() — picks the best available backend
+    (Vulkan → CUDA → Metal → CPU) based on compiled features
+  - infer::auto_backend(&path, backend_type) — constructs the right
+    backend for a given model path
+  - infer::discover_models(dir) — scans a directory for GGUF models
+  - infer::ollama_models_dir() — returns the platform-default Ollama
+    model directory path
+  - infer::suppress_llama_logs() — silences llama.cpp's C-level stdout
+    logs; call this once at boot before any backend is constructed
+  - infer::ExtractionResult — return type for embed/extract operations
+
+STEP 3.1 — Add infer as workspace dependency
+In sena/crates/Cargo.toml workspace dependencies section, add:
+
+  [workspace.dependencies]
+  infer = {
+    git = "https://github.com/ontic-ai/infer",
+    tag = "v0.1.2",
+    features = ["vulkan"]
+  }
+
+The vulkan feature implies llama and enables cross-vendor GPU offloading
+on Windows and Linux. This is the correct feature for this system.
+
+In crates/inference/Cargo.toml, add:
+  infer = { workspace = true }
+
+Do not add llama-cpp-2 directly to crates/inference — it is a
+transitive dependency of infer and must not be duplicated.
+
+STEP 3.2 — Create the infer adapter
+Read crates/inference/src/backend.rs in full to understand the local
+InferenceBackend trait that Sena's inference actor uses.
+Read crates/inference/src/stream.rs to understand InferenceStream.
+Read crates/inference/src/registry.rs to understand ModelRegistry.
+
+Then read the ontic/infer crate's backend trait carefully. Determine
+whether the local InferenceBackend trait should be:
+  a) REPLACED by infer::InferenceBackend directly — if the signatures
+     are compatible and no Sena-specific methods exist on the local trait
+  b) BRIDGED via an adapter struct — if the local trait has Sena-specific
+     methods (bus-aware, actor-specific) that infer::InferenceBackend
+     does not and should not have
+
+If bridging (option b, which is likely correct):
+  Create crates/inference/src/llama_adapter.rs. Define:
+
+    pub struct LlamaAdapter {
+        inner: infer::LlamaBackend,
+    }
+
+  Implement the local InferenceBackend trait for LlamaAdapter by
+  delegating to self.inner. Map infer's types to Sena's local types
+  where needed (InferenceParams → local params, InferError → local
+  InferenceError, etc.).
+
+  Use #[cfg(feature = "llama")] on the entire file so it compiles out
+  without the feature. The "llama" feature in crates/inference/Cargo.toml
+  should gate on infer's llama feature being present.
+
+If replacing (option a):
+  Remove the local InferenceBackend trait definition. Import and
+  re-export infer::InferenceBackend. Update all local trait usages
+  to the imported type. Ensure all Sena-specific extensions (if any)
+  are either added via extension trait or moved into the actor layer.
+
+Use #askquestion if this decision is ambiguous after reading both traits.
+Do not guess — the wrong choice here is costly to undo.
+
+Call infer::suppress_llama_logs() once, at the top of
+build_inference_actor() in builder.rs, before any backend is
+constructed. This prevents llama.cpp's C-level logs from polluting
+the terminal output configured in Phase 1.
+
+STEP 3.3 — Wire model discovery at boot
+In crates/runtime/src/boot.rs, after crypto init and before spawning
+actors, add:
+
+  let models_dir = infer::ollama_models_dir()
+      .unwrap_or_else(|| config.models_dir.clone());
+  let registry = infer::discover_models(&models_dir);
+
+Log the result:
+  - tracing::info! for each model found, including model name and path
+  - tracing::warn! if the registry is empty (degrade gracefully, do not
+    fail boot — Sena without a model is still a running system)
+
+Pass the registry to build_inference_actor() so it can select a model
+to load on startup.
+
+STEP 3.4 — Switch runtime to real backend
+In crates/runtime/src/builder.rs, update build_inference_actor() to:
+
+  1. If the infer "llama" feature is enabled (i.e., cfg(feature = "llama")
+     resolves via the infer dependency):
+     - Call infer::auto_backend(&first_model_path, BackendType::auto_detect())
+       to construct the backend. auto_detect() will select Vulkan on this
+       system automatically.
+     - If the registry is empty, construct MockBackend and log:
+       tracing::warn!("no models found — inference actor using MockBackend")
+
+  2. If the feature is not enabled:
+     - Construct MockBackend unconditionally.
+
+  If a real backend is constructed and a model path is available, call
+  backend.load(&path) before passing to InferenceActor. Log VRAM
+  headroom after load if the backend exposes it.
+
+VERIFY Phase 3:
+  - With a GGUF model file present:
+    boot log shows model discovered and loaded, Vulkan selected
+  - InferenceRequested on the bus produces InferenceSentenceReady events
+  - VramUsageUpdated emits every 2 seconds with real values
+  - Without a model file: boot completes, MockBackend is used, inference
+    requests return a canned response with a clear log line
+  - cargo build --workspace clean
+
+---
+
+PHASE 4 — WIRE REAL SPEECH BACKEND (STREAMING OPTIMIZED)
+Target: STT transcribes microphone input in real-time using Nemotron
+INT8. TTS synthesizes response audio through Piper.
+
+STEP 4.0 — Implement Download Manager
+Create crates/runtime/src/download_manager.rs. This is the source of
+truth for model integrity.
+
+Registry: Define a constant asset list for all required models:
+
+  Parakeet / Nemotron INT8:
+    - encoder.onnx
+      URL: https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/encoder.onnx
+      SHA-256: d24be4aff18dd9d2aa3433cb89c5a457df5015abf79e06a63dde76b1cd6386bb
+
+    - decoder_joint.onnx
+      URL: https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/decoder_joint.onnx
+      SHA-256: c86d527e4ae27251a741609eaddd4429ba5c32050e2f532cea1052d9e21f4f09
+
+    - tokenizer.model
+      URL: https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model
+      SHA-256: 07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9
+
+  Piper TTS:
+    - en_US-lessac-high.onnx
+      URL: https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx
+      SHA-256: 4cabf7c3a638017137f34a1516522032d4fe3f38228a843cc9b764ddcbcd9e09
+
+    - en_US-lessac-high.onnx.json
+      URL: https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx.json
+      SHA-256: UNKNOWN — after first download, compute the SHA-256 of
+      the downloaded file using sha2::Sha256 and write it to
+      docs/_scratch/piper_json_checksum.txt so it can be hardcoded on
+      the next revision. For this pass, skip checksum verification for
+      this file only and log a tracing::warn! noting the checksum is
+      pending human review.
+
+Logic: Implement ensure_models_present(models_dir: &Path).
+  For each asset:
+    1. Check if the file exists at models_dir/asset_name
+    2. If it exists: verify SHA-256 against the known checksum
+       (skip this check for the Piper JSON file as noted above)
+    3. If verification passes: skip download
+    4. If the file is missing or checksum fails:
+       a. Download to models_dir/asset_name.tmp using streaming HTTP
+          (reqwest with stream feature)
+       b. Verify checksum of the .tmp file before renaming
+       c. Atomically rename .tmp → final path on success
+       d. Delete .tmp and return error on checksum mismatch
+  Return Ok(()) only when all assets are present and verified.
+  Return Err on any download or verification failure.
+
+Safety: ensure_models_present() failure must abort boot. The runtime
+must not proceed to spawn speech actors if models are missing or corrupt.
+Emit a clear tracing::error! with the asset name and failure reason
+before returning.
+
+STEP 4.1 — Add dependencies
+In crates/speech/Cargo.toml, add:
+  parakeet-rs = "0.3.4"
+  cpal = "0.17.3"
+
+In crates/runtime/Cargo.toml, add:
+  reqwest = { version = "0.12", features = ["stream"] }
+  sha2 = "0.10"
+  tokio = { features = ["fs"] }  (if not already present)
+
+STEP 4.2 — Implement ParakeetSttBackend
+Create crates/speech/src/parakeet_backend.rs.
+
+Read crates/speech/src/stt_actor.rs in full to understand the SttBackend
+trait (feed, flush, backend_name) and SttEvent variants before writing
+any implementation.
+
+ParakeetSttBackend:
+  - Load Nemotron INT8 model from the three asset paths
+    (encoder.onnx, decoder_joint.onnx, tokenizer.model)
+  - feed(&mut self, pcm: &[f32]) — pass raw f32 PCM chunks (10-30ms
+    windows at 16kHz mono) directly into parakeet-rs streaming state.
+    Return SttEvent::PartialTranscription immediately as tokens arrive.
+    Return SttEvent::Completed when internal VAD or silence threshold
+    (500ms default) is met.
+  - flush(&mut self) — finalize any buffered audio, return remaining
+    SttEvent::Completed
+  - backend_name() — return "parakeet-nemotron-int8"
+
+Target: sub-100ms latency on Ryzen 4800H using INT8 quantization.
+
+STEP 4.3 — Add audio capture loop to SttActor
+Read crates/speech/src/stt_actor.rs in full. The run() method currently
+only handles bus events and never calls self.backend.feed().
+
+Add a concurrent audio capture path using tokio::select!:
+  Branch 1: existing bus event handling (unchanged)
+  Branch 2: audio capture from cpal microphone
+
+The audio capture branch:
+  - Only active when self.listening == true
+  - Opens a cpal input stream at 16kHz, mono, f32
+  - Moves audio from the cpal callback thread to the async actor loop
+    via an mpsc channel (cpal callbacks are sync; the actor loop is async)
+  - On each received chunk: call self.backend.feed(chunk)
+  - On SttEvent::PartialTranscription: broadcast on bus for debug
+    visibility (not routed to inference)
+  - On SttEvent::Completed: apply confidence threshold (discard below
+    config.speech.min_confidence_threshold, default 0.65 — emit
+    SpeechEvent::LowConfidenceTranscription for discards), then
+    broadcast TranscriptionCompleted for passing results
+
+STEP 4.4 — Implement PiperTtsBackend
+Create crates/speech/src/piper_backend.rs.
+
+  - Load en_US-lessac-high.onnx and en_US-lessac-high.onnx.json from
+    the configured models directory
+  - synthesize(text: &str) -> Result<Vec<u8>, TtsError> — run Piper
+    ONNX inference, return raw PCM bytes
+  - Initialize a cpal output stream for playback. Buffer synthesized
+    PCM and feed it to the output stream.
+  - Fallback: if Piper assets are missing at construction time (should
+    not happen if ensure_models_present succeeded, but handle it),
+    log tracing::warn! and return TtsError::BackendUnavailable —
+    TtsActor falls back to StubTtsBackend.
+
+STEP 4.5 — Runtime integration
+In crates/runtime/src/boot.rs, call
+download_manager::ensure_models_present(&config.models_dir).await
+immediately after crypto init, before any actors are spawned. Abort
+boot on failure.
+
+In crates/runtime/src/builder.rs:
+  - build_stt_actor(): construct ParakeetSttBackend using the validated
+    Nemotron file paths. Fall back to StubSttBackend with
+    tracing::warn! only if the backend constructor fails — this should
+    be unreachable if ensure_models_present succeeded.
+  - build_tts_actor(): construct PiperTtsBackend using the validated
+    Piper file paths. Same fallback behavior.
+
+VERIFY Phase 4:
+  - On first boot: download progress is visible in the terminal log
+  - On subsequent boots: checksums pass, no downloads occur
+  - Speaking into the microphone in listen mode produces
+    TranscriptionCompleted in the CLI event stream
+  - TranscriptionCompleted routes to inference, produces
+    InferenceSentenceReady, TTS synthesizes and plays audio
+  - If TTS falls back to stub: tracing::warn! is visible, no crash
+  - cargo build --workspace clean, cargo test --workspace passes
+
+---
+
+PHASE 5 — WIRE IPC SERVER
+Target: Slash commands in the shell reach the runtime via IPC.
+
+STEP 5.1 — Start IPC server at boot
+Read crates/runtime/src/ipc_server.rs in full. Understand what
+spawn_ipc_server() does, what IpcCommand variants it handles, and
+what bus events it emits for each.
+
+In crates/runtime/src/boot.rs, call spawn_ipc_server() as part of the
+boot sequence — after BootComplete is emitted but before
+supervision_loop() blocks. Store the returned JoinHandle in the actor
+registry alongside the other actor handles so it participates in
+graceful shutdown.
+
+STEP 5.2 — Connect shell commands to IPC
+Read crates/cli/src/shell.rs in full. Verify that slash command
+handlers (for /status, /shutdown, /loop, /debug, /verbose, /memory,
+/config, /help) send IpcCommands to the IPC server's channel.
+If the channel connection is missing, wire it now.
+
+VERIFY Phase 5:
+  - /status prints actor health from HealthCheckResponse
+  - /shutdown triggers graceful shutdown and exits cleanly
+  - /help renders the command list
+  - All other slash commands execute without panic
+  - cargo build --workspace clean
+
+---
+
+FINAL VERIFICATION
+
+After all five phases pass:
+  cargo build --workspace
+  cargo test --workspace
+  cargo clippy --workspace -- -D warnings
+  cargo fmt --check
+
+Then perform a live boot test:
+  cargo run --bin sena
+
+Confirm and report each point explicitly:
+  [ ] Boot log appears on stdout with INFO level by default
+  [ ] Shell prompt appears and accepts input
+  [ ] Platform events appear in the event stream within 5 seconds
+  [ ] ThoughtEventTriggered appears within 30 seconds
+  [ ] VramUsageUpdated emits with real values (if model present)
+  [ ] Ctrl+C triggers clean shutdown and exits with code 0
+  [ ] /help renders command list
+  [ ] /status shows all actors as Healthy
+  [ ] Speaking produces TranscriptionCompleted in the event stream
+  [ ] docs/_scratch/piper_json_checksum.txt exists with computed SHA-256
+
 ---
 
 ## Phase 1 — Foundation: The Bus and Boot

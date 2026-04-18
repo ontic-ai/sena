@@ -4,6 +4,8 @@ pub mod actor;
 pub mod backend;
 pub mod error;
 pub mod filter;
+#[cfg(feature = "llama")]
+pub mod llama_adapter;
 pub mod mock;
 pub mod queue;
 pub mod registry;
@@ -14,6 +16,8 @@ pub use actor::InferenceActor;
 pub use backend::InferenceBackend;
 pub use error::InferenceError;
 pub use filter::OutputFilter;
+#[cfg(feature = "llama")]
+pub use llama_adapter::LlamaAdapter;
 pub use mock::{MockBackend, MockConfig};
 pub use queue::{InferenceQueue, WorkItem, WorkKind};
 pub use registry::{ModelInfo, ModelRegistry, discover_models};

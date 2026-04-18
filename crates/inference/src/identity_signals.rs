@@ -23,65 +23,149 @@ pub fn extract_identity_signals(response: &str) -> Vec<(String, String)> {
     let lower = response.to_lowercase();
 
     // Work domain patterns
-    if contains_any(&lower, &[
-        "code", "coding", "programming", "software", "development", "developer",
-        "function", "class", "variable", "algorithm", "debug", "compile",
-        "git", "version control", "repository", "commit", "branch",
-        "rust", "python", "javascript", "typescript", "api", "fastapi",
-    ]) {
-        signals.push(("work_domain".to_string(), "software_development".to_string()));
+    if contains_any(
+        &lower,
+        &[
+            "code",
+            "coding",
+            "programming",
+            "software",
+            "development",
+            "developer",
+            "function",
+            "class",
+            "variable",
+            "algorithm",
+            "debug",
+            "compile",
+            "git",
+            "version control",
+            "repository",
+            "commit",
+            "branch",
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "api",
+            "fastapi",
+        ],
+    ) {
+        signals.push((
+            "work_domain".to_string(),
+            "software_development".to_string(),
+        ));
     }
 
     // Rust programming preference
-    if contains_any(&lower, &[
-        "rust", "cargo", "rustc", "tokio", "async", "trait", "borrow checker",
-    ]) {
+    if contains_any(
+        &lower,
+        &[
+            "rust",
+            "cargo",
+            "rustc",
+            "tokio",
+            "async",
+            "trait",
+            "borrow checker",
+        ],
+    ) {
         signals.push(("tool_preference".to_string(), "rust".to_string()));
     }
 
     // Python programming preference
-    if contains_any(&lower, &[
-        "python", "pip", "numpy", "pandas", "django", "pytorch",
-    ]) {
+    if contains_any(
+        &lower,
+        &["python", "pip", "numpy", "pandas", "django", "pytorch"],
+    ) {
         signals.push(("tool_preference".to_string(), "python".to_string()));
     }
 
     // JavaScript/TypeScript preference
-    if contains_any(&lower, &[
-        "javascript", "typescript", "node", "npm", "react", "vue", "angular",
-    ]) {
+    if contains_any(
+        &lower,
+        &[
+            "javascript",
+            "typescript",
+            "node",
+            "npm",
+            "react",
+            "vue",
+            "angular",
+        ],
+    ) {
         signals.push(("tool_preference".to_string(), "javascript".to_string()));
     }
 
     // AI/ML interest cluster
-    if contains_any(&lower, &[
-        "machine learning", "neural network", "deep learning", "model training",
-        "inference", "transformer", "embeddings", "llm", "language model",
-    ]) {
-        signals.push(("interest".to_string(), "artificial_intelligence".to_string()));
+    if contains_any(
+        &lower,
+        &[
+            "machine learning",
+            "neural network",
+            "deep learning",
+            "model training",
+            "inference",
+            "transformer",
+            "embeddings",
+            "llm",
+            "language model",
+        ],
+    ) {
+        signals.push((
+            "interest".to_string(),
+            "artificial_intelligence".to_string(),
+        ));
     }
 
     // Systems programming interest
-    if contains_any(&lower, &[
-        "memory management", "concurrency", "threading", "async runtime",
-        "low-level", "performance optimization", "systems programming",
-    ]) {
+    if contains_any(
+        &lower,
+        &[
+            "memory management",
+            "concurrency",
+            "threading",
+            "async runtime",
+            "low-level",
+            "performance optimization",
+            "systems programming",
+        ],
+    ) {
         signals.push(("interest".to_string(), "systems_programming".to_string()));
     }
 
     // Web development interest
-    if contains_any(&lower, &[
-        "web development", "frontend", "backend", "api", "rest", "graphql",
-        "http", "server", "client", "browser",
-    ]) {
+    if contains_any(
+        &lower,
+        &[
+            "web development",
+            "frontend",
+            "backend",
+            "api",
+            "rest",
+            "graphql",
+            "http",
+            "server",
+            "client",
+            "browser",
+        ],
+    ) {
         signals.push(("interest".to_string(), "web_development".to_string()));
     }
 
     // Data science interest
-    if contains_any(&lower, &[
-        "data science", "data analysis", "statistics", "visualization",
-        "dataset", "data processing", "analytics",
-    ]) {
+    if contains_any(
+        &lower,
+        &[
+            "data science",
+            "data analysis",
+            "statistics",
+            "visualization",
+            "dataset",
+            "data processing",
+            "analytics",
+        ],
+    ) {
         signals.push(("interest".to_string(), "data_science".to_string()));
     }
 
@@ -109,16 +193,23 @@ mod tests {
 
     #[test]
     fn test_extract_software_development_signal() {
-        let response = "To debug this code, you should add logging statements before the function call.";
+        let response =
+            "To debug this code, you should add logging statements before the function call.";
         let signals = extract_identity_signals(response);
-        assert!(signals.contains(&("work_domain".to_string(), "software_development".to_string())));
+        assert!(signals.contains(&(
+            "work_domain".to_string(),
+            "software_development".to_string()
+        )));
     }
 
     #[test]
     fn test_extract_rust_tool_preference() {
         let response = "You can use tokio for async runtime in Rust. The borrow checker will ensure memory safety.";
         let signals = extract_identity_signals(response);
-        assert!(signals.contains(&("work_domain".to_string(), "software_development".to_string())));
+        assert!(signals.contains(&(
+            "work_domain".to_string(),
+            "software_development".to_string()
+        )));
         assert!(signals.contains(&("tool_preference".to_string(), "rust".to_string())));
         assert!(signals.contains(&("interest".to_string(), "systems_programming".to_string())));
     }
@@ -133,9 +224,13 @@ mod tests {
 
     #[test]
     fn test_extract_ai_ml_interest() {
-        let response = "The transformer model uses attention mechanisms for language understanding.";
+        let response =
+            "The transformer model uses attention mechanisms for language understanding.";
         let signals = extract_identity_signals(response);
-        assert!(signals.contains(&("interest".to_string(), "artificial_intelligence".to_string())));
+        assert!(signals.contains(&(
+            "interest".to_string(),
+            "artificial_intelligence".to_string()
+        )));
     }
 
     #[test]
@@ -168,9 +263,15 @@ mod tests {
     fn test_multiple_interests_combined() {
         let response = "You can build a web API that serves machine learning model predictions using Python and FastAPI.";
         let signals = extract_identity_signals(response);
-        assert!(signals.contains(&("work_domain".to_string(), "software_development".to_string())));
+        assert!(signals.contains(&(
+            "work_domain".to_string(),
+            "software_development".to_string()
+        )));
         assert!(signals.contains(&("tool_preference".to_string(), "python".to_string())));
-        assert!(signals.contains(&("interest".to_string(), "artificial_intelligence".to_string())));
+        assert!(signals.contains(&(
+            "interest".to_string(),
+            "artificial_intelligence".to_string()
+        )));
         assert!(signals.contains(&("interest".to_string(), "web_development".to_string())));
     }
 }

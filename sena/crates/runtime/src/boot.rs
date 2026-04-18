@@ -4,6 +4,7 @@ use crate::builder;
 use crate::error::RuntimeError;
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::EncryptionLayer;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
@@ -22,6 +23,15 @@ pub struct BootResult {
     pub actor_handles: Vec<(&'static str, JoinHandle<()>)>,
     /// List of actor names that should emit ActorReady before BootComplete.
     pub expected_actors: Vec<&'static str>,
+    /// IPC client handle for in-process CLI connection (optional, can be taken).
+    pub ipc_client_handle: Option<crate::ipc_server::IpcClientHandle>,
+}
+
+/// Runtime boot configuration.
+#[derive(Debug, Clone)]
+struct BootConfig {
+    /// Fallback models directory when Ollama path cannot be discovered.
+    models_dir: PathBuf,
 }
 
 /// Execute the boot sequence.
@@ -49,7 +59,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Step 1: Config load
     let step_start = Instant::now();
     info!("Step 1/5: Loading configuration");
-    load_config().await?;
+    let config = load_config().await?;
     check_step_timing("config load", step_start);
 
     // Step 2: Encryption init
@@ -57,6 +67,12 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     info!("Step 2/5: Initializing encryption layer");
     let encryption = init_encryption().await?;
     check_step_timing("encryption init", step_start);
+
+    // Step 2.5: Download manager — ensure model files present
+    let step_start = Instant::now();
+    info!("Step 2.5/5: Ensuring speech model assets present");
+    crate::download_manager::ensure_models_present(&config.models_dir).await?;
+    check_step_timing("model download", step_start);
 
     // Step 3: EventBus init
     let step_start = Instant::now();
@@ -69,6 +85,35 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         .broadcast(Event::System(SystemEvent::EncryptionInitialized))
         .await;
 
+    // Step 3.5: Model discovery (Phase 3 wiring)
+    let step_start = Instant::now();
+    let models_dir = infer::ollama_models_dir().unwrap_or_else(|_| config.models_dir.clone());
+    let model_registry = match infer::discover_models(&models_dir) {
+        Ok(registry) => registry,
+        Err(e) => {
+            warn!(
+                path = ?models_dir,
+                error = %e,
+                "model discovery failed — continuing with empty registry"
+            );
+            infer::ModelRegistry::new()
+        }
+    };
+
+    if model_registry.is_empty() {
+        warn!("no models discovered — inference actor will use MockBackend");
+    } else {
+        for model in model_registry.models() {
+            info!(
+                model = %model.name,
+                path = ?model.path,
+                size_bytes = model.size_bytes,
+                "model discovered"
+            );
+        }
+    }
+    check_step_timing("model discovery", step_start);
+
     // Step 4: Soul init
     let step_start = Instant::now();
     info!("Step 4/5: Initializing Soul subsystem");
@@ -78,8 +123,16 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Step 5: Core actors spawn
     let step_start = Instant::now();
     info!("Step 5/5: Spawning core actors");
-    let (actor_handles, expected_actors) = spawn_actors(bus.clone()).await?;
+    let (mut actor_handles, expected_actors) =
+        spawn_actors(bus.clone(), &model_registry, &config.models_dir).await?;
     check_step_timing("actor spawn", step_start);
+
+    // Step 6: Spawn IPC server
+    let step_start = Instant::now();
+    info!("Step 6/6: Spawning IPC server");
+    let (ipc_handle, ipc_client_handle) = crate::ipc_server::spawn_ipc_server(bus.clone());
+    actor_handles.push(("ipc_server", ipc_handle));
+    check_step_timing("ipc server spawn", step_start);
 
     let boot_elapsed = boot_start.elapsed();
     info!(
@@ -93,6 +146,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         encryption,
         actor_handles,
         expected_actors,
+        ipc_client_handle: Some(ipc_client_handle),
     })
 }
 
@@ -117,10 +171,14 @@ fn check_step_timing(step_name: &str, start: Instant) {
 }
 
 /// Load configuration from disk or create defaults.
-async fn load_config() -> Result<(), RuntimeError> {
+async fn load_config() -> Result<BootConfig, RuntimeError> {
     // Stub implementation: configuration loading will be implemented in a later phase.
     tracing::debug!("config load: using default configuration (stub)");
-    Ok(())
+
+    // Use Ollama models directory or fallback to ./models
+    let models_dir = infer::ollama_models_dir().unwrap_or_else(|_| PathBuf::from("models"));
+
+    Ok(BootConfig { models_dir })
 }
 
 /// Initialize the encryption layer.
@@ -157,6 +215,8 @@ async fn init_soul(
 /// of actor names that must emit ActorReady before BootComplete.
 async fn spawn_actors(
     bus: std::sync::Arc<EventBus>,
+    model_registry: &infer::ModelRegistry,
+    models_dir: &Path,
 ) -> Result<
     (
         Vec<(&'static str, tokio::task::JoinHandle<()>)>,
@@ -175,7 +235,7 @@ async fn spawn_actors(
     handles.push((soul_name, soul_handle));
 
     // Step 5: Inference actor spawn
-    let inference_actor = builder::build_inference_actor()?;
+    let inference_actor = builder::build_inference_actor(model_registry)?;
     let inference_name: &'static str = "inference";
     expected.push(inference_name);
     let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
@@ -196,10 +256,7 @@ async fn spawn_actors(
     handles.push((platform_name, platform_handle));
 
     // Step 8: CTP actor spawn
-    // _ctp_signal_tx: kept alive for session duration so the channel endpoint
-    // does not close prematurely. CTP uses the bus path in production; this
-    // sender is available for future direct signal injection if needed.
-    let (ctp_actor, _ctp_signal_tx) = builder::build_ctp_actor()?;
+    let ctp_actor = builder::build_ctp_actor()?;
     let ctp_name: &'static str = "ctp";
     expected.push(ctp_name);
     let ctp_handle = spawn_ctp_actor(ctp_actor, bus.clone());
@@ -216,14 +273,14 @@ async fn spawn_actors(
     let speech_enabled = true;
     if speech_enabled {
         // Step 10: STT actor spawn
-        let stt_actor = builder::build_stt_actor()?;
+        let stt_actor = builder::build_stt_actor(models_dir)?;
         let stt_name: &'static str = "stt";
         expected.push(stt_name);
         let stt_handle = spawn_stt_actor(stt_actor, bus.clone());
         handles.push((stt_name, stt_handle));
 
         // Step 11: TTS actor spawn
-        let tts_actor = builder::build_tts_actor()?;
+        let tts_actor = builder::build_tts_actor(models_dir)?;
         let tts_name: &'static str = "tts";
         expected.push(tts_name);
         let tts_handle = spawn_tts_actor(tts_actor, bus.clone());
@@ -593,6 +650,7 @@ mod tests {
     async fn load_config_stub_succeeds() {
         let result = load_config().await;
         assert!(result.is_ok());
+        assert_eq!(result.unwrap().models_dir, PathBuf::from("models"));
     }
 
     #[tokio::test]
@@ -604,7 +662,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_actors_creates_expected_list() {
         let bus = Arc::new(EventBus::new());
-        let result = spawn_actors(bus).await;
+        let model_registry = infer::ModelRegistry::new();
+        let models_dir = Path::new(".");
+        let result = spawn_actors(bus, &model_registry, models_dir).await;
         assert!(result.is_ok());
 
         let (handles, expected) = result.unwrap();

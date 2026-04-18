@@ -8,8 +8,8 @@
 use crate::backend::MemoryBackend;
 use crate::error::MemoryError;
 use async_trait::async_trait;
-use bus::events::{MemoryKind, ScoredChunk};
 use bus::CausalId;
+use bus::events::{MemoryKind, ScoredChunk};
 use tracing::{debug, warn};
 
 /// ech0-based memory backend.
@@ -56,8 +56,7 @@ impl MemoryBackend for Echo0Backend {
     async fn query(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>, MemoryError> {
         warn!(
             query_len = query.len(),
-            limit,
-            "Echo0Backend: query (stub -- returns empty results)"
+            limit, "Echo0Backend: query (stub -- returns empty results)"
         );
         Ok(Vec::new())
     }
@@ -66,8 +65,8 @@ impl MemoryBackend for Echo0Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus::events::MemoryKind;
     use bus::CausalId;
+    use bus::events::MemoryKind;
 
     #[tokio::test]
     async fn ingest_does_not_error() {

@@ -7,12 +7,10 @@ use thiserror::Error;
 pub enum CliError {
     /// IPC connection failed.
     #[error("IPC connection failed: {0}")]
-    #[allow(dead_code)]
     IpcConnectionFailed(String),
 
     /// IPC send failed.
     #[error("IPC send failed: {0}")]
-    #[allow(dead_code)]
     IpcSendFailed(String),
 
     /// Shell run error.

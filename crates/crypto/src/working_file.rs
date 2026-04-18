@@ -95,8 +95,7 @@ mod tests {
         let original = b"hello encrypted working file";
 
         // Write encrypted file via existing primitive
-        crate::file::write_encrypted_file(&enc_path, original, &test_master_key())
-            .expect("write");
+        crate::file::write_encrypted_file(&enc_path, original, &test_master_key()).expect("write");
 
         // Decrypt to working
         let existed = decrypt_to_working(&enc_path, &work_path, &test_master_key())
