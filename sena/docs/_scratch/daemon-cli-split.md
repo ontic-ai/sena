@@ -43,12 +43,11 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 ### Architecture Changes
 
 **New crates:**
-- None (IPC server lives in `crates/runtime`, protocol types in `crates/bus`)
+- `crates/ipc` — leaf crate (no dependencies on other Sena crates) providing wire protocol, command dispatch, server/client APIs
 
 **Modified crates:**
-- `crates/runtime` — added `ipc_server.rs`, `supervisor.rs`; split `run_background()` (daemon) from `boot_ready()` (removed)
-- `crates/cli` — removed `run_with_boot()`, `run_headless()`, `do_shutdown()`, `open_cli_session()`; added `run_with_ipc()`; removed in-process runtime boot path
-- `crates/bus` — added IPC message types (`IpcMessage`, `IpcPayload`, `LineStyle`), new `SystemEvent` variants
+- (Phase 1: none — `crates/ipc` is standalone)
+- (Phases 2+: `crates/runtime`, `crates/cli`, `crates/bus`)
 
 **Dependency graph changes:**
 - CLI depends on `runtime` (for re-exported IPC utilities) and `bus` (for event types)
@@ -63,10 +62,26 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 
 ## Refactor Phases
 
-### Phase 1: Supervision Loop and Process Lifetime Split
-**Scope:** M-Refactor milestone
+### Phase 1: IPC Foundation — Wire Protocol and Command Dispatch
+**Scope:** Foundational infrastructure (issues #61, #62, #63)
 
-- [ ] Create `crates/runtime/src/supervisor.rs`
+- [x] Create `crates/ipc` as leaf crate (no dependencies on other Sena crates)
+- [x] Define pipe name constant `PIPE_NAME = r"\\.\pipe\sena"` as single source of truth
+- [x] Implement async framing functions (`write_frame`, `read_frame`) with 4-byte little-endian length prefix
+- [x] Define `IpcRequest` and `IpcResponse` envelope types
+- [x] Implement `CommandHandler` trait with `name()`, `description()`, `requires_boot()`, `async handle()`
+- [x] Implement `CommandRegistry` with duplicate registration panic, async dispatch
+- [x] Add built-in `list_commands` meta-handler
+- [x] Implement `IpcServer` with Windows named pipe support, concurrent client handling
+- [x] Implement `IpcClient` with `connect()`, `send()`, `daemon_running()`, `subscribe_events()` APIs
+- [x] Platform gates: Windows implementation, non-Windows stubs return clear errors
+- [x] Unit tests: framing round-trip, dispatch correctness, unknown command error, duplicate panic
+- [x] Verification: `cargo build -p ipc` clean, `cargo test -p ipc` passes (7 tests)
+
+### Phase 2: Supervision Loop and Process Lifetime Split
+**Scope:** M-Refactor milestone (formerly Phase 1)
+3: IPC Server Integration
+**Scope:** M6.1 (IPC Runtime Server) (formerly Phase 2pervisor.rs`
 - [ ] Implement `wait_for_readiness()` function (30s timeout, waits for all `expected_actors` to emit `ActorReady`)
 - [ ] Implement `supervision_loop()` function (handles ShutdownSignal, CliAttachRequested, ActorFailed retry logic)
 - [ ] Create `runtime::run_background()` public API (daemon entry point)
@@ -94,8 +109,8 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 - [ ] Implement broadcast bus event → IPC client forwarding
 - [ ] Verification: daemon boots with IPC server listening, socket/pipe created
 
-### Phase 3: CLI as IPC Client
-**Scope:** M6.2 (CLI as Separate Process)
+### Phase 4: CLI as IPC Client
+**Scope:** M6.2 (CLI as Separate Process) (formerly Phase 3)
 
 - [ ] Detect running daemon (check socket/pipe existence + connectivity)
 - [ ] Implement IPC client connection in CLI
@@ -109,8 +124,8 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 - [ ] Integration tests: `ipc_server_survives_client_disconnect`, `ipc_multiple_clients_connect_simultaneously`
 - [ ] Verification: CLI crash does not affect daemon, multiple CLI instances work
 
-### Phase 4: Loop Registry and Real-Time Control
-**Scope:** M6.2.1 (Loop Registry and Visibility)
+### Phase 5: Loop Registry and Real-Time Control
+**Scope:** M6.2.1 (Loop Registry and Visibility) (formerly Phase 4)
 
 - [ ] Add `SystemEvent::LoopControlRequested { loop_name, enabled }` bus event
 - [ ] Add `SystemEvent::LoopStatusChanged { loop_name, enabled }` bus event
@@ -145,13 +160,66 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 
 ## Phase Summaries
 
-### Phase 1: Supervision Loop (Completed)
-**Date:** 2026-04-XX  
+### Phase 1: IPC Foundation (Completed)
+**Date:** 2026-04-18  
+**Commit(s):** TBD (pending commit)
+
+**Summary:**
+
+Created `crates/ipc` as a foundational leaf crate providing the wire protocol and command dispatch infrastructure for daemon-CLI communication. The crate is fully decoupled from all other Sena workspace crates, making it reusable and testable in isolation.
+TBD  
 **Commit(s):** TBD
 
 Summary: TBD
 
-### Phase 2: IPC Protocol (Completed)
+### Phase 4: CLI as IPC Client (Pending)
+**Date:** TBD  
+**Commit(s):** TBD
+
+Summary: TBD
+
+### Phase 5: Loop Registry (Pendingr
+- Unknown command error handling
+- Duplicate handler registration panic detection
+- List commands meta-handler functionality
+- Oversized frame rejection
+- Connection closed detection
+
+**Critical decisions:**
+1. **Leaf crate architecture**: No dependencies on `bus`, `runtime`, or any other Sena crate. Protocol is generic and self-contained.
+2. **Command handler trait design**: `requires_boot()` defaulting to `true` enables pre-boot commands (e.g., "ping", "status") to opt-out.
+3. **Built-in list_commands**: Phase 1 implementation is a placeholder; Phase 2+ will provide full registry introspection.
+4. **Platform stubs**: Non-Windows platforms return clear `PlatformNotSupported` errors rather than silent no-ops.
+
+**Follow-up constraints for Phase 2:**
+- Wire IPC server into runtime boot sequence (spawn after encryption init, before actors)
+- Implement concrete command handlers in `crates/runtime` (inference, list_models, shutdown, etc.)
+- Add `CommandRegistry` to `Runtime` struct for handler registration during boot
+- CLI must use `ipc::IpcClient` to communicate with daemon; no in-process boot path
+
+### Phase 2: Supervision Loop (Pending)
+**Date:** TBD  
+**Commit(s):** TBD
+### D2: IPC Crate as Leaf Node
+**Date:** 2026-04-18  
+**Context:** Phase 1 implementation choice — should the IPC protocol and framing logic live in `crates/bus` (alongside event types), `crates/runtime` (where the server will be wired), or in a dedicated `crates/ipc`?
+
+**Decision:** Create `crates/ipc` as a leaf crate with zero dependencies on other Sena workspace crates.
+
+**Rationale:**
+- **Separation of concerns**: IPC wire protocol is orthogonal to event bus semantics. Bus owns typed events; IPC owns serialized command envelopes.
+- **Testability**: Leaf crate can be tested in isolation without spinning up actors, bus, or runtime.
+- **Reusability**: Protocol and framing layer are generic — no Sena-specific types in the API surface. Could be extracted as a standalone crate.
+- **Dependency direction**: Keeps the graph clean. `runtime` depends on `ipc` to instantiate server; `cli` depends on `ipc` to instantiate client. Neither `ipc` nor `bus` depend on each other.
+- **Prevents circular dependencies**: If IPC lived in `bus`, `runtime` would need to import `bus` for the server, which it already does for events — this blurs the line. If IPC lived in `runtime`, `cli` would need to import `runtime` just for the client API, which violates CLI's thin-wrapper design.
+
+**Alternative considered:**
+- Putting protocol types in `crates/bus/src/ipc.rs` and framing/server/client in `crates/runtime/src/ipc/`. Rejected because it splits the abstraction across two crates and makes testing harder.
+
+
+Summary: TBD
+
+### Phase 3: IPC Server Integration (Pending)
 **Date:** 2026-04-XX  
 **Commit(s):** TBD
 
@@ -175,7 +243,48 @@ Summary: TBD
 
 ### D1: Tracking File Location
 **Date:** 2026-04-18  
-**Context:** Daemon-CLI split is being implemented in the nested workspace (`sena/sena`) on the dev branch. The refactor is isolated from the top-level workspace. Need to decide where to place the refactor tracking file.
+**Context:** IPC Foundation
+
+**Build:**
+```
+# Command: cargo build -p ipc
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean build with no warnings after fixing unused import and dead field.
+```
+
+**Tests:**
+```
+# Command: cargo test -p ipc
+# Date: 2026-04-18
+# Result: PASS (7 tests, 0 failures)
+# Coverage:
+#   - write_frame_then_read_frame_round_trips_correctly
+#   - read_frame_returns_connection_closed_on_eof
+#   - write_frame_rejects_oversized_payload
+#   - dispatch_routes_to_correct_handler
+#   - unknown_command_returns_error
+#   - duplicate_registration_panics
+#   - list_commands_returns_all_registered_handlers
+```
+
+**Clippy:**
+```
+# Command: cargo clippy -p ipc -- -D warnings
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean, no warnings.
+```
+
+**Fmt:**
+```
+# Command: cargo fmt -p ipc -- --check
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Formatting applied via `cargo fmt -p ipc`, all files now compliant.
+```
+
+### Phase 2: Daemon-CLI split is being implemented in the nested workspace (`sena/sena`) on the dev branch. The refactor is isolated from the top-level workspace. Need to decide where to place the refactor tracking file.
 
 **Decision:** Place tracking file at `sena/docs/_scratch/daemon-cli-split.md` in the nested workspace.
 

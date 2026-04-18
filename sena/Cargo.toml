@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bus", "crates/cli", "crates/crypto", "crates/text", "crates/soul", "crates/memory", "crates/platform", "crates/ctp", "crates/inference", "crates/prompt", "crates/speech", "crates/runtime"]
+members = ["crates/bus", "crates/cli", "crates/crypto", "crates/text", "crates/soul", "crates/memory", "crates/platform", "crates/ctp", "crates/inference", "crates/prompt", "crates/speech", "crates/runtime", "crates/ipc"]
 
 [workspace.package]
 version = "0.1.0"
