@@ -19,7 +19,7 @@ impl ActorEntry {
     fn new(name: &'static str) -> Self {
         Self {
             name,
-            status: ActorStatus::Running,
+            status: ActorStatus::Starting,
             registered_at: Instant::now(),
         }
     }
@@ -61,10 +61,23 @@ impl ActorRegistry {
         self.entries.insert(name, ActorEntry::new(name));
     }
 
+    /// Mark an actor as running (healthy) — called when ActorReady is received.
+    /// If the actor is not yet registered, it is inserted in running state.
+    pub fn mark_running(&mut self, name: &'static str) {
+        let entry = self
+            .entries
+            .entry(name)
+            .or_insert_with(|| ActorEntry::new(name));
+        entry.status = ActorStatus::Running;
+    }
+
     /// Mark an actor as failed with the given reason.  
     /// If the actor is not yet registered, it is inserted in a failed state.
     pub fn mark_failed(&mut self, name: &'static str, reason: String) {
-        let entry = self.entries.entry(name).or_insert_with(|| ActorEntry::new(name));
+        let entry = self
+            .entries
+            .entry(name)
+            .or_insert_with(|| ActorEntry::new(name));
         entry.status = ActorStatus::Failed { reason };
     }
 
@@ -114,6 +127,21 @@ mod tests {
     }
 
     #[test]
+    fn mark_running_transitions_from_starting() {
+        let mut registry = ActorRegistry::new();
+        registry.register("inference");
+
+        let health = registry.get_all_health();
+        let h = health.iter().find(|h| h.name == "inference").unwrap();
+        assert!(matches!(h.status, ActorStatus::Starting));
+
+        registry.mark_running("inference");
+        let health = registry.get_all_health();
+        let h = health.iter().find(|h| h.name == "inference").unwrap();
+        assert!(matches!(h.status, ActorStatus::Running));
+    }
+
+    #[test]
     fn mark_failed_updates_status() {
         let mut registry = ActorRegistry::new();
         registry.register("inference");
@@ -139,6 +167,8 @@ mod tests {
     fn all_running_returns_false_after_failure() {
         let mut registry = ActorRegistry::new();
         registry.register("memory");
+        assert!(!registry.all_running()); // Starting, not Running
+        registry.mark_running("memory");
         assert!(registry.all_running());
         registry.mark_failed("memory", "disk full".to_string());
         assert!(!registry.all_running());

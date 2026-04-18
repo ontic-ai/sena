@@ -226,7 +226,7 @@ impl CtpActor {
 
 impl Actor for CtpActor {
     fn name(&self) -> &'static str {
-        "CtpActor"
+        "ctp"
     }
 
     async fn start(&mut self, bus: Arc<EventBus>) -> Result<(), ActorError> {

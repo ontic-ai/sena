@@ -67,8 +67,11 @@ async fn main() -> Result<(), DaemonError> {
     // Create tooltip update channel (std::sync::mpsc for cross-thread send from tokio)
     let (tooltip_tx, tooltip_rx) = mpsc::channel();
 
-    // Spawn supervision loop in background
+    // Clone bus references before moving boot_result into supervision loop
+    let boot_complete_bus = boot_result.bus.clone();
     let supervision_bus = boot_result.bus.clone();
+
+    // Spawn supervision loop in background
     let supervision_handle = tokio::spawn(async move {
         if let Err(e) = runtime::supervision_loop(boot_result).await {
             error!("Supervision loop error: {}", e);
@@ -82,21 +85,30 @@ async fn main() -> Result<(), DaemonError> {
         })
         .ok();
 
-    // Mark runtime as ready (placeholder — will be wired to supervision readiness signal in Phase 3)
-    runtime_state.mark_ready();
+    // Subscribe to BootComplete event to know when runtime is ready
+    let runtime_state_clone = runtime_state.clone();
+    let tooltip_tx_clone = tooltip_tx.clone();
+    tokio::spawn(async move {
+        let mut rx = boot_complete_bus.subscribe_broadcast();
+        while let Ok(event) = rx.recv().await {
+            if matches!(event, bus::Event::System(bus::SystemEvent::BootComplete)) {
+                info!("BootComplete received — runtime is ready");
+                runtime_state_clone.mark_ready();
+                tooltip_tx_clone
+                    .send(tray::TooltipUpdate {
+                        text: "Sena — Ready".to_string(),
+                    })
+                    .ok();
+                break;
+            }
+        }
+    });
 
     // Spawn tray action handler task
     let action_handler_shutdown_tx = shutdown_tx.clone();
     let tray_action_handle = std::thread::spawn(move || {
         handle_tray_actions(tray_action_rx, action_handler_shutdown_tx);
     });
-
-    // Update tooltip to ready state
-    tooltip_tx
-        .send(tray::TooltipUpdate {
-            text: "Sena — Ready".to_string(),
-        })
-        .ok();
 
     info!("Daemon ready, entering tray loop");
 

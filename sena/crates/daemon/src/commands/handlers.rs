@@ -26,14 +26,20 @@ use std::sync::Arc;
 /// * `shutdown_tx` - Channel sender for triggering graceful shutdown
 pub fn register_all(
     registry: &mut CommandRegistry,
-    _boot_result: &BootResult,
+    boot_result: &BootResult,
     state: RuntimeState,
     shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) {
     // Runtime commands
     registry.register(Arc::new(PingHandler::new(state.clone())));
-    registry.register(Arc::new(StatusHandler::new(state.clone())));
-    registry.register(Arc::new(ShutdownHandler::new(shutdown_tx)));
+    registry.register(Arc::new(StatusHandler::new(
+        state.clone(),
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(ShutdownHandler::new(
+        shutdown_tx,
+        boot_result.bus.clone(),
+    )));
 
     // Inference commands
     registry.register(Arc::new(ListModelsHandler));

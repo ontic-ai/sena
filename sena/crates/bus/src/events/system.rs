@@ -25,7 +25,9 @@ pub enum ModelKind {
 /// Health status of an actor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ActorStatus {
-    /// Actor is running normally.
+    /// Actor is starting — registered but has not yet emitted ActorReady.
+    Starting,
+    /// Actor is running normally — has emitted ActorReady.
     Running,
     /// Actor has stopped.
     Stopped,

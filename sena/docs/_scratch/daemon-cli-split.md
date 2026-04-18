@@ -197,13 +197,22 @@ Summary: TBD
 - Add `CommandRegistry` to `Runtime` struct for handler registration during boot
 - CLI must use `ipc::IpcClient` to communicate with daemon; no in-process boot path
 
-### Phase 2: Daemon Process and IPC Server Integration (In Progress)
-**Date:** 2026-04-18 (Active)  
-**Commit(s):** TBD
+### Phase 2: Daemon Process and IPC Server Integration (Completed)
+**Date:** 2026-04-18  
+**Commit(s):** TBD (pending commit)
 
 **Summary:**
 
 Phase 2 creates the daemon binary (`crates/daemon`) as a separate process that owns all actors, runs the supervision loop, and provides an IPC server for command dispatch. The CLI remains in-process for this phase (Phase 3+ will convert CLI to IPC client).
+
+This phase also fixes critical readiness/health semantics:
+- Boot gate now only decides WHEN BootComplete fires — health tracking continues for process lifetime
+- ActorReady events update health unconditionally at any time, not just during boot window
+- 30-second timeout emits BootComplete anyway with a warning for missing actors
+- Missing actors remain in Starting state (not marked Failed) and transition to Running when ActorReady arrives later
+- Daemon waits for BootComplete before marking runtime as ready (not immediately after boot)
+- runtime.status returns actual per-actor health via HealthCheckRequest/Response pattern
+- runtime.shutdown broadcasts ShutdownRequested on bus for observability
 
 **Implemented:**
 - Created `crates/daemon` binary crate with typed error handling (no anyhow)
@@ -223,6 +232,13 @@ Phase 2 creates the daemon binary (`crates/daemon`) as a separate process that o
   - Explicit Windows message pump handling (50ms polling loop)
 - Runtime state tracking: boot time, ready flag for uptime and status queries
 - Graceful shutdown: shutdown command sends signal to daemon main loop, which broadcasts `ShutdownInitiated` on bus
+- **ActorStatus enum extended** with `Starting` state to distinguish actors that haven't yet signaled ready
+- **ActorRegistry** now starts actors in Starting state and transitions to Running on ActorReady
+- **Supervision loop** processes ActorReady events throughout process lifetime, not just during boot
+- **Readiness gate timeout** emits BootComplete with warning instead of marking missing actors as Failed
+- **Daemon BootComplete subscription** waits for BootComplete event before marking runtime ready
+- **runtime.status handler** queries supervisor for per-actor health via HealthCheckRequest/Response
+- **runtime.shutdown handler** broadcasts ShutdownRequested on bus before sending private shutdown signal
 
 **Phase 2 Limitations (tracked for Phase 3+ resolution):**
 1. **Tray icon**: No assets/logo.ico file exists. Using magenta fallback. ICO decoding not implemented.
@@ -230,20 +246,14 @@ Phase 2 creates the daemon binary (`crates/daemon`) as a separate process that o
 2. **CLI launch**: Temporary Phase 2 behavior — daemon and CLI are the same binary ("sena"). Launch action spawns "sena cli" in new terminal.
    - Path handling is safe (no unwrap), but non-UTF8 paths will fail with clear error.
    - To fix in Phase 3: Separate CLI binary, update launch logic to spawn the renamed CLI binary.
-3. **Supervision readiness**: `runtime_state.mark_ready()` is called immediately after boot, not after supervision confirms all actors are healthy.
-   - To fix in Phase 3: Wire `wait_for_readiness()` function, wait for all expected actors to emit `ActorReady`, then mark ready.
-4. **runtime.status**: Returns `{"status": "booting"|"ready", "uptime_seconds": N}` based on simple ready flag, not actual actor health.
-   - To fix in Phase 3: Query supervisor for per-actor health, return structured status with actor states.
-5. **runtime.shutdown**: Sends signal to private shutdown channel. Daemon main loop broadcasts `ShutdownInitiated` on shutdown.
-   - To fix in Phase 3: Also broadcast `ShutdownRequested` event on bus from the handler for observability before sending private signal.
-6. **Command handlers not fully wired**: Most command handlers return `CommandNotReady` errors with clear messages:
+3. **Command handlers not fully wired**: Most command handlers return `CommandNotReady` errors with clear messages:
    - `inference.load_model`, `inference.run` — inference dispatch via bus events not wired
    - `speech.listen_start`, `speech.listen_stop` — speech loop control via bus events not wired
    - `memory.query` — memory query via bus events not wired
    - `config.set` — config write subsystem not wired
    - `events.subscribe`, `events.unsubscribe` — event subscription mechanism not wired
    - To fix in Phase 3+: Wire bus event dispatch, implement response collection, return real results.
-7. **CLI still in-process**: CLI boots runtime directly. No IPC connection.
+4. **CLI still in-process**: CLI boots runtime directly. No IPC connection.
    - To fix in Phase 4: CLI detects running daemon, connects via IPC, dispatches commands, renders responses.
 
 **Architecture compliance fixes applied (arch-guard blockers resolved):**
@@ -254,30 +264,85 @@ Phase 2 creates the daemon binary (`crates/daemon`) as a separate process that o
 
 **Prompt alignment fixes applied:**
 - [x] `runtime.ping` returns `{"pong": true, "uptime_seconds": N}` as specified
-- [x] `runtime.status` returns clearly Phase-2-temporary structure (simple ready flag, not actor health)
+- [x] `runtime.status` returns per-actor health with structured ActorStatus (Starting/Running/Stopped/Failed)
+- [x] `runtime.shutdown` broadcasts ShutdownRequested on bus before private shutdown signal
 - [x] All expected command names registered (even if some return `CommandNotReady`)
 - [x] Tray limitations documented in code comments and this scratch file
 - [x] CLI launch behavior documented with Phase 2 temporariness noted
+- [x] Boot gate timeout behavior fixed: BootComplete fires anyway, missing actors remain in Starting state
+- [x] ActorReady events processed throughout process lifetime, not just during boot window
+- [x] Daemon waits for BootComplete before marking ready, not immediately after boot
 
 **Critical decisions:**
 1. **Daemon error handling**: Created typed `DaemonError` enum instead of using anyhow. All error conversions explicit.
 2. **Command registration**: All 14 expected command names registered, even if not fully implemented. Unimplemented commands return `IpcError::CommandNotReady` with descriptive messages.
 3. **Tray message pump**: Explicit acknowledgment that tray-icon does NOT pump Windows messages internally — daemon must do it in the tray loop.
-4. **Supervisor readiness**: Deferred to Phase 3. Phase 2 uses simple boolean flag set immediately after boot.
+4. **ActorStatus extension**: Added `Starting` state to distinguish actors that haven't yet emitted ActorReady from Running actors. All actors start in Starting state.
+5. **Readiness semantics**: Boot gate only decides WHEN BootComplete fires. Health tracking is ongoing for process lifetime. Late ActorReady events transition actors from Starting to Running.
+6. **Health query pattern**: runtime.status uses existing HealthCheckRequest/Response bus events to query supervisor for real actor health, not a simple boolean flag.
 
-**Follow-up work for Phase 3 (Supervision Readiness Fix):**
-- Implement `wait_for_readiness()` in `crates/runtime/src/supervisor.rs`
-- Track expected actors via `Runtime.expected_actors` field
-- Move `BootComplete` broadcast to post-readiness (after supervision confirms all actors healthy)
-- Wire `runtime.status` to query supervisor for per-actor health
-- Wire `runtime.shutdown` to also broadcast `ShutdownRequested` on bus before private channel signal
-
-**Follow-up work for Phase 4 (CLI as IPC Client):**
+**Follow-up work for Phase 3 (CLI as IPC Client):**
 - Implement daemon detection in CLI (check pipe existence + connectivity)
 - Implement IPC client connection in CLI (`run_with_ipc()` replaces `run_with_runtime()`)
 - Map all slash commands to IPC command dispatch
 - Handle daemon not running: auto-start daemon, wait for readiness, connect
 - Remove CLI's in-process runtime boot path entirely
+
+**Follow-up work for Phase 4 (Loop Registry):**
+- Add SystemEvent::LoopControlRequested/LoopStatusChanged
+- IPC server loop registry with real-time status updates to connected clients
+- CLI `/loops` commands and sidebar loop status display
+
+**Verification:**
+- `cargo build -p sena`: clean
+- `cargo test -p runtime`: 26 tests passed
+- `cargo clippy -p sena -- -D warnings`: clean
+- `cargo fmt --check`: clean
+- **Live smoke test**: Daemon boots, all 8 actors report ready within <1ms, BootComplete fires immediately without timeout, no "readiness gate timeout" warning
+  - Boot time: 0ms (was 30,011ms pre-fix)
+  - Expected log sequence observed:
+    ```
+    SUPERVISOR: waiting up to 30s for 8 actors
+    SUPERVISOR: ActorReady received actor="memory"
+    SUPERVISOR: ActorReady received actor="inference"
+    SUPERVISOR: ActorReady received actor="platform"
+    SUPERVISOR: ActorReady received actor="soul"
+    SUPERVISOR: ActorReady received actor="stt"
+    SUPERVISOR: ActorReady received actor="tts"
+    SUPERVISOR: ActorReady received actor="prompt"
+    SUPERVISOR: ActorReady received actor="ctp"
+    SUPERVISOR: all actors ready
+    SUPERVISOR: readiness gate passed
+    SUPERVISOR: broadcasting BootComplete
+    SUPERVISOR: BootComplete broadcast successful boot_time_ms=0
+    ```
+
+**Readiness race condition fix (2026-04-18):**
+
+The initial Phase 2 implementation had a confirmed race condition where the supervisor subscribed to ActorReady events AFTER actors had already been spawned and emitted those events. This resulted in a false 30-second timeout on every boot.
+
+**Root cause:**
+1. `boot()` subscribed to broadcast channel, spawned all actors
+2. Actors immediately emitted `ActorReady` after `start()` completed
+3. `await_readiness_gate()` called `subscribe_broadcast()` AFTER actors spawned
+4. Early `ActorReady` events were missed, supervisor waited 30s, then timed out with all 8 actors marked as missing
+
+**Fix applied:**
+1. Subscribe to broadcast channel in `boot()` BEFORE spawning any actors (step 3, after EventBus init)
+2. Store the pre-subscribed receiver in `BootResult.readiness_rx: Option<Receiver<Event>>`
+3. `await_readiness_gate()` takes ownership of that receiver (via `take()`) instead of subscribing
+4. Update `actor_registry.mark_running()` as each ActorReady arrives during the gate
+5. Fixed CTP actor name mismatch: actor returned `"CtpActor"` but boot.rs expected `"ctp"`
+
+**Changed files:**
+- `crates/runtime/src/boot.rs`: Added `readiness_rx` field to BootResult, subscribed before actor spawn
+- `crates/runtime/src/supervisor.rs`: Changed `await_readiness_gate` to consume readiness_rx, update actor_registry during gate
+- `crates/ctp/src/actor.rs`: Changed actor name from `"CtpActor"` to `"ctp"` to match expected_actors list
+
+**Result:** Readiness gate now completes in <1ms with all actors accounted for. Boot time reduced from 30,011ms to 0ms.
+- Manual tray inspection: NOT YET VERIFIED (requires Windows GUI environment)
+
+**Phase 2 status:** COMPLETE
 **Date:** 2026-04-18  
 **Commit(s):** TBD (pending commit)
 
@@ -488,43 +553,103 @@ Summary: TBD
 
 ## Verification Log
 
-### Phase 1: Supervision Loop
+### Phase 1: IPC Foundation
 
 **Build:**
 ```
-# Command: cargo build --workspace
-# Date: TBD
-# Result: PASS/FAIL
-# Notes: TBD
+# Command: cargo build -p ipc
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean build with no warnings after fixing unused import and dead field.
 ```
 
 **Tests:**
 ```
-# Command: cargo test --workspace
-# Date: TBD
-# Result: PASS/FAIL (N tests, M failures)
-# Notes: TBD
+# Command: cargo test -p ipc
+# Date: 2026-04-18
+# Result: PASS (7 tests, 0 failures)
+# Coverage:
+#   - write_frame_then_read_frame_round_trips_correctly
+#   - read_frame_returns_connection_closed_on_eof
+#   - write_frame_rejects_oversized_payload
+#   - dispatch_routes_to_correct_handler
+#   - unknown_command_returns_error
+#   - duplicate_registration_panics
+#   - list_commands_returns_all_registered_handlers
 ```
 
 **Clippy:**
 ```
-# Command: cargo clippy --workspace -- -D warnings
-# Date: TBD
-# Result: PASS/FAIL
-# Notes: TBD
+# Command: cargo clippy -p ipc -- -D warnings
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean, no warnings.
+```
+
+**Fmt:**
+```
+# Command: cargo fmt -p ipc -- --check
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Formatting applied via `cargo fmt -p ipc`, all files now compliant.
+```
+
+---
+
+### Phase 2: Daemon Process and IPC Server Integration
+
+**Build:**
+```
+# Command: cargo build -p sena
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean build after readiness/health fixes.
+```
+
+**Tests:**
+```
+# Command: cargo test -p runtime
+# Date: 2026-04-18
+# Result: PASS (26 tests, 0 failures)
+# Coverage:
+#   - All builder tests (8 actors)
+#   - All health registry tests (mark_running_transitions_from_starting, etc.)
+#   - Supervisor tests (readiness_gate_passes_with_no_actors, supervision_loop_completes_with_no_actors)
+#   - Boot sequence tests (boot_completes_successfully, spawn_actors_creates_expected_list)
+#   - IPC server tests (ipc_server_constructs, ipc_server_receives_commands, spawn_ipc_server_works)
+```
+
+**Clippy:**
+```
+# Command: cargo clippy -p sena -- -D warnings
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Clean, no warnings across all dependencies.
 ```
 
 **Fmt:**
 ```
 # Command: cargo fmt --check
+# Date: 2026-04-18
+# Result: PASS
+# Notes: Formatting applied via `cargo fmt`, all files compliant.
+```
+
+**Manual tray inspection:**
+```
 # Date: TBD
-# Result: PASS/FAIL
-# Notes: TBD
+# Result: NOT YET VERIFIED
+# Notes: Requires Windows GUI environment. Deferred to pre-merge verification.
+# Expected behavior:
+#   - Tray icon appears in system tray (magenta square fallback)
+#   - Tooltip updates from "Sena — Booting..." to "Sena — Ready" after BootComplete
+#   - Menu items: Launch CLI, Config Editor, Open Models Folder, Shutdown Sena
+#   - Shutdown action closes daemon cleanly
 ```
 
 ---
 
-### Phase 2: IPC Protocol
+### Phase 3: CLI as IPC Client
 
 **Build:**
 ```

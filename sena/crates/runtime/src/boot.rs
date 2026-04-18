@@ -22,6 +22,10 @@ pub struct BootResult {
     pub actor_handles: Vec<(&'static str, JoinHandle<()>)>,
     /// List of actor names that should emit ActorReady before BootComplete.
     pub expected_actors: Vec<&'static str>,
+    /// Pre-subscribed broadcast receiver for readiness gate.
+    /// Subscribed BEFORE actors are spawned to avoid missing early ActorReady events.
+    /// Should be taken (consumed) by the supervisor's readiness gate.
+    pub readiness_rx: Option<tokio::sync::broadcast::Receiver<Event>>,
 }
 
 /// Execute the boot sequence.
@@ -64,6 +68,10 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     let bus = Arc::new(EventBus::new());
     check_step_timing("event bus init", step_start);
 
+    // Subscribe to broadcast BEFORE spawning actors to avoid missing early ActorReady events.
+    // This receiver will be used by the supervisor's readiness gate.
+    let readiness_rx = bus.subscribe_broadcast();
+
     // Broadcast EncryptionInitialized event (stub: ignore if no subscribers)
     let _ = bus
         .broadcast(Event::System(SystemEvent::EncryptionInitialized))
@@ -93,6 +101,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         encryption,
         actor_handles,
         expected_actors,
+        readiness_rx: Some(readiness_rx),
     })
 }
 

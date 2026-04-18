@@ -26,7 +26,7 @@ const ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// 5. Execute graceful shutdown in reverse boot order
 ///
 /// Returns Ok(()) on clean shutdown, Err on critical failure.
-pub async fn supervision_loop(boot_result: BootResult) -> Result<(), RuntimeError> {
+pub async fn supervision_loop(mut boot_result: BootResult) -> Result<(), RuntimeError> {
     info!("SUPERVISOR: supervision loop starting");
 
     let start_time = Instant::now();
@@ -38,7 +38,7 @@ pub async fn supervision_loop(boot_result: BootResult) -> Result<(), RuntimeErro
     }
 
     // Step 1: Readiness gate
-    let readiness_result = await_readiness_gate(&boot_result).await;
+    let readiness_result = await_readiness_gate(&mut boot_result, &mut actor_registry).await;
     match readiness_result {
         Ok(()) => {
             info!("SUPERVISOR: readiness gate passed");
@@ -46,21 +46,13 @@ pub async fn supervision_loop(boot_result: BootResult) -> Result<(), RuntimeErro
         Err(missing_actors) => {
             warn!(
                 missing = ?missing_actors,
-                "SUPERVISOR: readiness gate timeout, {} actors did not report ready",
+                "SUPERVISOR: readiness gate timeout, {} actors did not report ready within 30s",
                 missing_actors.len()
             );
-            // Emit ActorFailed for each missing actor
-            for actor_name in &missing_actors {
-                let _ = boot_result
-                    .bus
-                    .broadcast(Event::System(SystemEvent::ActorFailed {
-                        actor: actor_name.to_string(),
-                        reason: "did not emit ActorReady within 30s".to_string(),
-                    }))
-                    .await;
-                actor_registry.mark_failed(actor_name, "readiness timeout".to_string());
-            }
-            // Continue with degraded boot
+            // Do NOT mark actors as failed — they remain in Starting state and can
+            // become healthy later if they emit ActorReady after the timeout.
+            // The boot gate's only job is deciding WHEN BootComplete fires.
+            // Health tracking continues for the process lifetime.
         }
     }
 
@@ -99,8 +91,12 @@ pub async fn supervision_loop(boot_result: BootResult) -> Result<(), RuntimeErro
 
 /// Wait for all expected actors to emit ActorReady within 30 seconds.
 ///
+/// Updates the actor registry as ActorReady events arrive.
 /// Returns Ok(()) if all actors report ready, or Err(missing_actors) on timeout.
-async fn await_readiness_gate(boot_result: &BootResult) -> Result<(), Vec<&'static str>> {
+async fn await_readiness_gate(
+    boot_result: &mut BootResult,
+    actor_registry: &mut ActorRegistry,
+) -> Result<(), Vec<&'static str>> {
     let expected_actors: HashSet<&'static str> =
         boot_result.expected_actors.iter().copied().collect();
 
@@ -115,7 +111,13 @@ async fn await_readiness_gate(boot_result: &BootResult) -> Result<(), Vec<&'stat
     );
 
     let gate_future = async {
-        let mut rx = boot_result.bus.subscribe_broadcast();
+        // Take ownership of the pre-subscribed receiver.
+        // This receiver was subscribed BEFORE actors were spawned, so it will
+        // receive all ActorReady events, including early ones.
+        let mut rx = boot_result
+            .readiness_rx
+            .take()
+            .expect("readiness_rx should be Some");
         let mut ready_actors = HashSet::new();
 
         loop {
@@ -124,6 +126,8 @@ async fn await_readiness_gate(boot_result: &BootResult) -> Result<(), Vec<&'stat
                     if expected_actors.contains(actor_name) {
                         info!(actor = actor_name, "SUPERVISOR: ActorReady received");
                         ready_actors.insert(actor_name);
+                        // Update actor registry immediately as ready events arrive
+                        actor_registry.mark_running(actor_name);
 
                         if ready_actors.len() == expected_actors.len() {
                             info!("SUPERVISOR: all actors ready");
@@ -189,6 +193,13 @@ async fn await_shutdown_or_health_checks(
                 Ok(Event::System(SystemEvent::HealthCheckRequest { .. })) => {
                     info!("SUPERVISOR: health check request received");
                     handle_health_check_request(boot_result, actor_registry).await;
+                }
+                Ok(Event::System(SystemEvent::ActorReady { actor_name })) => {
+                    info!(actor = actor_name, "SUPERVISOR: ActorReady received (post-boot)");
+                    // Update health unconditionally — ActorReady can arrive at any time,
+                    // even after the boot window expires. This allows late-starting actors
+                    // to transition from Starting to Running.
+                    actor_registry.mark_running(actor_name);
                 }
                 Ok(Event::System(SystemEvent::ActorFailed { actor, reason })) => {
                     warn!(actor = %actor, reason = %reason, "SUPERVISOR: actor failed");
@@ -285,11 +296,14 @@ mod tests {
 
     #[tokio::test]
     async fn supervision_loop_completes_with_no_actors() {
+        let bus = Arc::new(EventBus::new());
+        let readiness_rx = bus.subscribe_broadcast();
         let boot_result = BootResult {
-            bus: Arc::new(EventBus::new()),
+            bus,
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            readiness_rx: Some(readiness_rx),
         };
 
         // Spawn a task to send shutdown signal after a short delay
@@ -307,24 +321,31 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_gate_passes_with_no_actors() {
-        let boot_result = BootResult {
-            bus: Arc::new(EventBus::new()),
+        let bus = Arc::new(EventBus::new());
+        let readiness_rx = bus.subscribe_broadcast();
+        let mut boot_result = BootResult {
+            bus,
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            readiness_rx: Some(readiness_rx),
         };
 
-        let result = await_readiness_gate(&boot_result).await;
+        let mut actor_registry = ActorRegistry::new();
+        let result = await_readiness_gate(&mut boot_result, &mut actor_registry).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn readiness_gate_times_out_if_actors_dont_respond() {
+        let bus = Arc::new(EventBus::new());
+        let readiness_rx = bus.subscribe_broadcast();
         let _boot_result = BootResult {
-            bus: Arc::new(EventBus::new()),
+            bus,
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],
+            readiness_rx: Some(readiness_rx),
         };
 
         // Don't send ActorReady — should timeout (but we use a short timeout for testing)
