@@ -28,3 +28,4 @@ ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.2" }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = "0.4"
 tray-icon = "0.20"
+tempfile = "3.14"
