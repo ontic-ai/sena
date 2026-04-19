@@ -6,8 +6,8 @@ use crate::backends::NativeBackend;
 use crate::error::PlatformError;
 use crate::monitor::VisionFrameCache;
 use crate::types::{ClipboardDigest, FileEvent, KeystrokeCadence, PlatformSignal, WindowContext};
-use bus::{Event, EventBus};
 use bus::events::platform::PlatformEvent;
+use bus::{Event, EventBus};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -136,10 +136,23 @@ impl PlatformActor {
         let mut window_tick = tokio::time::interval(window_interval);
         let mut clipboard_tick = tokio::time::interval(clipboard_interval);
         let mut keystroke_tick = tokio::time::interval(keystroke_interval);
+        let mut screen_capture_tick = tokio::time::interval(Duration::from_secs(30));
 
         // Track last-seen window to deduplicate bus broadcasts.
         let mut last_app: Option<String> = None;
         let mut last_clipboard_count: Option<usize> = None;
+
+        // Loop enabled states (controlled by IPC)
+        let mut platform_polling_enabled = true;
+        let mut screen_capture_enabled = true;
+
+        // Broadcast initial screen_capture loop status
+        let _ = bus
+            .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                loop_name: "screen_capture".to_string(),
+                enabled: true,
+            }))
+            .await;
 
         loop {
             tokio::select! {
@@ -151,12 +164,51 @@ impl PlatformActor {
                             info!("PlatformActor: shutdown signal received");
                             break;
                         }
+                        Ok(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name,
+                            enabled,
+                        })) if loop_name == "platform_polling" => {
+                            info!(
+                                enabled = enabled,
+                                "PlatformActor: platform_polling loop control requested"
+                            );
+                            platform_polling_enabled = enabled;
+
+                            // Broadcast status changed event
+                            let _ = bus
+                                .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                    loop_name: "platform_polling".to_string(),
+                                    enabled,
+                                }))
+                                .await;
+                        }
+                        Ok(Event::System(SystemEvent::LoopControlRequested {
+                            loop_name,
+                            enabled,
+                        })) if loop_name == "screen_capture" => {
+                            info!(
+                                enabled = enabled,
+                                "PlatformActor: screen_capture loop control requested"
+                            );
+                            screen_capture_enabled = enabled;
+
+                            // Broadcast status changed event
+                            let _ = bus
+                                .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                    loop_name: "screen_capture".to_string(),
+                                    enabled,
+                                }))
+                                .await;
+                        }
                         Err(_) => break,
                         Ok(_) => {}
                     }
                 }
 
                 _ = window_tick.tick() => {
+                    if !platform_polling_enabled {
+                        continue;
+                    }
                     match self.backend.active_window() {
                         Ok(PlatformSignal::Window(ctx)) => {
                             // Only broadcast on change
@@ -176,6 +228,9 @@ impl PlatformActor {
                 }
 
                 _ = clipboard_tick.tick() => {
+                    if !platform_polling_enabled {
+                        continue;
+                    }
                     match self.backend.clipboard_content() {
                         Ok(PlatformSignal::Clipboard(digest)) => {
                             let changed = last_clipboard_count != Some(digest.char_count);
@@ -195,6 +250,9 @@ impl PlatformActor {
                 }
 
                 _ = keystroke_tick.tick() => {
+                    if !platform_polling_enabled {
+                        continue;
+                    }
                     match self.backend.keystroke_cadence() {
                         Ok(PlatformSignal::Keystroke(cadence)) => {
                             let _ = self.keystroke_tx.send(cadence.clone());
@@ -204,6 +262,35 @@ impl PlatformActor {
                         }
                         Err(PlatformError::KeystrokeCadenceFailed(msg)) if msg.contains("no keystroke") => {}
                         Err(e) => debug!(error = %e, "platform: keystroke poll error"),
+                        _ => {}
+                    }
+                }
+
+                _ = screen_capture_tick.tick() => {
+                    if !screen_capture_enabled {
+                        continue;
+                    }
+                    // Capture screen frame and cache it
+                    match self.backend.screen_frame() {
+                        Ok(PlatformSignal::ScreenFrame(frame)) => {
+                            debug!(
+                                width = frame.width,
+                                height = frame.height,
+                                "PlatformActor: screen captured"
+                            );
+                            self.vision_cache.add_frame(frame.rgb_data.clone());
+
+                            // Broadcast vision frame available event
+                            // Note: frame_data should be encoded (e.g., PNG), but for now we pass raw RGB
+                            let _ = bus.broadcast(
+                                Event::Platform(PlatformEvent::VisionFrameAvailable {
+                                    frame_data: frame.rgb_data,
+                                    screen_id: 0,
+                                    timestamp: frame.timestamp,
+                                })
+                            ).await;
+                        }
+                        Err(e) => debug!(error = %e, "platform: screen capture error"),
                         _ => {}
                     }
                 }

@@ -38,6 +38,8 @@ pub struct CtpActor {
     last_snapshot: Option<ContextSnapshot>,
     /// Cached identity signal from Soul (preserved across snapshots).
     cached_identity_signal: Option<bus::events::soul::DistilledIdentitySignal>,
+    /// Loop enabled state (controlled by IPC).
+    loop_enabled: bool,
 }
 
 impl CtpActor {
@@ -61,6 +63,7 @@ impl CtpActor {
             session_start: Instant::now(),
             last_snapshot: None,
             cached_identity_signal: None,
+            loop_enabled: true,
         };
 
         (actor, signal_tx)
@@ -68,6 +71,12 @@ impl CtpActor {
 
     /// Process a single signal: ingest into buffer, assemble snapshot, check trigger.
     async fn process_signal(&mut self, signal: CtpSignal) -> Result<(), CtpError> {
+        // Skip processing if loop is disabled
+        if !self.loop_enabled {
+            debug!("CTP loop disabled, skipping signal processing");
+            return Ok(());
+        }
+
         debug!("CTP processing signal: {:?}", signal.signal_type());
 
         // Ingest signal into buffer
@@ -171,6 +180,25 @@ impl CtpActor {
     /// Process a bus event: extract relevant signals and process them.
     async fn process_bus_event(&mut self, event: Event) -> Result<(), CtpError> {
         match event {
+            Event::System(bus::SystemEvent::LoopControlRequested { loop_name, enabled })
+                if loop_name == "ctp" =>
+            {
+                info!(
+                    enabled = enabled,
+                    "CTP loop control requested, updating state"
+                );
+                self.loop_enabled = enabled;
+
+                // Broadcast status changed event
+                if let Some(bus) = &self.bus {
+                    let _ = bus
+                        .broadcast(Event::System(bus::SystemEvent::LoopStatusChanged {
+                            loop_name: "ctp".to_string(),
+                            enabled,
+                        }))
+                        .await;
+                }
+            }
             Event::Platform(platform_event) => {
                 use bus::events::platform::PlatformEvent;
 
@@ -296,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn actor_constructs() {
         let (actor, _signal_tx) = CtpActor::new();
-        assert_eq!(actor.name(), "CtpActor");
+        assert_eq!(actor.name(), "ctp");
     }
 
     #[tokio::test]

@@ -15,15 +15,26 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
 use tracing::info;
 
+/// Loop metadata for display.
+#[derive(Clone, Debug)]
+struct LoopInfo {
+    name: String,
+    #[allow(dead_code)]
+    description: String,
+    enabled: bool,
+}
+
 /// TUI shell state.
 pub struct Shell {
     ipc: IpcClient,
     message_log: Arc<Mutex<Vec<String>>>,
+    loops: Arc<Mutex<HashMap<String, LoopInfo>>>,
     input_buffer: String,
     should_quit: bool,
     daemon_status: String,
@@ -32,7 +43,7 @@ pub struct Shell {
 
 impl Shell {
     /// Create and initialize a new shell with IPC connection.
-    pub async fn new(ipc: IpcClient) -> Result<Self, CliError> {
+    pub async fn new(mut ipc: IpcClient) -> Result<Self, CliError> {
         // Setup terminal
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let mut stdout = std::io::stdout();
@@ -47,11 +58,27 @@ impl Shell {
             "Type /help for commands, Ctrl+C to quit".to_string(),
         ]));
 
+        let loops: Arc<Mutex<HashMap<String, LoopInfo>>> = Arc::new(Mutex::new(HashMap::new()));
+
         // Spawn task to receive push events
         let push_log = Arc::clone(&message_log);
+        let push_loops = Arc::clone(&loops);
         let mut push_rx = ipc.subscribe_events();
         tokio::spawn(async move {
             while let Some(event) = push_rx.recv().await {
+                // Handle loop status changed events
+                if let Some(event_type) = event.get("type").and_then(|v| v.as_str())
+                    && event_type == "loop_status_changed"
+                    && let (Some(loop_name), Some(enabled)) = (
+                        event.get("loop_name").and_then(|v| v.as_str()),
+                        event.get("enabled").and_then(|v| v.as_bool()),
+                    )
+                    && let Ok(mut loops_map) = push_loops.lock()
+                    && let Some(loop_info) = loops_map.get_mut(loop_name)
+                {
+                    loop_info.enabled = enabled;
+                }
+
                 if let Ok(mut log) = push_log.lock() {
                     log.push(format!("[EVENT] {}", event));
                     // Keep log size reasonable
@@ -62,9 +89,41 @@ impl Shell {
             }
         });
 
+        // Fetch initial loop state
+        if let Ok(response) = ipc.send("loops.list", json!({})).await
+            && let Some(loops_array) = response.get("loops").and_then(|v| v.as_array())
+            && let Ok(mut loops_map) = loops.lock()
+        {
+            for loop_data in loops_array {
+                let name = loop_data
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let description = loop_data
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let enabled = loop_data
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                loops_map.insert(
+                    name.clone(),
+                    LoopInfo {
+                        name,
+                        description,
+                        enabled,
+                    },
+                );
+            }
+        }
+
         Ok(Self {
             ipc,
             message_log,
+            loops,
             input_buffer: String::new(),
             should_quit: false,
             daemon_status: "Connected".to_string(),
@@ -77,10 +136,12 @@ impl Shell {
         info!("Shell TUI starting");
 
         // Initial render
-        if let Ok(log) = self.message_log.lock() {
+        if let (Ok(log), Ok(loops_map)) = (self.message_log.lock(), self.loops.lock()) {
+            let loops_vec: Vec<LoopInfo> = loops_map.values().cloned().collect();
             Self::render_tui(
                 &mut self.terminal,
                 &log,
+                &loops_vec,
                 &self.input_buffer,
                 &self.daemon_status,
             )
@@ -98,10 +159,12 @@ impl Shell {
             }
 
             // Render
-            if let Ok(log) = self.message_log.lock() {
+            if let (Ok(log), Ok(loops_map)) = (self.message_log.lock(), self.loops.lock()) {
+                let loops_vec: Vec<LoopInfo> = loops_map.values().cloned().collect();
                 Self::render_tui(
                     &mut self.terminal,
                     &log,
+                    &loops_vec,
                     &self.input_buffer,
                     &self.daemon_status,
                 )
@@ -189,6 +252,10 @@ impl Shell {
                     .await?
             }
             "/events" => self.cmd_events_subscribe().await?,
+            "/loops" => {
+                self.cmd_loops(parts.get(1).copied(), parts.get(2).copied())
+                    .await?
+            }
             _ => {
                 self.log_message(format!(
                     "Unknown command: {}. Type /help for available commands.",
@@ -213,6 +280,7 @@ impl Shell {
         self.log_message("  /speech     - Show speech status".to_string());
         self.log_message("  /config [key] [value] - Get or set config".to_string());
         self.log_message("  /events     - Subscribe to daemon events".to_string());
+        self.log_message("  /loops [name] [on|off] - List or control background loops".to_string());
         self.log_message("  /quit       - Exit CLI".to_string());
     }
 
@@ -367,6 +435,141 @@ impl Shell {
         Ok(())
     }
 
+    /// Execute /loops command.
+    async fn cmd_loops(&mut self, name: Option<&str>, state: Option<&str>) -> Result<(), CliError> {
+        match (name, state) {
+            (None, None) => {
+                // List all loops
+                match self.ipc.send("loops.list", json!({})).await {
+                    Ok(response) => {
+                        self.log_message("Background Loops:".to_string());
+                        if let Some(loops_array) = response.get("loops").and_then(|v| v.as_array())
+                        {
+                            // Collect loop info for display
+                            let mut display_lines = Vec::new();
+                            let mut updates = Vec::new();
+
+                            for loop_data in loops_array {
+                                let name = loop_data
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let enabled = loop_data
+                                    .get("enabled")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let desc = loop_data
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let status = if enabled { "●" } else { "○" };
+                                display_lines.push(format!("  {} {} — {}", status, name, desc));
+
+                                updates.push((name.to_string(), desc.to_string(), enabled));
+                            }
+
+                            // Log all lines
+                            for line in display_lines {
+                                self.log_message(line);
+                            }
+
+                            // Update local loop state
+                            if let Ok(mut loops_map) = self.loops.lock() {
+                                loops_map.clear();
+                                for (name, description, enabled) in updates {
+                                    loops_map.insert(
+                                        name.clone(),
+                                        LoopInfo {
+                                            name,
+                                            description,
+                                            enabled,
+                                        },
+                                    );
+                                }
+                            }
+                        } else {
+                            self.log_message(format!("Loops: {}", response));
+                        }
+                    }
+                    Err(e) => {
+                        self.log_message(format!("Loops list failed: {}", e));
+                    }
+                }
+            }
+            (Some(name), None) => {
+                // Toggle loop (get current state first, then flip it)
+                self.log_message(format!("Toggle syntax: /loops {} on|off", name));
+            }
+            (Some(name), Some("on")) => {
+                // Enable loop
+                match self
+                    .ipc
+                    .send("loops.set", json!({"loop_name": name, "enabled": true}))
+                    .await
+                {
+                    Ok(response) => {
+                        // Check if unsupported
+                        let note = response.get("note").and_then(|v| v.as_str());
+                        if let Some(note_msg) = note {
+                            self.log_message(format!(
+                                "Loop {} enabled ({}): {}",
+                                name, note_msg, response
+                            ));
+                        } else {
+                            self.log_message(format!("Loop {} enabled: {}", name, response));
+                        }
+                        // Update local state
+                        if let Ok(mut loops_map) = self.loops.lock()
+                            && let Some(loop_info) = loops_map.get_mut(name)
+                        {
+                            loop_info.enabled = true;
+                        }
+                    }
+                    Err(e) => {
+                        self.log_message(format!("Loop enable failed: {}", e));
+                    }
+                }
+            }
+            (Some(name), Some("off")) => {
+                // Disable loop
+                match self
+                    .ipc
+                    .send("loops.set", json!({"loop_name": name, "enabled": false}))
+                    .await
+                {
+                    Ok(response) => {
+                        let note = response.get("note").and_then(|v| v.as_str());
+                        if let Some(note_msg) = note {
+                            self.log_message(format!(
+                                "Loop {} disabled ({}): {}",
+                                name, note_msg, response
+                            ));
+                        } else {
+                            self.log_message(format!("Loop {} disabled: {}", name, response));
+                        }
+                        // Update local state
+                        if let Ok(mut loops_map) = self.loops.lock()
+                            && let Some(loop_info) = loops_map.get_mut(name)
+                        {
+                            loop_info.enabled = false;
+                        }
+                    }
+                    Err(e) => {
+                        self.log_message(format!("Loop disable failed: {}", e));
+                    }
+                }
+            }
+            (Some(name), Some(invalid)) => {
+                self.log_message(format!(
+                    "Invalid state '{}'. Use 'on' or 'off' for loop {}",
+                    invalid, name
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Open interactive config editor.
     async fn open_config_editor(&mut self) -> Result<(), CliError> {
         // Cleanup terminal for config editor
@@ -404,22 +607,32 @@ impl Shell {
     fn render_tui(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         message_log: &[String],
+        loops: &[LoopInfo],
         input_buffer: &str,
         daemon_status: &str,
     ) -> Result<(), io::Error> {
         terminal.draw(|frame| {
-            let chunks = Layout::default()
+            let main_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(0),     // Main area (left)
+                    Constraint::Length(30), // Loops sidebar (right)
+                ])
+                .split(frame.area());
+
+            let left_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // Header
                     Constraint::Min(0),    // Message log
                     Constraint::Length(3), // Input
                 ])
-                .split(frame.area());
+                .split(main_chunks[0]);
 
-            Self::render_header(frame, chunks[0], daemon_status);
-            Self::render_message_log(frame, chunks[1], message_log);
-            Self::render_input(frame, chunks[2], input_buffer);
+            Self::render_header(frame, left_chunks[0], daemon_status);
+            Self::render_message_log(frame, left_chunks[1], message_log);
+            Self::render_input(frame, left_chunks[2], input_buffer);
+            Self::render_loops_sidebar(frame, main_chunks[1], loops);
         })?;
         Ok(())
     }
@@ -474,6 +687,30 @@ impl Shell {
             .style(Style::default().fg(Color::White));
 
         frame.render_widget(input_text, area);
+    }
+
+    /// Render loops sidebar.
+    fn render_loops_sidebar(frame: &mut Frame, area: Rect, loops: &[LoopInfo]) {
+        let mut sorted_loops = loops.to_vec();
+        sorted_loops.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let items: Vec<ListItem> = sorted_loops
+            .iter()
+            .map(|loop_info| {
+                let status_dot = if loop_info.enabled {
+                    Span::styled("● ", Style::default().fg(Color::Green))
+                } else {
+                    Span::styled("● ", Style::default().fg(Color::Red))
+                };
+                let name_span = Span::raw(&loop_info.name);
+                ListItem::new(Line::from(vec![status_dot, name_span]))
+            })
+            .collect();
+
+        let loops_list =
+            List::new(items).block(Block::default().borders(Borders::ALL).title("Loops"));
+
+        frame.render_widget(loops_list, area);
     }
 
     /// Cleanup terminal state.

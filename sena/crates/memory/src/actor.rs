@@ -243,106 +243,170 @@ impl Actor for MemoryActor {
                 .clone();
 
             let mut rx = bus.subscribe_broadcast();
+            let mut consolidation_tick = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+            let mut consolidation_enabled = true;
+
+            // Broadcast initial consolidation loop status
+            let _ = bus
+                .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                    loop_name: "memory_consolidation".to_string(),
+                    enabled: true,
+                }))
+                .await;
 
             loop {
-                match rx.recv().await {
-                    Ok(event) => match event {
-                        Event::System(SystemEvent::ShutdownSignal) => {
-                            info!("shutdown signal received, stopping memory actor");
-                            break;
-                        }
-                        Event::System(SystemEvent::ShutdownInitiated) => {
-                            info!("shutdown initiated — performing memory backup");
-                            let causal_id = CausalId::new();
-                            match self.perform_backup(causal_id).await {
-                                Ok(path) => {
-                                    let _ =
-                                        bus.broadcast(Event::Memory(
-                                            MemoryEvent::BackupCompleted { path, causal_id },
-                                        ))
-                                        .await;
+                tokio::select! {
+                    event = rx.recv() => {
+                        match event {
+                            Ok(Event::System(SystemEvent::ShutdownSignal)) => {
+                                info!("shutdown signal received, stopping memory actor");
+                                break;
+                            }
+                            Ok(Event::System(SystemEvent::ShutdownInitiated)) => {
+                                info!("shutdown initiated — performing memory backup");
+                                let causal_id = CausalId::new();
+                                match self.perform_backup(causal_id).await {
+                                    Ok(path) => {
+                                        let _ =
+                                            bus.broadcast(Event::Memory(
+                                                MemoryEvent::BackupCompleted { path, causal_id },
+                                            ))
+                                            .await;
+                                    }
+                                    Err(reason) => {
+                                        error!(error = %reason, "memory backup failed");
+                                        let _ = bus
+                                            .broadcast(Event::Memory(MemoryEvent::BackupFailed {
+                                                reason,
+                                                causal_id,
+                                            }))
+                                            .await;
+                                    }
                                 }
-                                Err(reason) => {
-                                    error!(error = %reason, "memory backup failed");
-                                    let _ = bus
-                                        .broadcast(Event::Memory(MemoryEvent::BackupFailed {
-                                            reason,
+                            }
+                            Ok(Event::System(SystemEvent::LoopControlRequested {
+                                loop_name,
+                                enabled,
+                            })) if loop_name == "memory_consolidation" => {
+                                info!(
+                                    enabled = enabled,
+                                    "memory consolidation loop control requested"
+                                );
+                                consolidation_enabled = enabled;
+
+                                // Broadcast status changed event
+                                let _ = bus
+                                    .broadcast(Event::System(SystemEvent::LoopStatusChanged {
+                                        loop_name: "memory_consolidation".to_string(),
+                                        enabled,
+                                    }))
+                                    .await;
+                            }
+                            Ok(Event::Memory(memory_event)) => match memory_event {
+                                MemoryEvent::IngestRequested {
+                                    text,
+                                    kind,
+                                    causal_id,
+                                } => {
+                                    if let Err(e) =
+                                        self.handle_ingest_request(text, kind, causal_id).await
+                                    {
+                                        error!(
+                                            causal_id = causal_id.as_u64(),
+                                            error = %e,
+                                            "ingest failed"
+                                        );
+                                        bus.broadcast(Event::Memory(MemoryEvent::IngestFailed {
+                                            causal_id,
+                                            reason: e.to_string(),
+                                        }))
+                                        .await
+                                        .map_err(|e| {
+                                            ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                        })?;
+                                    } else {
+                                        bus.broadcast(Event::Memory(MemoryEvent::IngestCompleted {
                                             causal_id,
                                         }))
-                                        .await;
+                                        .await
+                                        .map_err(|e| {
+                                            ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                        })?;
+                                    }
                                 }
+                                MemoryEvent::QueryRequested {
+                                    query,
+                                    limit,
+                                    causal_id,
+                                } => match self.handle_query_request(query, limit, causal_id).await {
+                                    Ok(chunks) => {
+                                        bus.broadcast(Event::Memory(MemoryEvent::QueryCompleted {
+                                            chunks,
+                                            causal_id,
+                                        }))
+                                        .await
+                                        .map_err(|e| {
+                                            ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                        })?;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            causal_id = causal_id.as_u64(),
+                                            error = %e,
+                                            "query failed"
+                                        );
+                                        bus.broadcast(Event::Memory(MemoryEvent::QueryFailed {
+                                            causal_id,
+                                            reason: e.to_string(),
+                                        }))
+                                        .await
+                                        .map_err(|e| {
+                                            ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                        })?;
+                                    }
+                                },
+                                _ => {}
+                            },
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!(error = %e, "broadcast channel error");
+                                return Err(ActorError::ChannelClosed(e.to_string()));
                             }
                         }
-                        Event::Memory(memory_event) => match memory_event {
-                            MemoryEvent::IngestRequested {
-                                text,
-                                kind,
-                                causal_id,
-                            } => {
-                                if let Err(e) =
-                                    self.handle_ingest_request(text, kind, causal_id).await
-                                {
-                                    error!(
-                                        causal_id = causal_id.as_u64(),
-                                        error = %e,
-                                        "ingest failed"
-                                    );
-                                    bus.broadcast(Event::Memory(MemoryEvent::IngestFailed {
-                                        causal_id,
-                                        reason: e.to_string(),
+                    }
+
+                    _ = consolidation_tick.tick() => {
+                        if !consolidation_enabled {
+                            continue;
+                        }
+
+                        debug!("running periodic memory consolidation");
+
+                        // Perform real consolidation by calling backend maintenance methods
+                        // This is lightweight work that happens in the background periodically
+                        match self.backend.consolidate().await {
+                            Ok(nodes_affected) => {
+                                debug!(
+                                    nodes_affected = nodes_affected,
+                                    "memory consolidation completed"
+                                );
+                                let _ = bus
+                                    .broadcast(Event::Memory(MemoryEvent::ConsolidationCompleted {
+                                        nodes_decayed: nodes_affected,
                                     }))
-                                    .await
-                                    .map_err(|e| {
-                                        ActorError::RuntimeError(format!("broadcast failed: {}", e))
-                                    })?;
-                                } else {
-                                    bus.broadcast(Event::Memory(MemoryEvent::IngestCompleted {
-                                        causal_id,
-                                    }))
-                                    .await
-                                    .map_err(|e| {
-                                        ActorError::RuntimeError(format!("broadcast failed: {}", e))
-                                    })?;
-                                }
+                                    .await;
                             }
-                            MemoryEvent::QueryRequested {
-                                query,
-                                limit,
-                                causal_id,
-                            } => match self.handle_query_request(query, limit, causal_id).await {
-                                Ok(chunks) => {
-                                    bus.broadcast(Event::Memory(MemoryEvent::QueryCompleted {
-                                        chunks,
-                                        causal_id,
+                            Err(e) => {
+                                warn!(error = %e, "memory consolidation failed (non-fatal)");
+                                // Still emit completion event with 0 nodes to indicate
+                                // the consolidation cycle ran (even if it failed)
+                                let _ = bus
+                                    .broadcast(Event::Memory(MemoryEvent::ConsolidationCompleted {
+                                        nodes_decayed: 0,
                                     }))
-                                    .await
-                                    .map_err(|e| {
-                                        ActorError::RuntimeError(format!("broadcast failed: {}", e))
-                                    })?;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        causal_id = causal_id.as_u64(),
-                                        error = %e,
-                                        "query failed"
-                                    );
-                                    bus.broadcast(Event::Memory(MemoryEvent::QueryFailed {
-                                        causal_id,
-                                        reason: e.to_string(),
-                                    }))
-                                    .await
-                                    .map_err(|e| {
-                                        ActorError::RuntimeError(format!("broadcast failed: {}", e))
-                                    })?;
-                                }
-                            },
-                            _ => {}
-                        },
-                        _ => {}
-                    },
-                    Err(e) => {
-                        error!(error = %e, "broadcast channel error");
-                        return Err(ActorError::ChannelClosed(e.to_string()));
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
@@ -495,6 +559,146 @@ mod tests {
         assert!(
             count <= 3,
             "expected at most 3 backups after pruning, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidation_loop_responds_to_control_events() {
+        use tokio::time::{Duration, sleep};
+
+        let backend = Box::new(StubBackend::new());
+        let mut actor = MemoryActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(Arc::clone(&bus)).await.expect("start failed");
+
+        // Spawn actor run in background
+        let actor_bus = Arc::clone(&bus);
+        let handle = tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        // Wait for initial LoopStatusChanged event
+        let mut got_initial_status = false;
+        for _ in 0..10 {
+            match rx.try_recv() {
+                Ok(Event::System(SystemEvent::LoopStatusChanged { loop_name, enabled }))
+                    if loop_name == "memory_consolidation" =>
+                {
+                    assert!(enabled, "initial state should be enabled");
+                    got_initial_status = true;
+                    break;
+                }
+                _ => {}
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(got_initial_status, "should emit initial loop status");
+
+        // Send disable request
+        actor_bus
+            .broadcast(Event::System(SystemEvent::LoopControlRequested {
+                loop_name: "memory_consolidation".to_string(),
+                enabled: false,
+            }))
+            .await
+            .expect("broadcast failed");
+
+        // Wait for status changed event
+        let mut got_disabled = false;
+        for _ in 0..10 {
+            match rx.try_recv() {
+                Ok(Event::System(SystemEvent::LoopStatusChanged { loop_name, enabled }))
+                    if loop_name == "memory_consolidation" =>
+                {
+                    assert!(!enabled, "state should be disabled");
+                    got_disabled = true;
+                    break;
+                }
+                _ => {}
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(got_disabled, "should respond to disable request");
+
+        // Cleanup
+        actor_bus
+            .broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("broadcast failed");
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
+    async fn consolidation_performs_real_maintenance_with_echo0_backend() {
+        use crate::echo0_backend::Echo0Backend;
+
+        let backend = Box::new(Echo0Backend::new());
+        let mut actor = MemoryActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+
+        actor.start(Arc::clone(&bus)).await.expect("start failed");
+
+        // Ingest some test chunks
+        actor
+            .handle_ingest_request(
+                "important information".to_string(),
+                MemoryKind::Episodic,
+                CausalId::new(),
+            )
+            .await
+            .expect("ingest failed");
+
+        actor
+            .handle_ingest_request(
+                "more important data".to_string(),
+                MemoryKind::Semantic,
+                CausalId::new(),
+            )
+            .await
+            .expect("ingest failed");
+
+        // Query before consolidation
+        let chunks_before = actor
+            .handle_query_request("important".to_string(), 10, CausalId::new())
+            .await
+            .expect("query failed");
+        assert_eq!(chunks_before.len(), 2, "should find both chunks");
+        assert_eq!(chunks_before[0].score, 1.0, "fresh chunks have score 1.0");
+
+        // Perform consolidation
+        let result = actor.backend.consolidate().await;
+        assert!(result.is_ok(), "consolidation should succeed");
+        let affected = result.unwrap();
+        assert_eq!(affected, 2, "both chunks should be affected");
+
+        // Query after consolidation - scores should be decayed
+        let chunks_after = actor
+            .handle_query_request("important".to_string(), 10, CausalId::new())
+            .await
+            .expect("query failed");
+        assert_eq!(chunks_after.len(), 2, "chunks should still be found");
+        assert_eq!(chunks_after[0].score, 0.9, "importance should decay to 0.9");
+
+        // Run multiple consolidations to trigger pruning
+        for _ in 0..15 {
+            actor
+                .backend
+                .consolidate()
+                .await
+                .expect("consolidation failed");
+        }
+
+        // Query after heavy consolidation - chunks should be pruned
+        let chunks_pruned = actor
+            .handle_query_request("important".to_string(), 10, CausalId::new())
+            .await
+            .expect("query failed");
+        assert_eq!(
+            chunks_pruned.len(),
+            0,
+            "low-importance chunks should be pruned"
         );
     }
 }

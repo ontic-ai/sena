@@ -574,6 +574,7 @@ impl InferenceActor {
 
     /// VRAM monitoring loop: poll backend VRAM usage every 2 seconds when model loaded.
     ///
+    /// Responds to LoopControlRequested events to enable/disable monitoring.
     /// Exits when shutdown signal is received on the bus.
     async fn vram_monitoring_loop(
         bus: Arc<EventBus>,
@@ -581,21 +582,34 @@ impl InferenceActor {
     ) {
         let mut shutdown_rx = bus.subscribe_broadcast();
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        let mut enabled = true;
+
+        // Broadcast initial loop status
+        let _ = bus
+            .broadcast(Event::System(bus::SystemEvent::LoopStatusChanged {
+                loop_name: "vram_monitor".to_string(),
+                enabled: true,
+            }))
+            .await;
+
+        debug!("vram monitoring loop started");
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let backend_guard = backend.lock().await;
-                    if backend_guard.is_loaded() {
-                        let (used_mb, total_mb, percent) = backend_guard.vram_usage();
-                        drop(backend_guard);
+                    if enabled {
+                        let backend_guard = backend.lock().await;
+                        if backend_guard.is_loaded() {
+                            let (used_mb, total_mb, percent) = backend_guard.vram_usage();
+                            drop(backend_guard);
 
-                        let normalized_percent = if total_mb == 0 { 0 } else { percent };
-                        let _ = bus.broadcast(Event::System(bus::SystemEvent::VramUsageUpdated {
-                            used_mb,
-                            total_mb,
-                            percent: normalized_percent,
-                        })).await;
+                            let normalized_percent = if total_mb == 0 { 0 } else { percent };
+                            let _ = bus.broadcast(Event::System(bus::SystemEvent::VramUsageUpdated {
+                                used_mb,
+                                total_mb,
+                                percent: normalized_percent,
+                            })).await;
+                        }
                     }
                 }
                 event = shutdown_rx.recv() => {
@@ -603,6 +617,22 @@ impl InferenceActor {
                         Ok(Event::System(bus::SystemEvent::ShutdownSignal)) => {
                             debug!("vram monitoring loop: shutdown signal received");
                             break;
+                        }
+                        Ok(Event::System(bus::SystemEvent::LoopControlRequested {
+                            loop_name,
+                            enabled: new_enabled,
+                        })) if loop_name == "vram_monitor" && enabled != new_enabled => {
+                            debug!(
+                                enabled = new_enabled,
+                                "vram monitoring loop: control requested"
+                            );
+                            enabled = new_enabled;
+                            let _ = bus
+                                .broadcast(Event::System(bus::SystemEvent::LoopStatusChanged {
+                                    loop_name: "vram_monitor".to_string(),
+                                    enabled,
+                                }))
+                                .await;
                         }
                         Ok(_) => {}
                         Err(e) => {

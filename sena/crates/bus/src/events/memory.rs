@@ -125,6 +125,12 @@ pub enum MemoryEvent {
         /// Causal chain ID.
         causal_id: CausalId,
     },
+
+    /// Memory consolidation completed (periodic background maintenance).
+    ConsolidationCompleted {
+        /// Number of memory nodes decayed in this consolidation cycle.
+        nodes_decayed: usize,
+    },
 }
 
 impl std::fmt::Debug for MemoryEvent {
@@ -169,7 +175,7 @@ impl std::fmt::Debug for MemoryEvent {
             Self::QueryCompleted { chunks, causal_id }
             | Self::MemoryQueryResponse { chunks, causal_id } => f
                 .debug_struct("QueryCompleted/MemoryQueryResponse")
-                .field("chunks", chunks)
+                .field("chunk_count", &chunks.len())
                 .field("causal_id", causal_id)
                 .finish(),
             Self::QueryFailed { causal_id, reason } => f
@@ -186,6 +192,10 @@ impl std::fmt::Debug for MemoryEvent {
                 .debug_struct("BackupFailed")
                 .field("reason", reason)
                 .field("causal_id", causal_id)
+                .finish(),
+            Self::ConsolidationCompleted { nodes_decayed } => f
+                .debug_struct("ConsolidationCompleted")
+                .field("nodes_decayed", nodes_decayed)
                 .finish(),
         }
     }
@@ -207,6 +217,7 @@ impl MemoryEvent {
             | Self::MemoryQueryResponse { causal_id, .. }
             | Self::BackupCompleted { causal_id, .. }
             | Self::BackupFailed { causal_id, .. } => Some(*causal_id),
+            Self::ConsolidationCompleted { .. } => None,
         }
     }
 }

@@ -5,6 +5,7 @@ mod commands {
     pub mod events_commands;
     pub mod handlers;
     pub mod inference_commands;
+    pub mod loops_commands;
     pub mod memory_commands;
     pub mod runtime_commands;
     pub mod speech_commands;
@@ -42,7 +43,7 @@ async fn main() -> Result<(), DaemonError> {
 
     // Create command registry and register all handlers
     let mut registry = CommandRegistry::new();
-    commands::handlers::register_all(
+    let loop_registry = commands::handlers::register_all(
         &mut registry,
         &boot_result,
         runtime_state.clone(),
@@ -65,6 +66,13 @@ async fn main() -> Result<(), DaemonError> {
     let event_forwarding_bus = boot_result.bus.clone();
     tokio::spawn(async move {
         forward_bus_events_to_ipc(event_forwarding_bus, push_tx).await;
+    });
+
+    // Spawn loop status tracking task — updates loop registry when actors report status changes
+    let loop_status_bus = boot_result.bus.clone();
+    let loop_registry_clone = loop_registry.clone();
+    tokio::spawn(async move {
+        track_loop_status_changes(loop_status_bus, loop_registry_clone).await;
     });
 
     // Create tray action channel (std::sync::mpsc for main thread)
@@ -233,6 +241,14 @@ async fn forward_bus_events_to_ipc(
                 "type": "boot_failed",
                 "reason": reason,
             })),
+            // Loop status changed events
+            Event::System(bus::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
+                Some(json!({
+                    "type": "loop_status_changed",
+                    "loop_name": loop_name,
+                    "enabled": enabled,
+                }))
+            }
             _ => None,
         };
 
@@ -243,6 +259,34 @@ async fn forward_bus_events_to_ipc(
     }
 
     warn!("Event forwarding task exited");
+}
+
+/// Track loop status changes from actors and update the loop registry.
+///
+/// This task subscribes to LoopStatusChanged events on the bus and updates
+/// the loop registry to reflect actual loop states reported by actors.
+async fn track_loop_status_changes(
+    bus: std::sync::Arc<bus::EventBus>,
+    registry: commands::loops_commands::LoopRegistry,
+) {
+    use bus::Event;
+
+    let mut rx = bus.subscribe_broadcast();
+
+    info!("Loop status tracking task started");
+
+    while let Ok(event) = rx.recv().await {
+        if let Event::System(bus::SystemEvent::LoopStatusChanged { loop_name, enabled }) = event {
+            info!(
+                loop_name = %loop_name,
+                enabled = enabled,
+                "Loop status changed, updating registry"
+            );
+            registry.handle_status_changed(&loop_name, enabled).await;
+        }
+    }
+
+    warn!("Loop status tracking task exited");
 }
 
 /// Initialize logging subsystem.
