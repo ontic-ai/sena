@@ -6,8 +6,8 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::causal::CausalId;
 use crate::events::{
-    CTPEvent, InferenceEvent, MemoryEvent, ModelEvent, PlatformEvent, SoulEvent, SpeechEvent,
-    SystemEvent, TelemetryEvent,
+    CTPEvent, DownloadEvent, InferenceEvent, MemoryEvent, ModelEvent, PlatformEvent, SoulEvent,
+    SpeechEvent, SystemEvent, TelemetryEvent,
 };
 
 /// Unified event type for all bus communication.
@@ -29,6 +29,8 @@ pub enum Event {
     Speech(SpeechEvent),
     /// Model management events.
     Model(ModelEvent),
+    /// Download events for model downloads.
+    Download(DownloadEvent),
     /// Telemetry and metrics events.
     Telemetry(TelemetryEvent),
 }
@@ -95,51 +97,46 @@ impl EventBus {
     pub async fn broadcast(&self, event: Event) -> Result<(), BusError> {
         let causal_id = event.causal_id();
         let event_type = match &event {
-            Event::System(e) => format!("System::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("System")
-                .to_string(),
-            Event::Platform(e) => format!("Platform::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Platform")
-                .to_string(),
-            Event::CTP(e) => format!("CTP::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("CTP")
-                .to_string(),
-            Event::Inference(e) => format!("Inference::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Inference")
-                .to_string(),
-            Event::Memory(e) => format!("Memory::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Memory")
-                .to_string(),
-            Event::Soul(e) => format!("Soul::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Soul")
-                .to_string(),
-            Event::Speech(e) => format!("Speech::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Speech")
-                .to_string(),
-            Event::Model(e) => format!("Model::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Model")
-                .to_string(),
-            Event::Telemetry(e) => format!("Telemetry::{:?}", e)
-                .split('(')
-                .next()
-                .unwrap_or("Telemetry")
-                .to_string(),
+            Event::System(e) => {
+                let s = format!("System::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Platform(e) => {
+                let s = format!("Platform::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::CTP(e) => {
+                let s = format!("CTP::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Inference(e) => {
+                let s = format!("Inference::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Memory(e) => {
+                let s = format!("Memory::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Soul(e) => {
+                let s = format!("Soul::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Speech(e) => {
+                let s = format!("Speech::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Model(e) => {
+                let s = format!("Model::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Download(e) => {
+                let s = format!("Download::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
+            Event::Telemetry(e) => {
+                let s = format!("Telemetry::{:?}", e);
+                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+            }
         };
 
         if let Some(cid) = causal_id {
