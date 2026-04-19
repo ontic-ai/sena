@@ -288,6 +288,17 @@ impl SoulActor {
     async fn process_event(&mut self, event: Event) -> Result<(), SoulError> {
         match event {
             Event::Soul(soul_event) => match soul_event {
+                SoulEvent::InitializeWithName { name } => {
+                    tracing::info!("Initializing Soul with user name");
+                    // Store user name in Soul identity signals.
+                    if let Some(store) = self.store.as_mut() {
+                        if let Err(e) = store.write_identity_signal("user_name", &name) {
+                            tracing::error!(error = %e, "Failed to store user name");
+                        } else {
+                            tracing::info!("User name stored successfully");
+                        }
+                    }
+                }
                 SoulEvent::WriteRequested {
                     description,
                     app_context,

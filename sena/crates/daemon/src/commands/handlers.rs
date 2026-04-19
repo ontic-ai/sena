@@ -7,7 +7,10 @@ use crate::commands::{
         InferenceStatusHandler, ListModelsHandler, LoadModelHandler, RunInferenceHandler,
     },
     memory_commands::{MemoryQueryHandler, MemoryStatsHandler},
-    runtime_commands::{PingHandler, RuntimeState, ShutdownHandler, StatusHandler},
+    runtime_commands::{
+        PingHandler, RuntimeState, ShutdownHandler, StatusHandler, SubmitOnboardingConfigHandler,
+        SubmitOnboardingNameHandler,
+    },
     speech_commands::{SpeechListenStartHandler, SpeechListenStopHandler, SpeechStatusHandler},
 };
 use ipc::CommandRegistry;
@@ -38,6 +41,12 @@ pub fn register_all(
     )));
     registry.register(Arc::new(ShutdownHandler::new(
         shutdown_tx,
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(SubmitOnboardingNameHandler::new(
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(SubmitOnboardingConfigHandler::new(
         boot_result.bus.clone(),
     )));
 

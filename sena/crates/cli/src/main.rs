@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         result = async {
-            let mut shell = Shell::new().await?;
+            let shell = Shell::new().await?;
             shell.run().await
         } => {
             // Shell exited — broadcast shutdown so supervision loop also exits.

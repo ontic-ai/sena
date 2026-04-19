@@ -25,6 +25,7 @@
 
 pub mod boot;
 pub mod builder;
+pub mod config;
 pub mod download_manager;
 pub mod error;
 pub mod health;
@@ -32,6 +33,7 @@ pub mod ipc_server;
 pub mod supervisor;
 
 pub use boot::{BootResult, boot};
+pub use config::{SenaConfig, load_or_create_config, save_config};
 pub use download_manager::{DownloadClient, DownloadError, ModelCache};
 pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};

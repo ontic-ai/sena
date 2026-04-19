@@ -375,8 +375,12 @@ fn hash_string(s: &str) -> u64 {
 
 /// Load configuration from disk or create defaults.
 async fn load_config() -> Result<(), RuntimeError> {
-    // Stub implementation: configuration loading will be implemented in a later phase.
-    tracing::debug!("config load: using default configuration (stub)");
+    // Load or create config using the real config module.
+    // This ensures onboarding-written config is actually read on subsequent boots.
+    let _config = crate::config::load_or_create_config()
+        .await
+        .map_err(|e| RuntimeError::ConfigLoadFailed(e.to_string()))?;
+    tracing::debug!("config loaded successfully");
     Ok(())
 }
 
