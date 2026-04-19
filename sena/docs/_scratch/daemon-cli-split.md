@@ -25,13 +25,13 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 
 | Order | Batch | Issue | Branch | Status | PR | Notes |
 |---|---|---|---|---|---|---|
-| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merge blocked by failing CI | #80 | Local dry-run merge into `dev` is clean. GitHub Actions is the blocker: Ubuntu and macOS fail in the build step, and Windows fails in tests. `cargo fmt --check` is still blocked by pre-existing unrelated debt. |
+| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merged to `dev` under temporary CI waiver | #80 | Merged at commit `929e58dd86f22c65e9fd652fd370cd2221501c7f`. CI follow-up issues filed: #81 (Windows speech crash), #82 (macOS CoreGraphics build), #83 (Ubuntu glib dependency). `cargo fmt --check` remains blocked by pre-existing unrelated debt. |
 
 ### Recovery Notes
 
-- Canonical open PR from this session: #80 → `feat/loop-registry` targeting `dev`.
-- Merge attempt on 2026-04-19: no git conflict with `dev`; merge is blocked by failing CI checks on PR #80.
-- Temporary policy override: CI failures are currently waived for all PRs until the dedicated CI follow-up issues are filed and later resolved.
+- Canonical PR from this session: #80 → `feat/loop-registry` targeting `dev`, merged on 2026-04-19.
+- Merge status: PR #80 had no git conflict with `dev` and was merged under the temporary CI waiver after dedicated CI follow-up issues were filed.
+- Temporary policy override: CI failures are currently waived for all PRs until issues #81, #82, and #83 are addressed and the waiver is explicitly removed from this ledger.
 - Duplicate legacy docs issue detected during recovery: #67. Reuse #68 as the canonical issue for Group 11.
 - Local-only merge/conflict plans must be written under `docs/_scratch/local/` and kept out of Git history.
 
