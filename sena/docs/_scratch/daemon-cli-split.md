@@ -141,6 +141,17 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 - [ ] Wire `IpcPayload::ShutdownRequested` to `SystemEvent::ShutdownSignal` broadcast
 - [ ] Verification: `/loops` toggles work, sidebar updates in real-time
 
+## Active Salvage Execution Checklist
+
+- [x] Recover Phase 1 IPC foundation on governed branch `feat/bus-model-metadata`
+- [x] Recover runtime-owned bootstrap foundations on governed branches `feat/runtime-download-manager-rehome` and `feat/runtime-onboarding-boot-logic`
+- [x] Recover daemon onboarding and bootstrap IPC forwarding on governed branch `feat/daemon-ipc-forwarding`
+- [x] Recover remaining supervision core on governed branch `feat/runtime-supervision`
+- [x] Recover richer Phase 4 CLI IPC client on governed branch `feat/cli-ipc-client`
+- [ ] Reconcile Phase 2 and Phase 4 checklist states against the governed branches and actual code paths
+- [ ] Recover or implement Phase 5 loop registry and real-time control on a governed branch stacked above `feat/cli-ipc-client`
+- [ ] Run full nested workspace verification, architecture/security audits, reviewer, and PR handoff to `dev`
+
 ### Final Verification
 
 - [ ] All slash commands map 1:1 to IPC commands or bus events (no orphaned CLI logic)
