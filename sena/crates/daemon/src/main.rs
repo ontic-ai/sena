@@ -293,11 +293,11 @@ fn handle_tray_actions(
 
 /// Launch CLI in a new terminal window.
 ///
-/// # Phase 2 Behavior
+/// # Phase 4 Behavior
 ///
-/// Phase 2 daemon and CLI are the same binary ("sena"). The CLI is launched by
-/// spawning "sena cli" in a new terminal window. In Phase 3+, the CLI will be
-/// a separate binary and this implementation will be updated.
+/// In Phase 4+, daemon and CLI are separate binaries. The daemon binary is `sena.exe`
+/// and the CLI binary is `sena-cli.exe`. This function launches the CLI in a new
+/// terminal window by spawning `sena-cli.exe`.
 #[cfg(target_os = "windows")]
 fn launch_cli() -> Result<(), DaemonError> {
     use std::process::Command;
@@ -310,9 +310,8 @@ fn launch_cli() -> Result<(), DaemonError> {
         DaemonError::CliLaunchFailed("no parent directory for executable".to_string())
     })?;
 
-    // Look for cli binary (temporary: cli binary is also named "sena" in Phase 2)
-    // In Phase 3, this will be updated to launch the renamed CLI binary
-    let cli_path = exe_dir.join("sena.exe");
+    // Look for CLI binary (Phase 4+: CLI is separate binary named "sena-cli")
+    let cli_path = exe_dir.join("sena-cli.exe");
 
     if !cli_path.exists() {
         return Err(DaemonError::CliLaunchFailed(format!(
@@ -328,7 +327,7 @@ fn launch_cli() -> Result<(), DaemonError> {
 
     // Launch in new console window
     Command::new("cmd")
-        .args(["/c", "start", "cmd", "/k", cli_path_str, "cli"])
+        .args(["/c", "start", "cmd", "/k", cli_path_str])
         .spawn()
         .map_err(|e| DaemonError::CliLaunchFailed(format!("failed to spawn CLI process: {}", e)))?;
 
