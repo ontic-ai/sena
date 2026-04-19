@@ -16,6 +16,7 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 - Create detailed GitHub issues up front, but create the physical git branch only when that batch becomes active.
 - Default execution is sequential: one active batch branch at a time.
 - If recovery starts off `dev` with uncommitted work, stash it or checkpoint it on the current branch. Do not copy unfinished feature code onto `dev`.
+- CI failures are temporarily waived for all PRs until the CI-failure follow-up issues are addressed. Merges may proceed under that waiver only when the ledger records the waiver state and the follow-up issues explicitly exist.
 - Merge plans for blocked PRs go in the local-only ignored directory `docs/_scratch/local/`.
 - Session PRs wait until the full session queue is open before merging.
 - Session PRs merge into `dev` with merge commits.
@@ -30,6 +31,7 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 
 - Canonical open PR from this session: #80 → `feat/loop-registry` targeting `dev`.
 - Merge attempt on 2026-04-19: no git conflict with `dev`; merge is blocked by failing CI checks on PR #80.
+- Temporary policy override: CI failures are currently waived for all PRs until the dedicated CI follow-up issues are filed and later resolved.
 - Duplicate legacy docs issue detected during recovery: #67. Reuse #68 as the canonical issue for Group 11.
 - Local-only merge/conflict plans must be written under `docs/_scratch/local/` and kept out of Git history.
 

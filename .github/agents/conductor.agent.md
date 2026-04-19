@@ -134,4 +134,5 @@ Awaiting your instruction to proceed.
 - PRs are always opened by `git-master`. Never push code directly to `dev` or open PRs manually.
 - Session PRs merge only after all planned session PRs are open, unless the developer explicitly overrides that rule.
 - If a merge conflict appears, stop and use `sena/docs/_scratch/local/` for the local merge plan before asking the developer how to proceed.
+- Never end a session because clarification, permission, or approval is needed. Use `vscode_askQuestions` and keep the session active.
 - `dev → main` promotion is a developer-only action after production verification. Never initiate it.
