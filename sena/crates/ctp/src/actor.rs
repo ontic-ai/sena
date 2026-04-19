@@ -296,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn actor_constructs() {
         let (actor, _signal_tx) = CtpActor::new();
-        assert_eq!(actor.name(), "CtpActor");
+        assert_eq!(actor.name(), "ctp");
     }
 
     #[tokio::test]
