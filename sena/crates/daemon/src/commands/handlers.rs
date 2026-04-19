@@ -6,8 +6,12 @@ use crate::commands::{
     inference_commands::{
         InferenceStatusHandler, ListModelsHandler, LoadModelHandler, RunInferenceHandler,
     },
+    loops_commands::{LoopRegistry, LoopsListHandler, LoopsSetHandler},
     memory_commands::{MemoryQueryHandler, MemoryStatsHandler},
-    runtime_commands::{PingHandler, RuntimeState, ShutdownHandler, StatusHandler},
+    runtime_commands::{
+        PingHandler, RuntimeState, ShutdownHandler, StatusHandler, SubmitOnboardingConfigHandler,
+        SubmitOnboardingNameHandler,
+    },
     speech_commands::{SpeechListenStartHandler, SpeechListenStopHandler, SpeechStatusHandler},
 };
 use ipc::CommandRegistry;
@@ -24,12 +28,16 @@ use std::sync::Arc;
 /// * `boot_result` - Boot result containing bus and actor handles (for future use)
 /// * `state` - Runtime state shared across command handlers
 /// * `shutdown_tx` - Channel sender for triggering graceful shutdown
+///
+/// # Returns
+///
+/// Returns the loop registry used by loop control handlers for tracking state.
 pub fn register_all(
     registry: &mut CommandRegistry,
     boot_result: &BootResult,
     state: RuntimeState,
     shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
-) {
+) -> LoopRegistry {
     // Runtime commands
     registry.register(Arc::new(PingHandler::new(state.clone())));
     registry.register(Arc::new(StatusHandler::new(
@@ -38,6 +46,12 @@ pub fn register_all(
     )));
     registry.register(Arc::new(ShutdownHandler::new(
         shutdown_tx,
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(SubmitOnboardingNameHandler::new(
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(SubmitOnboardingConfigHandler::new(
         boot_result.bus.clone(),
     )));
 
@@ -63,4 +77,14 @@ pub fn register_all(
     // Event commands
     registry.register(Arc::new(EventsSubscribeHandler));
     registry.register(Arc::new(EventsUnsubscribeHandler));
+
+    // Loop control commands
+    let loop_registry = LoopRegistry::new();
+    registry.register(Arc::new(LoopsListHandler::new(loop_registry.clone())));
+    registry.register(Arc::new(LoopsSetHandler::new(
+        loop_registry.clone(),
+        boot_result.bus.clone(),
+    )));
+
+    loop_registry
 }

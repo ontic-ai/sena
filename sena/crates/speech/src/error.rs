@@ -6,6 +6,9 @@ pub enum SttError {
     #[error("audio processing error: {0}")]
     AudioProcessing(String),
 
+    #[error("audio capture failed: {0}")]
+    AudioCaptureFailed(String),
+
     #[error("backend initialization failed: {0}")]
     InitializationFailed(String),
 

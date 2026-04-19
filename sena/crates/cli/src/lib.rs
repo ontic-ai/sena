@@ -1,6 +1,6 @@
 //! CLI library components.
 
-pub mod daemon_ipc;
+pub mod config_editor;
 pub mod error;
 pub mod shell;
 

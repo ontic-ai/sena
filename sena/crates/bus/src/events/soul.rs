@@ -63,6 +63,12 @@ pub struct TemporalBehaviorPattern {
 /// Soul subsystem events.
 #[derive(Debug, Clone)]
 pub enum SoulEvent {
+    /// Initialize Soul with user's chosen name (first-boot onboarding).
+    InitializeWithName {
+        /// User's chosen name.
+        name: String,
+    },
+
     /// Request to write an event to the Soul event log.
     WriteRequested {
         description: String,
@@ -165,6 +171,7 @@ pub enum SoulEvent {
 impl SoulEvent {
     pub fn causal_id(&self) -> Option<CausalId> {
         match self {
+            Self::InitializeWithName { .. } => None,
             Self::WriteRequested { causal_id, .. }
             | Self::EventLogged { causal_id, .. }
             | Self::SummaryRequested { causal_id, .. }

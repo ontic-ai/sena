@@ -40,6 +40,20 @@ pub trait MemoryBackend: Send + Sync {
     /// # Errors
     /// Returns `MemoryError` if the query fails.
     async fn query(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>, MemoryError>;
+
+    /// Perform periodic background consolidation/maintenance.
+    ///
+    /// This may include tasks like:
+    /// - Decaying importance scores over time
+    /// - Pruning low-importance nodes
+    /// - Optimizing indices
+    ///
+    /// # Returns
+    /// The number of nodes affected by consolidation operations.
+    ///
+    /// # Errors
+    /// Returns `MemoryError` if consolidation fails.
+    async fn consolidate(&mut self) -> Result<usize, MemoryError>;
 }
 
 /// Stub implementation of MemoryBackend for testing and initial integration.
@@ -81,6 +95,12 @@ impl MemoryBackend for StubBackend {
     async fn query(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>, MemoryError> {
         tracing::debug!(query_len = query.len(), limit, "stub backend: query called");
         Ok(Vec::new())
+    }
+
+    async fn consolidate(&mut self) -> Result<usize, MemoryError> {
+        tracing::debug!("stub backend: consolidate called");
+        // Stub returns 0 nodes affected
+        Ok(0)
     }
 }
 

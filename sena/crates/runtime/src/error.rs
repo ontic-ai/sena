@@ -41,6 +41,14 @@ pub enum RuntimeError {
     /// Supervision loop failed.
     #[error("supervision failed: {0}")]
     SupervisionFailed(String),
+
+    /// Model verification or download failed.
+    #[error("model verification failed: {0}")]
+    ModelVerificationFailed(String),
+
+    /// Directory resolution failed.
+    #[error("directory resolution failed: {0}")]
+    DirectoryResolutionFailed(String),
 }
 
 #[cfg(test)]

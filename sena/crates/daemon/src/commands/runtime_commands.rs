@@ -180,3 +180,130 @@ impl CommandHandler for ShutdownHandler {
         Ok(json!({ "status": "shutdown initiated" }))
     }
 }
+
+/// Handler for "runtime.submit_onboarding_name" command.
+pub struct SubmitOnboardingNameHandler {
+    bus: std::sync::Arc<bus::EventBus>,
+}
+
+impl SubmitOnboardingNameHandler {
+    pub fn new(bus: std::sync::Arc<bus::EventBus>) -> Self {
+        Self { bus }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for SubmitOnboardingNameHandler {
+    fn name(&self) -> &'static str {
+        "runtime.submit_onboarding_name"
+    }
+
+    fn description(&self) -> &'static str {
+        "Submit user name for first-time onboarding — emits SoulEvent::InitializeWithName"
+    }
+
+    fn requires_boot(&self) -> bool {
+        true
+    }
+
+    async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        let name = payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| IpcError::InvalidPayload("missing 'name' field".to_string()))?;
+
+        if name.trim().is_empty() {
+            return Err(IpcError::InvalidPayload(
+                "name cannot be empty".to_string(),
+            ));
+        }
+
+        if name.len() > 50 {
+            return Err(IpcError::InvalidPayload(
+                "name too long (max 50 characters)".to_string(),
+            ));
+        }
+
+        tracing::info!("Submitting onboarding name");
+
+        self.bus
+            .broadcast(bus::Event::Soul(bus::SoulEvent::InitializeWithName {
+                name: name.to_string(),
+            }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(format!("failed to emit name event: {}", e)))?;
+
+        Ok(json!({ "success": true }))
+    }
+}
+
+/// Handler for "runtime.submit_onboarding_config" command.
+pub struct SubmitOnboardingConfigHandler {
+    bus: std::sync::Arc<bus::EventBus>,
+}
+
+impl SubmitOnboardingConfigHandler {
+    pub fn new(bus: std::sync::Arc<bus::EventBus>) -> Self {
+        Self { bus }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for SubmitOnboardingConfigHandler {
+    fn name(&self) -> &'static str {
+        "runtime.submit_onboarding_config"
+    }
+
+    fn description(&self) -> &'static str {
+        "Submit config preferences for first-time onboarding — saves file watch paths and clipboard settings"
+    }
+
+    fn requires_boot(&self) -> bool {
+        false
+    }
+
+    async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        let file_watch_paths: Vec<String> = payload
+            .get("file_watch_paths")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let clipboard_observation_enabled = payload
+            .get("clipboard_observation_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        tracing::info!(
+            "Submitting onboarding config: {} file watch paths, clipboard: {}",
+            file_watch_paths.len(),
+            clipboard_observation_enabled
+        );
+
+        // Load existing config
+        let mut config = runtime::config::load_or_create_config()
+            .await
+            .map_err(|e| IpcError::CommandFailed(format!("failed to load config: {}", e)))?;
+
+        // Update config with onboarding preferences
+        config.file_watch_paths = file_watch_paths
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        config.clipboard_observation_enabled = clipboard_observation_enabled;
+
+        // Save config
+        runtime::save_config(&config)
+            .await
+            .map_err(|e| IpcError::CommandFailed(format!("failed to save config: {}", e)))?;
+
+        tracing::info!("Onboarding config saved successfully");
+
+        // Emit OnboardingCompleted event
+        self.bus
+            .broadcast(bus::Event::System(bus::SystemEvent::OnboardingCompleted))
+            .await
+            .ok();
+
+        Ok(json!({ "success": true }))
+    }
+}
