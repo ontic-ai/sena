@@ -6,6 +6,34 @@
 
 ---
 
+## Workflow Ledger
+
+This section is the canonical recovery ledger for the daemon/CLI split workflow. If any legacy checklist or template section below drifts, this ledger wins.
+
+### Approved Workflow Defaults (2026-04-19)
+
+- Start every session from `dev` and recover state from this file first.
+- Create detailed GitHub issues up front, but create the physical git branch only when that batch becomes active.
+- Default execution is sequential: one active batch branch at a time.
+- If recovery starts off `dev` with uncommitted work, stash it or checkpoint it on the current branch. Do not copy unfinished feature code onto `dev`.
+- Merge plans for blocked PRs go in the local-only ignored directory `docs/_scratch/local/`.
+- Session PRs wait until the full session queue is open before merging.
+- Session PRs merge into `dev` with merge commits.
+
+### Current Session Queue
+
+| Order | Batch | Issue | Branch | Status | PR | Notes |
+|---|---|---|---|---|---|---|
+| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | PR open against `dev` | #80 | Reviewer approved. `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace -- -D warnings` are clean. `cargo fmt --check` is still blocked by pre-existing unrelated debt. |
+
+### Recovery Notes
+
+- Canonical open PR from this session: #80 → `feat/loop-registry` targeting `dev`.
+- Duplicate legacy docs issue detected during recovery: #67. Reuse #68 as the canonical issue for Group 11.
+- Local-only merge/conflict plans must be written under `docs/_scratch/local/` and kept out of Git history.
+
+---
+
 ## Refactor Context
 
 ### Objective
