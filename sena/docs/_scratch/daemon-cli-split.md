@@ -127,16 +127,18 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 ### Phase 5: Loop Registry and Real-Time Control
 **Scope:** M6.2.1 (Loop Registry and Visibility) (formerly Phase 4)
 
-- [ ] Add `SystemEvent::LoopControlRequested { loop_name, enabled }` bus event
-- [ ] Add `SystemEvent::LoopStatusChanged { loop_name, enabled }` bus event
+Recovered implementation note: the governed `feat/loop-registry` branch uses dedicated IPC commands `loops.list` / `loops.set` plus daemon push event type `loop_status_changed` rather than the older `IpcPayload::*` wording below.
+
+- [x] Add `SystemEvent::LoopControlRequested { loop_name, enabled }` bus event
+- [x] Add `SystemEvent::LoopStatusChanged { loop_name, enabled }` bus event
 - [ ] Add `IpcPayload::LoopStatusUpdate { loop_name, enabled }` type
 - [ ] Add `IpcPayload::ShutdownRequested` type
-- [ ] IPC server: maintain loop registry (`loop_states: HashMap<&'static str, bool>`)
+- [x] IPC server: maintain loop registry (`loop_states: HashMap<&'static str, bool>`)
 - [ ] IPC server: send 5+ `LoopStatusUpdate` messages on client Subscribe
-- [ ] IPC server: propagate `LoopStatusChanged` bus events to all connected clients
-- [ ] CLI: `/loops`, `/loops <name>`, `/loops <name> on|off` commands → IPC dispatch
-- [ ] Actors (CTP, Memory, Platform, Speech): handle `LoopControlRequested`, broadcast `LoopStatusChanged`
-- [ ] CLI sidebar: remove logo, add Loops section with colored status indicators (● green = enabled, ● red = disabled)
+- [x] IPC server: propagate `LoopStatusChanged` bus events to all connected clients
+- [x] CLI: `/loops`, `/loops <name>`, `/loops <name> on|off` commands → IPC dispatch
+- [x] Actors (CTP, Memory, Platform, Speech, Inference): handle `LoopControlRequested`, broadcast `LoopStatusChanged`
+- [x] CLI sidebar: remove logo, add Loops section with colored status indicators (● green = enabled, ● red = disabled)
 - [ ] Real-time loop status updates in TUI via `IpcPayload::LoopStatusUpdate`
 - [ ] Wire `IpcPayload::ShutdownRequested` to `SystemEvent::ShutdownSignal` broadcast
 - [ ] Verification: `/loops` toggles work, sidebar updates in real-time
@@ -149,7 +151,7 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 - [x] Recover remaining supervision core on governed branch `feat/runtime-supervision`
 - [x] Recover richer Phase 4 CLI IPC client on governed branch `feat/cli-ipc-client`
 - [ ] Reconcile Phase 2 and Phase 4 checklist states against the governed branches and actual code paths
-- [ ] Recover or implement Phase 5 loop registry and real-time control on a governed branch stacked above `feat/cli-ipc-client`
+- [x] Recover or implement Phase 5 loop registry and real-time control on governed branch `feat/loop-registry`
 - [ ] Run full nested workspace verification, architecture/security audits, reviewer, and PR handoff to `dev`
 
 ### Final Verification
@@ -159,9 +161,9 @@ See `architecture.md §4.3` and `copilot-instructions.md §8.1` for full design 
 - [ ] Multiple CLI sessions → concurrent, no conflicts (verified by integration test)
 - [ ] Daemon crash → all CLI sessions detect disconnect and exit gracefully
 - [ ] System tray "Open CLI" → spawns new terminal with `sena cli`, connects to running daemon
-- [ ] `cargo build --workspace` clean
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [x] `cargo build --workspace` clean
+- [x] `cargo test --workspace` passes
+- [x] `cargo clippy --workspace -- -D warnings` clean
 - [ ] `cargo fmt --check` clean
 - [ ] Architecture doc §4.3 reflects new process lifetime model
 - [ ] Architecture doc §2 dependency graph updated (CLI no longer depends on actor crates directly)
