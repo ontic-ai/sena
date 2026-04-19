@@ -10,7 +10,7 @@ pub use bus::{BusError, Event, EventBus};
 pub use causal::CausalId;
 pub use events::system::ModelKind;
 pub use events::{
-    CTPEvent, ContextSnapshot, InferenceEvent, InferenceFailureOrigin, InferenceSource,
-    MemoryEvent, ModelEvent, PlatformEvent, Priority, SoulEvent, SoulSummary, SpeechEvent,
-    SystemEvent, TelemetryEvent, TranscribedWord,
+    CTPEvent, ContextSnapshot, DownloadEvent, InferenceEvent, InferenceFailureOrigin,
+    InferenceSource, MemoryEvent, ModelEvent, PlatformEvent, Priority, SoulEvent, SoulSummary,
+    SpeechEvent, SystemEvent, TelemetryEvent, TranscribedWord,
 };
