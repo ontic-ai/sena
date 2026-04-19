@@ -24,11 +24,12 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 
 | Order | Batch | Issue | Branch | Status | PR | Notes |
 |---|---|---|---|---|---|---|
-| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | PR open against `dev` | #80 | Reviewer approved. `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace -- -D warnings` are clean. `cargo fmt --check` is still blocked by pre-existing unrelated debt. |
+| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merge blocked by failing CI | #80 | Local dry-run merge into `dev` is clean. GitHub Actions is the blocker: Ubuntu and macOS fail in the build step, and Windows fails in tests. `cargo fmt --check` is still blocked by pre-existing unrelated debt. |
 
 ### Recovery Notes
 
 - Canonical open PR from this session: #80 → `feat/loop-registry` targeting `dev`.
+- Merge attempt on 2026-04-19: no git conflict with `dev`; merge is blocked by failing CI checks on PR #80.
 - Duplicate legacy docs issue detected during recovery: #67. Reuse #68 as the canonical issue for Group 11.
 - Local-only merge/conflict plans must be written under `docs/_scratch/local/` and kept out of Git history.
 
