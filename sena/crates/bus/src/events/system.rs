@@ -89,6 +89,32 @@ pub enum SystemEvent {
         /// Download progress percentage (0-100).
         percent: u8,
     },
+    /// Download started for a model.
+    DownloadStarted {
+        /// Type of model being downloaded.
+        model: ModelKind,
+    },
+    /// Download completed successfully for a model.
+    DownloadCompleted {
+        /// Type of model that was downloaded.
+        model: ModelKind,
+    },
+    /// Download failed for a model.
+    DownloadFailed {
+        /// Type of model that failed to download.
+        model: ModelKind,
+        /// Failure reason.
+        reason: String,
+    },
+    /// First-time onboarding is required (detected at boot).
+    OnboardingRequired,
+    /// First-time onboarding completed successfully.
+    OnboardingCompleted,
+    /// Boot sequence failed — daemon cannot start.
+    BootFailed {
+        /// Failure reason.
+        reason: String,
+    },
     /// System wake event — emitted when OS wakes from sleep.
     SystemWake,
     /// System sleep event — emitted when OS is about to sleep.
@@ -183,6 +209,39 @@ mod tests {
             percent: 75,
         };
         assert!(matches!(event, SystemEvent::DownloadProgress { .. }));
+    }
+
+    #[test]
+    fn download_lifecycle_events_construct() {
+        let started = SystemEvent::DownloadStarted {
+            model: ModelKind::Llm,
+        };
+        let completed = SystemEvent::DownloadCompleted {
+            model: ModelKind::Tts,
+        };
+        let failed = SystemEvent::DownloadFailed {
+            model: ModelKind::Wakeword,
+            reason: "network error".to_string(),
+        };
+        assert!(matches!(started, SystemEvent::DownloadStarted { .. }));
+        assert!(matches!(completed, SystemEvent::DownloadCompleted { .. }));
+        assert!(matches!(failed, SystemEvent::DownloadFailed { .. }));
+    }
+
+    #[test]
+    fn onboarding_events_construct() {
+        let required = SystemEvent::OnboardingRequired;
+        let completed = SystemEvent::OnboardingCompleted;
+        assert!(matches!(required, SystemEvent::OnboardingRequired));
+        assert!(matches!(completed, SystemEvent::OnboardingCompleted));
+    }
+
+    #[test]
+    fn boot_failed_event_constructs() {
+        let event = SystemEvent::BootFailed {
+            reason: "speech models unavailable".to_string(),
+        };
+        assert!(matches!(event, SystemEvent::BootFailed { .. }));
     }
 
     #[test]
