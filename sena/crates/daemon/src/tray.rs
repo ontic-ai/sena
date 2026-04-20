@@ -17,8 +17,8 @@
 
 use std::sync::mpsc;
 use tray_icon::{
-    Icon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, TrayIconBuilder,
 };
 
 /// Tray menu item IDs.
