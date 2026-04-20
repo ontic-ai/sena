@@ -46,23 +46,14 @@ mod tests {
 
     #[tokio::test]
     async fn boot_completes_successfully() {
-        // Note: Boot now requires speech models to be present or downloadable.
-        // In test environment without models, boot is expected to fail.
+        // Boot sequence should complete successfully even without speech models.
+        // Speech model verification is permissive: missing models trigger warnings
+        // but do not block boot. Speech actors fall back to stub backends.
         let result = boot::boot().await;
+        assert!(result.is_ok());
 
-        // Boot is expected to fail in tests without models
-        assert!(result.is_err());
-
-        // Verify the error is related to model verification
-        match result {
-            Err(RuntimeError::ModelVerificationFailed(_)) => {
-                // Expected error in test environment
-            }
-            Err(RuntimeError::DirectoryResolutionFailed(_)) => {
-                // Also acceptable in test environment
-            }
-            Ok(_) => panic!("Boot should fail without models in test environment"),
-            Err(e) => panic!("Unexpected error type: {}", e),
-        }
+        let boot_result = result.unwrap();
+        assert!(!boot_result.actor_handles.is_empty());
+        assert!(!boot_result.expected_actors.is_empty());
     }
 }

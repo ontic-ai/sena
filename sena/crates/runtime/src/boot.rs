@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Threshold for boot step timing warnings (500ms).
 const BOOT_STEP_WARN_THRESHOLD_MS: u128 = 500;
@@ -212,12 +212,14 @@ async fn detect_onboarding_state() -> Result<bool, RuntimeError> {
 
 /// Verify and repair required speech models.
 ///
-/// Checks each required speech model (Whisper STT, Piper TTS, OpenWakeWord).
-/// If a model is missing or has an invalid checksum, downloads it via DownloadManager.
-/// Emits download lifecycle events on the bus.
+/// Checks each available speech model and attempts to download missing ones.
+/// Unlike strict boot requirements, speech model verification is permissive:
+/// - Missing models are logged as warnings, not fatal errors
+/// - Download failures are logged but do not block boot
+/// - Runtime builder will fall back to stub backends if models are unavailable
 ///
-/// If any required model cannot be verified or downloaded, boot fails cleanly
-/// with a BootFailed event before actor spawning.
+/// This approach ensures Sena can boot and run in degraded mode even without
+/// complete speech model assets.
 async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), RuntimeError> {
     let models_dir = resolve_models_dir()?;
 
@@ -228,47 +230,25 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
 
     info!("Speech models directory: {}", models_dir.display());
 
-    // Get required models
-    let required_models = vec![
-        ModelManifest::whisper_base_en(),
-        ModelManifest::piper_voice(),
-        ModelManifest::open_wakeword(),
-    ];
+    // Get all available speech models
+    let all_models = ModelManifest::all_models();
 
-    let mut verification_failed = false;
-    let mut failed_models = Vec::new();
-
-    for model in required_models {
+    for model in all_models {
         match verify_model(&models_dir, &model, bus.clone()).await {
             Ok(()) => {
                 info!("Model verified: {}", model.name);
             }
             Err(e) => {
-                error!("Model verification/repair failed for {}: {}", model.name, e);
-                verification_failed = true;
-                failed_models.push(model.name.clone());
+                warn!(
+                    "Model verification/repair failed for {}: {}. Speech backend may use stub.",
+                    model.name, e
+                );
+                // Continue anyway — builder will fall back to stubs
             }
         }
     }
 
-    if verification_failed {
-        let reason = format!(
-            "Required speech models could not be verified or downloaded: {}",
-            failed_models.join(", ")
-        );
-        error!("{}", reason);
-
-        // Emit BootFailed event
-        let _ = bus
-            .broadcast(Event::System(SystemEvent::BootFailed {
-                reason: reason.clone(),
-            }))
-            .await;
-
-        return Err(RuntimeError::ModelVerificationFailed(reason));
-    }
-
-    info!("All required speech models verified and ready");
+    info!("Speech model verification complete — available models verified");
     Ok(())
 }
 
@@ -428,6 +408,9 @@ async fn spawn_actors(
     let mut handles = Vec::new();
     let mut expected = Vec::new();
 
+    // Resolve models directory for speech actor construction
+    let models_dir = resolve_models_dir()?;
+
     // Step 4: Soul actor spawn
     let soul_actor = builder::build_soul_actor()?;
     let soul_name: &'static str = "soul";
@@ -477,14 +460,14 @@ async fn spawn_actors(
     let speech_enabled = true;
     if speech_enabled {
         // Step 10: STT actor spawn
-        let stt_actor = builder::build_stt_actor()?;
+        let stt_actor = builder::build_stt_actor(&models_dir)?;
         let stt_name: &'static str = "stt";
         expected.push(stt_name);
         let stt_handle = spawn_stt_actor(stt_actor, bus.clone());
         handles.push((stt_name, stt_handle));
 
         // Step 11: TTS actor spawn
-        let tts_actor = builder::build_tts_actor()?;
+        let tts_actor = builder::build_tts_actor(&models_dir)?;
         let tts_name: &'static str = "tts";
         expected.push(tts_name);
         let tts_handle = spawn_tts_actor(tts_actor, bus.clone());
@@ -843,26 +826,15 @@ mod tests {
 
     #[tokio::test]
     async fn boot_sequence_completes() {
-        // Note: This test will fail in the current implementation because
-        // boot() now requires speech models to be present or downloadable.
-        // In production, boot() should fail if models cannot be verified.
-        // For testing, we accept that boot() will fail without real models.
+        // Boot sequence should complete successfully even without speech models.
+        // Speech model verification is permissive: missing models trigger warnings
+        // but do not block boot. Actors fall back to stub backends.
         let result = boot().await;
+        assert!(result.is_ok());
 
-        // Boot is expected to fail in tests without models
-        assert!(result.is_err());
-
-        // Verify the error is related to model verification
-        match result {
-            Err(RuntimeError::ModelVerificationFailed(_)) => {
-                // Expected error in test environment
-            }
-            Err(RuntimeError::DirectoryResolutionFailed(_)) => {
-                // Also acceptable in test environment
-            }
-            Ok(_) => panic!("Boot should fail without models in test environment"),
-            Err(e) => panic!("Unexpected error type: {}", e),
-        }
+        let boot_result = result.unwrap();
+        assert!(!boot_result.actor_handles.is_empty());
+        assert!(!boot_result.expected_actors.is_empty());
     }
 
     #[tokio::test]
