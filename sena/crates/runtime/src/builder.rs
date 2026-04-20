@@ -4,6 +4,8 @@ use crate::error::RuntimeError;
 use inference::InferenceError;
 use platform::PlatformError;
 use soul::SoulError;
+use speech::{ModelCache, ModelManifest};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Stub platform backend implementation.
@@ -208,17 +210,93 @@ pub fn build_ctp_actor() -> Result<
     Ok((actor, signal_tx))
 }
 
-/// Build the STT actor with a stub backend.
-pub fn build_stt_actor() -> Result<speech::SttActor, RuntimeError> {
-    tracing::debug!("building STT actor with stub backend");
+/// Build the STT actor with real or stub backend.
+///
+/// Attempts to construct a Parakeet backend if all required assets are present.
+/// Falls back to stub backend if assets are missing or initialization fails.
+///
+/// # Arguments
+/// * `models_dir` - Path to the speech models directory
+///
+/// Returns an SttActor with the best available backend.
+pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeError> {
+    // Check if Parakeet assets are available
+    let encoder_path = ModelCache::cached_path(models_dir, &ModelManifest::parakeet_encoder());
+    let decoder_path = ModelCache::cached_path(models_dir, &ModelManifest::parakeet_decoder());
+    let tokenizer_path = ModelCache::cached_path(models_dir, &ModelManifest::parakeet_tokenizer());
+
+    if encoder_path.exists() && decoder_path.exists() && tokenizer_path.exists() {
+        tracing::info!("Parakeet STT assets found — attempting to construct ParakeetSttBackend");
+
+        match speech::ParakeetSttBackend::new(encoder_path, decoder_path, tokenizer_path) {
+            Ok(backend) => {
+                tracing::info!("STT actor: using ParakeetSttBackend");
+                let actor = speech::SttActor::new(Box::new(backend));
+                return Ok(actor);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ParakeetSttBackend initialization failed — falling back to stub"
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            "Parakeet assets not available (encoder: {}, decoder: {}, tokenizer: {}) — using stub backend",
+            encoder_path.exists(),
+            decoder_path.exists(),
+            tokenizer_path.exists()
+        );
+    }
+
+    // Fall back to stub backend
+    tracing::info!("STT actor: using StubSttBackend");
     let backend = Box::new(speech::StubSttBackend::new(1600));
     let actor = speech::SttActor::new(backend);
     Ok(actor)
 }
 
-/// Build the TTS actor with a stub backend.
-pub fn build_tts_actor() -> Result<speech::TtsActor, RuntimeError> {
-    tracing::debug!("building TTS actor with stub backend");
+/// Build the TTS actor with real or stub backend.
+///
+/// Attempts to construct a Piper backend if all required assets are present.
+/// Falls back to stub backend if assets are missing or initialization fails.
+///
+/// # Arguments
+/// * `models_dir` - Path to the speech models directory
+///
+/// Returns a TtsActor with the best available backend.
+pub fn build_tts_actor(models_dir: &Path) -> Result<speech::TtsActor, RuntimeError> {
+    // Check if Piper assets are available
+    let model_path = ModelCache::cached_path(models_dir, &ModelManifest::piper_voice());
+    let config_path = ModelCache::cached_path(models_dir, &ModelManifest::piper_config());
+
+    if model_path.exists() && config_path.exists() {
+        tracing::info!("Piper TTS assets found — attempting to construct PiperTtsBackend");
+
+        match speech::PiperTtsBackend::new(model_path, config_path) {
+            Ok(backend) => {
+                tracing::info!("TTS actor: using PiperTtsBackend");
+                let actor = speech::TtsActor::new(Box::new(backend));
+                return Ok(actor);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "PiperTtsBackend initialization failed — falling back to stub"
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            "Piper assets not available (model: {}, config: {}) — using stub backend",
+            model_path.exists(),
+            config_path.exists()
+        );
+    }
+
+    // Fall back to stub backend
+    tracing::info!("TTS actor: using StubTtsBackend");
     let backend = Box::new(speech::StubTtsBackend::new(16000));
     let actor = speech::TtsActor::new(backend);
     Ok(actor)
@@ -235,6 +313,7 @@ pub fn build_prompt_actor() -> Result<prompt::PromptActor, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn platform_actor_builds() {
@@ -267,14 +346,16 @@ mod tests {
     }
 
     #[test]
-    fn stt_actor_builds() {
-        let result = build_stt_actor();
+    fn stt_actor_builds_with_stub_backend_when_assets_missing() {
+        let models_dir = tempdir().expect("failed to create tempdir");
+        let result = build_stt_actor(models_dir.path());
         assert!(result.is_ok());
     }
 
     #[test]
-    fn tts_actor_builds() {
-        let result = build_tts_actor();
+    fn tts_actor_builds_with_stub_backend_when_assets_missing() {
+        let models_dir = tempdir().expect("failed to create tempdir");
+        let result = build_tts_actor(models_dir.path());
         assert!(result.is_ok());
     }
 

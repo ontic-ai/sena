@@ -11,8 +11,16 @@ use std::path::{Path, PathBuf};
 pub enum ModelType {
     /// Whisper GGUF model for STT.
     WhisperStt,
-    /// Piper voice model for TTS.
+    /// Parakeet encoder ONNX model for STT.
+    ParakeetEncoder,
+    /// Parakeet decoder ONNX model for STT.
+    ParakeetDecoder,
+    /// Parakeet tokenizer model for STT.
+    ParakeetTokenizer,
+    /// Piper voice ONNX model for TTS.
     PiperTts,
+    /// Piper config JSON for TTS.
+    PiperConfig,
     /// OpenWakeWord model for wakeword detection.
     OpenWakeWord,
 }
@@ -54,7 +62,7 @@ impl ModelManifest {
         }
     }
 
-    /// Returns the Piper voice model for TTS (~60MB).
+    /// Returns the Piper voice model for TTS.
     pub fn piper_voice() -> ModelInfo {
         ModelInfo {
             name: "piper-en-us-lessac-medium".to_string(),
@@ -63,6 +71,57 @@ impl ModelManifest {
             sha256: "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f".to_string(),
             size_bytes: 63_200_000, // ~63.2MB
             model_type: ModelType::PiperTts,
+        }
+    }
+
+    /// Returns the Piper config JSON for TTS.
+    pub fn piper_config() -> ModelInfo {
+        ModelInfo {
+            name: "piper-en-us-lessac-medium-config".to_string(),
+            filename: "en_US-lessac-medium.onnx.json".to_string(),
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json".to_string(),
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            size_bytes: 5_000, // ~5KB
+            model_type: ModelType::PiperConfig,
+        }
+    }
+
+    /// Returns the Parakeet encoder ONNX model for STT.
+    pub fn parakeet_encoder() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-encoder".to_string(),
+            filename: "encoder.onnx".to_string(),
+            url: "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/encoder.onnx"
+                .to_string(),
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            size_bytes: 450_000_000, // ~450MB
+            model_type: ModelType::ParakeetEncoder,
+        }
+    }
+
+    /// Returns the Parakeet decoder ONNX model for STT.
+    pub fn parakeet_decoder() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-decoder".to_string(),
+            filename: "decoder_joint.onnx".to_string(),
+            url: "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/decoder_joint.onnx".to_string(),
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            size_bytes: 50_000_000, // ~50MB
+            model_type: ModelType::ParakeetDecoder,
+        }
+    }
+
+    /// Returns the Parakeet tokenizer model for STT.
+    pub fn parakeet_tokenizer() -> ModelInfo {
+        ModelInfo {
+            name: "parakeet-nemotron-tokenizer".to_string(),
+            filename: "tokenizer.model".to_string(),
+            url:
+                "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/tokenizer.model"
+                    .to_string(),
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            size_bytes: 2_500_000, // ~2.5MB
+            model_type: ModelType::ParakeetTokenizer,
         }
     }
 
@@ -83,7 +142,11 @@ impl ModelManifest {
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
             Self::whisper_base_en(),
+            Self::parakeet_encoder(),
+            Self::parakeet_decoder(),
+            Self::parakeet_tokenizer(),
             Self::piper_voice(),
+            Self::piper_config(),
             Self::open_wakeword(),
         ]
     }
@@ -129,17 +192,37 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 7);
 
+        // Whisper
         let whisper = &models[0];
         assert_eq!(whisper.model_type, ModelType::WhisperStt);
         assert_eq!(whisper.filename, "ggml-base.en.bin");
 
-        let piper = &models[1];
+        // Parakeet (encoder, decoder, tokenizer)
+        let parakeet_encoder = &models[1];
+        assert_eq!(parakeet_encoder.model_type, ModelType::ParakeetEncoder);
+        assert_eq!(parakeet_encoder.filename, "encoder.onnx");
+
+        let parakeet_decoder = &models[2];
+        assert_eq!(parakeet_decoder.model_type, ModelType::ParakeetDecoder);
+        assert_eq!(parakeet_decoder.filename, "decoder_joint.onnx");
+
+        let parakeet_tokenizer = &models[3];
+        assert_eq!(parakeet_tokenizer.model_type, ModelType::ParakeetTokenizer);
+        assert_eq!(parakeet_tokenizer.filename, "tokenizer.model");
+
+        // Piper (onnx + config)
+        let piper = &models[4];
         assert_eq!(piper.model_type, ModelType::PiperTts);
         assert!(piper.filename.ends_with(".onnx"));
 
-        let wakeword = &models[2];
+        let piper_config = &models[5];
+        assert_eq!(piper_config.model_type, ModelType::PiperConfig);
+        assert!(piper_config.filename.ends_with(".onnx.json"));
+
+        // OpenWakeWord
+        let wakeword = &models[6];
         assert_eq!(wakeword.model_type, ModelType::OpenWakeWord);
         assert!(wakeword.filename.ends_with(".tflite"));
     }

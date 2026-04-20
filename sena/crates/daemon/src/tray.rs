@@ -17,8 +17,8 @@
 
 use std::sync::mpsc;
 use tray_icon::{
-    Icon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, TrayIconBuilder,
 };
 
 /// Tray menu item IDs.
@@ -63,11 +63,20 @@ pub fn run_tray_loop(
     use std::time::Duration;
 
     // Load icon — fallback to magenta if assets/logo.ico is missing
-    let icon = load_icon().unwrap_or_else(|_e| {
-        // Note: ICO loading failure is expected in Phase 2 (no .ico file in assets/).
-        // Using magenta fallback. This will be replaced when a proper .ico is added.
-        create_magenta_icon()
-    });
+    let icon = match load_icon() {
+        Ok(icon) => icon,
+        Err(_) => {
+            // Note: ICO loading failure is expected in Phase 2 (no .ico file in assets/).
+            // Using magenta fallback. This will be replaced when a proper .ico is added.
+            match create_magenta_icon() {
+                Ok(icon) => icon,
+                Err(e) => {
+                    // Fallback icon creation failed — cannot proceed without an icon.
+                    return TrayLoopResult::Error(format!("Failed to create fallback icon: {}", e));
+                }
+            }
+        }
+    };
 
     // Build menu
     let menu = Menu::new();
@@ -140,17 +149,82 @@ pub fn run_tray_loop(
         // Windows message pump handling
         // Note: The tray-icon crate does NOT handle the Windows message pump internally.
         // We must explicitly pump messages in this loop to process tray events.
-        // The 50ms sleep provides a reasonable balance between responsiveness and CPU usage.
+        #[cfg(target_os = "windows")]
+        {
+            pump_windows_messages();
+        }
+
+        // Sleep to avoid busy-waiting. 50ms provides reasonable responsiveness.
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "windows")]
+fn pump_windows_messages() {
+    // Pump Windows message queue to process tray menu clicks.
+    // This is required for tray-icon to deliver menu events via MenuEvent::receiver().
+    // Without this, right-click menu interactions on Windows are never delivered.
+    unsafe {
+        // Use raw FFI to pump Windows messages without blocking.
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        struct Msg {
+            hwnd: *mut std::ffi::c_void,
+            message: u32,
+            wParam: usize,
+            lParam: isize,
+            time: u32,
+            pt: Point,
+        }
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn PeekMessageW(
+                lpMsg: *mut Msg,
+                hWnd: *mut std::ffi::c_void,
+                wMsgFilterMin: u32,
+                wMsgFilterMax: u32,
+                wRemoveMsg: u32,
+            ) -> i32;
+            fn TranslateMessage(lpMsg: *const Msg) -> i32;
+            fn DispatchMessageW(lpMsg: *const Msg) -> isize;
+        }
+
+        const PM_REMOVE: u32 = 0x0001;
+
+        let mut msg: Msg = std::mem::zeroed();
+        // PeekMessage returns non-zero if a message is available.
+        // Process all available messages without blocking.
+        loop {
+            let has_message = PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE);
+            if has_message == 0 {
+                break; // No more messages
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn run_tray_loop(
     _tooltip_rx: mpsc::Receiver<TooltipUpdate>,
     _action_tx: std::sync::mpsc::Sender<TrayAction>,
 ) -> TrayLoopResult {
-    TrayLoopResult::Error("Tray not supported on this platform (Windows only)".to_string())
+    TrayLoopResult::Error("Tray not supported on macOS (Windows only)".to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_tray_loop(
+    _tooltip_rx: mpsc::Receiver<TooltipUpdate>,
+    _action_tx: std::sync::mpsc::Sender<TrayAction>,
+) -> TrayLoopResult {
+    TrayLoopResult::Error("Tray not supported on Linux (Windows only)".to_string())
 }
 
 /// Load icon from assets/logo.ico.
@@ -175,9 +249,14 @@ fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     Ok(icon)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    Err("Icon loading not supported on this platform".into())
+    Err("Icon loading not supported on macOS".into())
+}
+
+#[cfg(target_os = "linux")]
+fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
+    Err("Icon loading not supported on Linux".into())
 }
 
 /// Decode ICO file to RGBA bytes.
@@ -191,7 +270,7 @@ fn decode_ico(_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 
 /// Create a magenta fallback icon (32x32 solid magenta).
-fn create_magenta_icon() -> Icon {
+fn create_magenta_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     let mut rgba = Vec::with_capacity(32 * 32 * 4);
     for _ in 0..(32 * 32) {
         rgba.push(255); // R
@@ -200,5 +279,5 @@ fn create_magenta_icon() -> Icon {
         rgba.push(255); // A
     }
 
-    Icon::from_rgba(rgba, 32, 32).expect("magenta icon creation failed")
+    Ok(Icon::from_rgba(rgba, 32, 32)?)
 }
