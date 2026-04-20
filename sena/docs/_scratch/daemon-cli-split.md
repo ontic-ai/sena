@@ -25,8 +25,8 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 
 | Order | Batch | Issue | Branch | Status | PR | Notes |
 |---|---|---|---|---|---|---|
-| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merged to `dev` under temporary CI waiver | #80 | Merged at commit `929e58dd86f22c65e9fd652fd370cd2221501c7f`. CI follow-up issues filed: #81 (Windows speech crash), #82 (macOS CoreGraphics build), #83 (Ubuntu glib dependency). `cargo fmt --check` remains blocked by pre-existing unrelated debt. |
-| 2 | Nested Speech Backend Recovery (Parakeet/Piper) | #59 | `feat/speech-backend-recovery` | `pr-open` | #84 | Recovered from `origin/feat/speech-backend-streaming`. Includes Parakeet STT and Piper TTS integration into nested actors, plus Windows tray message loop fix. PR URL: https://github.com/ontic-ai/sena/pull/84 |
+| 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merged | #80 | Merged at commit `929e58dd86f22c65e9fd652fd370cd2221501c7f`. CI follow-up issues filed: #81, #82, #83. |
+| 2 | Nested Speech Backend Recovery (Parakeet/Piper) | #59 | `feat/speech-backend-recovery` | Merged | #84 | Merged at commit `28747196c10518bd2827bbbde321775d9271d071`. Includes Parakeet STT and Piper TTS integration into nested actors. |
 | 3 | Documentation and Refactor Cleanup | #67 | `feat/docs-refactor-cleanup` | `planned` | | Documentation alignment for the daemon/CLI split and general refactor debt cleanup. |
 
 ### Recovery Notes
