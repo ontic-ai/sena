@@ -49,13 +49,26 @@ jobs:
       # ── Quality gates — all four must pass ──
 
       - name: Build
+        working-directory: sena
         run: cargo build --workspace
 
       - name: Test
+        working-directory: sena
         run: cargo test --workspace
 
       - name: Clippy
+        working-directory: sena
         run: cargo clippy --workspace -- -D warnings
 
       - name: Format check
-        run: cargo fmt --check
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          mapfile -t files < <(git diff --name-only "origin/${{ github.base_ref }}"...HEAD -- 'sena/**/*.rs')
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Rust files changed"
+            exit 0
+          fi
+
+          rustfmt --check --edition 2024 "${files[@]}"

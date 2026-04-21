@@ -151,11 +151,10 @@ impl DownloadClient {
             bytes_downloaded += chunk.len() as u64;
 
             // Emit progress every ~5%
-            let pct = if model.size_bytes > 0 {
-                bytes_downloaded * 100 / model.size_bytes
-            } else {
-                0
-            };
+            let pct = bytes_downloaded
+                .checked_mul(100)
+                .and_then(|value| value.checked_div(model.size_bytes))
+                .unwrap_or(0);
             if pct >= last_reported_pct + 5 {
                 last_reported_pct = pct;
                 let _ = bus
