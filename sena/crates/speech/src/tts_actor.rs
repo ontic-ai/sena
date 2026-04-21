@@ -1,5 +1,6 @@
 //! TTS actor — text-to-speech synthesis and playback.
 
+use crate::audio_output::{AudioBuffer, AudioOutputStream, AudioOutputConfig};
 use crate::backend::TtsBackend;
 use crate::error::SpeechActorError;
 use crate::types::{AudioStream, PendingSentence};
@@ -39,6 +40,8 @@ pub struct TtsActor {
     shutdown_requested: bool,
     /// Next expected sentence index for playback.
     pub(crate) next_playback_index: u32,
+    /// Audio output stream for speaker playback (lazily initialized).
+    audio_output: Option<AudioOutputStream>,
 }
 
 impl TtsActor {
@@ -54,6 +57,7 @@ impl TtsActor {
             is_speaking: false,
             shutdown_requested: false,
             next_playback_index: 0,
+            audio_output: None,
         }
     }
 
@@ -61,6 +65,64 @@ impl TtsActor {
     pub fn with_max_queue_depth(mut self, depth: usize) -> Self {
         self.max_queue_depth = depth;
         self
+    }
+
+    /// Ensure audio output stream is initialized.
+    fn ensure_audio_output(&mut self) -> Result<(), SpeechActorError> {
+        if self.audio_output.is_none() {
+            let config = AudioOutputConfig::default();
+            let stream = AudioOutputStream::start(config)
+                .map_err(|e| SpeechActorError::Backend(format!("audio output init: {}", e)))?;
+            self.audio_output = Some(stream);
+            debug!("Audio output stream initialized");
+        }
+        Ok(())
+    }
+
+    /// Convert AudioStream to AudioBuffer for playback.
+    fn to_audio_buffer(stream: &AudioStream) -> AudioBuffer {
+        AudioBuffer {
+            samples: stream.samples.clone(),
+            channels: 1, // TTS backends produce mono
+            sample_rate: stream.sample_rate,
+        }
+    }
+
+    /// Play audio buffer using spawn_blocking to avoid blocking async runtime.
+    async fn play_audio_blocking(
+        &mut self,
+        audio: AudioStream,
+        causal_id: CausalId,
+    ) -> Result<(), SpeechActorError> {
+        self.ensure_audio_output()?;
+
+        let audio_output = self.audio_output.as_ref().ok_or_else(|| {
+            SpeechActorError::Backend("audio output not initialized".to_string())
+        })?;
+
+        let buffer = Self::to_audio_buffer(&audio);
+        let duration_ms = audio.duration_ms();
+
+        // Queue the buffer for playback
+        audio_output
+            .play(buffer)
+            .map_err(|e| SpeechActorError::Backend(format!("playback failed: {}", e)))?;
+
+        // Wait for playback to complete using spawn_blocking to avoid blocking async runtime
+        let wait_duration = std::time::Duration::from_millis(duration_ms + 100);
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(wait_duration);
+        })
+        .await
+        .map_err(|e| SpeechActorError::Backend(format!("playback wait failed: {}", e)))?;
+
+        debug!(
+            duration_ms = %duration_ms,
+            causal_id = ?causal_id,
+            "Audio playback completed"
+        );
+
+        Ok(())
     }
 
     /// Handle bus events.
@@ -121,22 +183,32 @@ impl TtsActor {
             }
         }
 
-        // Stub: synthesize immediately
+        // Synthesize audio
         let audio = match self.backend.synthesize(&text) {
-            Ok(audio_stream) => Some(audio_stream),
+            Ok(audio) => {
+                debug!(
+                    sentence_index = %sentence_index,
+                    samples = audio.samples.len(),
+                    "Sentence synthesized"
+                );
+                Some(audio)
+            }
             Err(e) => {
-                error!(error = %e, "Synthesis failed for sentence {}", sentence_index);
+                error!(
+                    error = %e,
+                    sentence_index = %sentence_index,
+                    "Sentence synthesis failed"
+                );
                 None
             }
         };
 
-        // Insert sentence into queue (ready for stub, not ready for real impl)
-        let ready = audio.is_some(); // check before move
+        // Insert sentence into queue
         let pending = PendingSentence {
             text: text.clone(),
             sentence_index,
             audio,
-            ready,
+                ready: true, // Synthesis is synchronous, so queue entry is ready.
         };
         self.queue.insert(sentence_index, pending);
 
@@ -170,7 +242,7 @@ impl TtsActor {
 
         self.is_speaking = true;
 
-        // Synthesize speech (stub)
+        // Synthesize speech
         match self.backend.synthesize(&text) {
             Ok(audio) => {
                 debug!(
@@ -180,13 +252,26 @@ impl TtsActor {
                     "Speech synthesized"
                 );
 
-                // Stub: immediately emit completion without actual playback
-                bus.broadcast(Event::Speech(SpeechEvent::SpeakingCompleted { causal_id }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                // Play audio with real playback
+                match self.play_audio_blocking(audio, causal_id).await {
+                    Ok(()) => {
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeakingCompleted { causal_id }))
+                            .await
+                            .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                        info!(causal_id = ?causal_id, "Speech output completed");
+                    }
+                    Err(e) => {
+                        error!(error = %e, causal_id = ?causal_id, "Audio playback failed");
+                        bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                            reason: format!("playback failed: {}", e),
+                            causal_id,
+                        }))
+                        .await
+                        .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                    }
+                }
 
                 self.is_speaking = false;
-                info!(causal_id = ?causal_id, "Speech output completed");
             }
             Err(e) => {
                 error!(error = %e, causal_id = ?causal_id, "Speech synthesis failed");
@@ -217,7 +302,7 @@ impl TtsActor {
 
         // Collect indices in a loop, checking each expected index in sequence
         while let Some(sentence) = self.queue.get(&self.next_playback_index) {
-            if sentence.ready {
+            if sentence.ready && sentence.audio.is_some() {
                 indices_to_play.push(self.next_playback_index);
                 self.next_playback_index += 1;
             } else {
@@ -228,7 +313,7 @@ impl TtsActor {
 
         // Play each ready sentence in order
         for index in indices_to_play {
-            if let Some(_sentence) = self.queue.remove(&index) {
+            if let Some(sentence) = self.queue.remove(&index) {
                 debug!(sentence_index = %index, "Playing sentence");
 
                 if !self.is_speaking {
@@ -238,10 +323,33 @@ impl TtsActor {
                     self.is_speaking = true;
                 }
 
-                // Stub: actual playback would happen here
-                // In a real implementation: send audio to cpal output stream
-
-                debug!(sentence_index = %index, "Sentence playback complete");
+                // Real playback: play the synthesized audio
+                if let Some(audio) = sentence.audio {
+                    match self.play_audio_blocking(audio, causal_id).await {
+                        Ok(()) => {
+                            debug!(sentence_index = %index, "Sentence playback complete");
+                        }
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                sentence_index = %index,
+                                "Sentence playback failed"
+                            );
+                            // Emit failure event but continue with next sentences
+                            bus.broadcast(Event::Speech(SpeechEvent::SpeechFailed {
+                                reason: format!("sentence {} playback failed: {}", index, e),
+                                causal_id,
+                            }))
+                            .await
+                            .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                        }
+                    }
+                } else {
+                    warn!(
+                        sentence_index = %index,
+                        "Skipping sentence with no audio"
+                    );
+                }
             }
         }
 
@@ -345,6 +453,12 @@ impl Actor for TtsActor {
         // Cancel all pending tasks
         if let Err(e) = self.interrupt_all().await {
             warn!(error = %e, "Failed to interrupt TTS tasks during shutdown");
+        }
+
+        // Drop audio output stream to cleanly shut down playback thread
+        if self.audio_output.is_some() {
+            debug!("Stopping audio output stream");
+            self.audio_output = None;
         }
 
         info!("TTS actor stopped");
