@@ -306,29 +306,29 @@ The CLI is a **thin wrapper** over the daemon's capabilities. It does not own bu
 **What the CLI IS:**
 - A TUI surface for the user to manually trigger daemon operations
 - A window into the bus event stream (observation, status, transparency)
-- A command dispatcher: sends typed bus events to request work (inference, STT, model swap, config)
+- A command dispatcher: sends IPC commands to the daemon to request work (inference, STT, model swap, config)
 
 **What the CLI is NOT:**
 - An owner of actors — CLI never constructs Soul, Memory, Inference, Platform, CTP, or Speech actors
-- A re-implementor of business logic — if the daemon already does it, the CLI requests it via bus
-- An independent inference pipeline — CLI requests inference by broadcasting events, waits for response events
+- A re-implementor of business logic — if the daemon already does it, the CLI requests it via IPC
+- An independent inference pipeline — CLI requests inference via IPC, waits for response events
 
 **Hard rules:**
-- Every CLI command maps to exactly one bus event or IPC command dispatched to the daemon. No CLI logic that duplicates what an actor already does.
-- When the daemon is running, CLI connects to it (Phase 6 IPC). It does NOT boot a second runtime.
-- In CLI-only mode (no daemon), CLI boots the full runtime as the owner — this path is transitional. Target state is always IPC-attached.
+- Every CLI command maps to exactly one IPC command dispatched to the daemon. No CLI logic that duplicates what an actor already does.
+- The CLI always connects to the daemon via IPC. If the daemon is not running, the CLI auto-starts it before connecting.
+- The daemon owns all actors and business logic. The CLI is purely a client that observes and dispatches commands.
 - New slash commands added to the CLI must have a corresponding daemon-side event handler. No orphaned CLI commands.
-- CLI renders bus events. It does not compute them.
+- CLI renders bus events received via IPC. It does not compute them.
 
 ```rust
-// CORRECT — CLI dispatches a bus event, waits for response
-self.bus.broadcast(Event::Speech(SpeechEvent::TranscribeRequested { ... })).await?;
+// CORRECT — CLI sends IPC command, waits for response via event stream
+client.send(IpcPayload::InferenceRequested { prompt, ... }).await?;
 
 // WRONG — CLI runs inference itself
-let result = llama_model.infer(prompt); // FORBIDDEN — inference belongs to the actor
+let result = llama_model.infer(prompt); // FORBIDDEN — inference belongs to the daemon
 
 // WRONG — CLI constructs actors
-let actor = InferenceActor::new(...); // FORBIDDEN — runtime owns actor construction
+let actor = InferenceActor::new(...); // FORBIDDEN — runtime/daemon owns actor construction
 ```
 
 ---
