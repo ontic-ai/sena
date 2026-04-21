@@ -244,7 +244,7 @@ fn build_output_stream(
         SampleFormat::I16 => device.build_output_stream(
             config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer.lock().unwrap();
+                let mut buffer = playback_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if buffer.is_empty() {
                         *sample = 0;
@@ -260,7 +260,7 @@ fn build_output_stream(
         SampleFormat::U16 => device.build_output_stream(
             config,
             move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer.lock().unwrap();
+                let mut buffer = playback_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if buffer.is_empty() {
                         *sample = u16::MAX / 2;
@@ -285,7 +285,7 @@ fn build_output_stream(
 }
 
 fn write_output_data(data: &mut [f32], buffer: &Arc<Mutex<Vec<f32>>>, channels: usize) {
-    let mut buffer = buffer.lock().unwrap();
+    let mut buffer = buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for frame in data.chunks_mut(channels) {
         if buffer.is_empty() {
             for sample in frame.iter_mut() {
