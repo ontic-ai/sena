@@ -6,6 +6,12 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Enable NVIDIA CUDA GPU inference. Requires CUDA toolkit installed.
+cuda = ["inference/cuda"]
+# Enable Apple Metal GPU inference (macOS only).
+metal = ["inference/metal"]
+
 [dependencies]
 # Workspace crates
 bus = { path = "../bus" }
