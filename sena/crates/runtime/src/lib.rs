@@ -42,6 +42,9 @@ pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};
 pub use supervisor::supervision_loop;
 
+// Re-export llama.cpp log suppression for CLI use.
+pub use inference::suppress_llama_logs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
