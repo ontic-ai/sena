@@ -102,9 +102,8 @@ impl AudioOutputStream {
     /// differs from the stream config, format adaptation will be applied.
     pub fn play(&self, buffer: AudioBuffer) -> Result<(), TtsError> {
         if let Some(tx) = &self.play_tx {
-            tx.send(buffer).map_err(|_| {
-                TtsError::BackendError("audio playback channel closed".to_string())
-            })?;
+            tx.send(buffer)
+                .map_err(|_| TtsError::BackendError("audio playback channel closed".to_string()))?;
             Ok(())
         } else {
             Err(TtsError::BackendError(
@@ -198,13 +197,11 @@ fn run_playback_loop(
         match play_rx.try_recv() {
             Ok(buffer) => {
                 let adapted = adapt_buffer_format(&buffer, &config);
-                if let Ok(mut pb) = playback_buffer.lock() {
-                    pb.extend_from_slice(&adapted.samples);
-                    tracing::trace!(
-                        "queued {} samples for playback",
-                        adapted.samples.len()
-                    );
-                }
+                let mut pb = playback_buffer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                pb.extend_from_slice(&adapted.samples);
+                tracing::trace!("queued {} samples for playback", adapted.samples.len());
             }
             Err(mpsc::error::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));
@@ -244,7 +241,9 @@ fn build_output_stream(
         SampleFormat::I16 => device.build_output_stream(
             config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut buffer = playback_buffer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if buffer.is_empty() {
                         *sample = 0;
@@ -260,7 +259,9 @@ fn build_output_stream(
         SampleFormat::U16 => device.build_output_stream(
             config,
             move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut buffer = playback_buffer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if buffer.is_empty() {
                         *sample = u16::MAX / 2;
@@ -277,7 +278,7 @@ fn build_output_stream(
             return Err(TtsError::BackendError(format!(
                 "unsupported sample format: {:?}",
                 format
-            )))
+            )));
         }
     };
 
@@ -285,7 +286,9 @@ fn build_output_stream(
 }
 
 fn write_output_data(data: &mut [f32], buffer: &Arc<Mutex<Vec<f32>>>, channels: usize) {
-    let mut buffer = buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut buffer = buffer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for frame in data.chunks_mut(channels) {
         if buffer.is_empty() {
             for sample in frame.iter_mut() {
@@ -311,7 +314,7 @@ fn adapt_buffer_format(source: &AudioBuffer, target_config: &AudioOutputConfig) 
         // Mono to stereo: duplicate each sample
         samples
             .iter()
-            .flat_map(|&sample| std::iter::repeat(sample).take(2))
+            .flat_map(|&sample| std::iter::repeat_n(sample, 2))
             .collect()
     } else if source.channels == 2 && target_config.channels == 1 {
         // Stereo to mono: average pairs

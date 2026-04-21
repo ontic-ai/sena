@@ -1,6 +1,8 @@
 //! TTS actor — text-to-speech synthesis and playback.
 
-use crate::audio_output::{AudioBuffer, AudioOutputStream, AudioOutputConfig};
+use crate::audio_output::AudioOutputStream;
+#[cfg(not(test))]
+use crate::audio_output::{AudioBuffer, AudioOutputConfig};
 use crate::backend::TtsBackend;
 use crate::error::SpeechActorError;
 use crate::types::{AudioStream, PendingSentence};
@@ -68,11 +70,12 @@ impl TtsActor {
     }
 
     /// Ensure audio output stream is initialized.
+    #[cfg(not(test))]
     fn ensure_audio_output(&mut self) -> Result<(), SpeechActorError> {
         if self.audio_output.is_none() {
             let config = AudioOutputConfig::default();
             let stream = AudioOutputStream::start(config)
-                .map_err(|e| SpeechActorError::Backend(format!("audio output init: {}", e)))?;
+                .map_err(|e| SpeechActorError::AudioDevice(format!("audio output init: {}", e)))?;
             self.audio_output = Some(stream);
             debug!("Audio output stream initialized");
         }
@@ -80,6 +83,7 @@ impl TtsActor {
     }
 
     /// Convert AudioStream to AudioBuffer for playback.
+    #[cfg(not(test))]
     fn to_audio_buffer(stream: &AudioStream) -> AudioBuffer {
         AudioBuffer {
             samples: stream.samples.clone(),
@@ -88,7 +92,17 @@ impl TtsActor {
         }
     }
 
+    #[cfg(test)]
+    async fn play_audio_blocking(
+        &mut self,
+        _audio: AudioStream,
+        _causal_id: CausalId,
+    ) -> Result<(), SpeechActorError> {
+        Ok(())
+    }
+
     /// Play audio buffer using spawn_blocking to avoid blocking async runtime.
+    #[cfg(not(test))]
     async fn play_audio_blocking(
         &mut self,
         audio: AudioStream,
@@ -97,7 +111,7 @@ impl TtsActor {
         self.ensure_audio_output()?;
 
         let audio_output = self.audio_output.as_ref().ok_or_else(|| {
-            SpeechActorError::Backend("audio output not initialized".to_string())
+            SpeechActorError::AudioDevice("audio output not initialized".to_string())
         })?;
 
         let buffer = Self::to_audio_buffer(&audio);
@@ -106,7 +120,7 @@ impl TtsActor {
         // Queue the buffer for playback
         audio_output
             .play(buffer)
-            .map_err(|e| SpeechActorError::Backend(format!("playback failed: {}", e)))?;
+            .map_err(|e| SpeechActorError::AudioDevice(format!("playback failed: {}", e)))?;
 
         // Wait for playback to complete using spawn_blocking to avoid blocking async runtime
         let wait_duration = std::time::Duration::from_millis(duration_ms + 100);
@@ -114,7 +128,7 @@ impl TtsActor {
             std::thread::sleep(wait_duration);
         })
         .await
-        .map_err(|e| SpeechActorError::Backend(format!("playback wait failed: {}", e)))?;
+        .map_err(|e| SpeechActorError::AudioDevice(format!("playback wait failed: {}", e)))?;
 
         debug!(
             duration_ms = %duration_ms,
@@ -230,10 +244,11 @@ impl TtsActor {
             "Processing speak request"
         );
 
-        let bus = self
-            .bus
-            .as_ref()
-            .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
+        let bus = Arc::clone(
+            self.bus
+                .as_ref()
+                .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?,
+        );
 
         // Emit speaking started
         bus.broadcast(Event::Speech(SpeechEvent::SpeakingStarted { causal_id }))
@@ -290,12 +305,11 @@ impl TtsActor {
 
     /// Play ready sentences in index order.
     async fn play_ready_sentences(&mut self, causal_id: CausalId) -> Result<(), SpeechActorError> {
-        // Clone Arc to avoid holding immutable borrow across mutable operations
-        let bus = self
-            .bus
-            .as_ref()
-            .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?
-            .clone();
+        let bus = Arc::clone(
+            self.bus
+                .as_ref()
+                .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?,
+        );
 
         // Find all ready sentences starting from next_playback_index
         let mut indices_to_play = Vec::new();
