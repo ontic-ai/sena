@@ -128,14 +128,13 @@ pub fn build_llama_backend(
 
 /// Discover a usable model and construct a backend, or return None if unavailable.
 ///
-/// Scans the default models directory for GGUF files and attempts to load the first
-/// one found. Returns None (with a warning) if no models are discovered.
+/// Uses `inference::discover_models()` to scan the default models directory for
+/// GGUF files and attempts to load the first one found. Returns None (with a warning)
+/// if no models are discovered.
 ///
-/// This is a minimal bootstrap implementation. Full model discovery and selection
-/// logic will be implemented in a future unit.
+/// Graceful fallback: boot remains non-fatal if no models are available.
 pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend>> {
-    // Resolve the default models directory.
-    // For now, use a hardcoded pattern. Full discovery will be added later.
+    // Resolve the default models directory
     let models_dir = resolve_default_models_dir().ok()?;
 
     if !models_dir.exists() {
@@ -146,30 +145,48 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
         return None;
     }
 
-    // Scan for GGUF files
-    let entries = match std::fs::read_dir(&models_dir) {
-        Ok(e) => e,
-        Err(err) => {
-            warn!(path = ?models_dir, error = %err, "failed to read models directory");
-            return None;
-        }
-    };
+    // Use inference crate's discovery system
+    info!(path = ?models_dir, "scanning for GGUF models");
+    let registry = inference::discover_models(&models_dir);
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-            info!(path = ?path, "discovered GGUF model file");
-            match build_llama_backend(&path) {
-                Ok(backend) => return Some(backend),
-                Err(e) => {
-                    warn!(path = ?path, error = %e, "failed to load discovered model — trying next");
-                    continue;
-                }
+    if registry.is_empty() {
+        warn!(path = ?models_dir, "no GGUF models found in models directory");
+        return None;
+    }
+
+    info!(
+        count = registry.len(),
+        "discovered {} model(s)",
+        registry.len()
+    );
+
+    // Attempt to load models in order until one succeeds
+    for model in &registry.models {
+        info!(
+            name = %model.name,
+            path = ?model.path,
+            size_mb = model.size_bytes / (1024 * 1024),
+            "attempting to load model"
+        );
+
+        match build_llama_backend(&model.path) {
+            Ok(backend) => {
+                info!(name = %model.name, "model loaded successfully");
+                return Some(backend);
+            }
+            Err(e) => {
+                warn!(
+                    name = %model.name,
+                    path = ?model.path,
+                    error = %e,
+                    "failed to load model — trying next"
+                );
+                continue;
             }
         }
     }
 
-    warn!("no usable GGUF models found in models directory");
+    warn!("no usable GGUF models could be loaded — all models failed");
     None
 }
 
