@@ -9,7 +9,10 @@ use bus::{
     Actor, ActorError, Event, EventBus, InferenceEvent, InferenceFailureOrigin, InferenceSource,
     Priority,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use text::SentenceBoundaryIterator;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
@@ -25,6 +28,7 @@ pub struct InferenceActor {
     rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
     work_tx: Option<mpsc::Sender<()>>,
+    inference_max_tokens: Arc<AtomicUsize>,
 }
 
 impl InferenceActor {
@@ -52,7 +56,15 @@ impl InferenceActor {
             rx: None,
             directed_rx: None,
             work_tx: None,
+            inference_max_tokens: Arc::new(AtomicUsize::new(InferenceParams::default().max_tokens)),
         }
+    }
+
+    /// Override the default inference token budget.
+    pub fn with_inference_max_tokens(self, max_tokens: usize) -> Self {
+        self.inference_max_tokens
+            .store(max_tokens, Ordering::Relaxed);
+        self
     }
 
     /// Handle an inference request event.
@@ -255,6 +267,7 @@ impl InferenceActor {
         bus: Arc<EventBus>,
         backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
         queue: Arc<Mutex<InferenceQueue>>,
+        inference_max_tokens: Arc<AtomicUsize>,
         mut work_signal: mpsc::Receiver<()>,
     ) {
         loop {
@@ -285,6 +298,7 @@ impl InferenceActor {
                         let result = Self::execute_inference(
                             bus.clone(),
                             backend.clone(),
+                            inference_max_tokens.clone(),
                             prompt,
                             source,
                             causal_id,
@@ -320,6 +334,7 @@ impl InferenceActor {
     async fn execute_inference(
         bus: Arc<EventBus>,
         backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
+        inference_max_tokens: Arc<AtomicUsize>,
         prompt: String,
         source: InferenceSource,
         causal_id: bus::CausalId,
@@ -342,8 +357,10 @@ impl InferenceActor {
             return Err(InferenceError::ModelNotLoaded);
         }
 
-        // Create inference parameters (default for now)
-        let params = InferenceParams::default();
+        let params = InferenceParams {
+            max_tokens: inference_max_tokens.load(Ordering::Relaxed),
+            ..InferenceParams::default()
+        };
 
         debug!(?params, "running inference");
 
@@ -674,9 +691,17 @@ impl Actor for InferenceActor {
         let worker_bus = bus.clone();
         let worker_backend = self.backend.clone();
         let worker_queue = self.queue.clone();
+        let worker_inference_max_tokens = self.inference_max_tokens.clone();
 
         tokio::spawn(async move {
-            Self::worker_loop(worker_bus, worker_backend, worker_queue, work_rx).await;
+            Self::worker_loop(
+                worker_bus,
+                worker_backend,
+                worker_queue,
+                worker_inference_max_tokens,
+                work_rx,
+            )
+            .await;
         });
 
         // Spawn VRAM monitoring task
@@ -714,6 +739,14 @@ impl Actor for InferenceActor {
                         Ok(Event::System(bus::SystemEvent::ShutdownSignal)) => {
                             info!("inference actor received shutdown signal");
                             break;
+                        }
+                        Ok(Event::System(bus::SystemEvent::TokenBudgetAutoTuned {
+                            new_max_tokens,
+                            ..
+                        })) => {
+                            self.inference_max_tokens
+                                .store(new_max_tokens, Ordering::Relaxed);
+                            info!(new_max_tokens, "inference actor updated token budget");
                         }
                         Ok(Event::Inference(InferenceEvent::InferenceRequested {
                             prompt,
@@ -795,6 +828,14 @@ impl Actor for InferenceActor {
 mod tests {
     use super::*;
     use crate::mock::{MockBackend, MockConfig};
+
+    #[test]
+    fn actor_allows_configured_token_budget() {
+        let backend = Box::new(MockBackend::default_loaded());
+        let actor = InferenceActor::new(backend).with_inference_max_tokens(768);
+
+        assert_eq!(actor.inference_max_tokens.load(Ordering::Relaxed), 768);
+    }
 
     #[tokio::test]
     async fn actor_handles_inference_request_when_model_loaded() {
@@ -950,5 +991,29 @@ mod tests {
         // (Hard to test exact order without exposing queue internals,
         // but we verify no crashes and all complete)
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    #[tokio::test]
+    async fn actor_updates_token_budget_from_auto_tune_event() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::default_loaded());
+        let mut actor = InferenceActor::new(backend);
+        let shared_budget = actor.inference_max_tokens.clone();
+
+        actor.start(bus.clone()).await.unwrap();
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        bus.broadcast(Event::System(bus::SystemEvent::TokenBudgetAutoTuned {
+            old_max_tokens: 512,
+            new_max_tokens: 896,
+            p95_tokens: 700,
+        }))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        assert_eq!(shared_budget.load(Ordering::Relaxed), 896);
     }
 }

@@ -1,9 +1,10 @@
 //! Supervision loop — monitors actor liveness, handles readiness gate, emits BootComplete.
 
+use crate::analytics::TokenTuner;
 use crate::boot::BootResult;
 use crate::error::RuntimeError;
 use crate::health::ActorRegistry;
-use bus::{Event, SystemEvent};
+use bus::{Event, InferenceEvent, SystemEvent};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -70,7 +71,8 @@ pub async fn supervision_loop(mut boot_result: BootResult) -> Result<(), Runtime
     );
 
     // Step 3: Main supervision loop
-    let shutdown_result = await_shutdown_or_health_checks(&boot_result, &mut actor_registry).await;
+    let shutdown_result =
+        await_shutdown_or_health_checks(&mut boot_result, &mut actor_registry).await;
 
     if let Err(e) = shutdown_result {
         warn!("SUPERVISOR: shutdown signal handling failed: {}", e);
@@ -166,12 +168,18 @@ async fn await_readiness_gate(
 /// This loop runs until a shutdown signal is received. Returns Ok(()) on clean
 /// shutdown signal, Err on channel failure.
 async fn await_shutdown_or_health_checks(
-    boot_result: &BootResult,
+    boot_result: &mut BootResult,
     actor_registry: &mut ActorRegistry,
 ) -> Result<(), RuntimeError> {
     info!("SUPERVISOR: entering main loop (awaiting shutdown or health checks)");
 
     let mut rx = boot_result.bus.subscribe_broadcast();
+    let mut token_tuner = TokenTuner::new(
+        boot_result.config.auto_tune_min_tokens,
+        boot_result.config.auto_tune_max_tokens,
+    );
+    let auto_tune_enabled = boot_result.config.auto_tune_tokens;
+    let mut current_max_tokens = boot_result.config.inference_max_tokens;
 
     loop {
         tokio::select! {
@@ -208,6 +216,36 @@ async fn await_shutdown_or_health_checks(
                         if expected_actor == actor.as_str() {
                             actor_registry.mark_failed(expected_actor, reason.clone());
                             break;
+                        }
+                    }
+                }
+                Ok(Event::Inference(InferenceEvent::InferenceCompleted { token_count, .. })) if auto_tune_enabled => {
+                    if let Some(recommendation) = token_tuner.record(token_count, current_max_tokens) {
+                        let old_max_tokens = current_max_tokens;
+                        boot_result.config.inference_max_tokens = recommendation.recommended_tokens;
+
+                        match crate::save_config(&boot_result.config).await {
+                            Ok(()) => {
+                                current_max_tokens = recommendation.recommended_tokens;
+                                info!(
+                                    old_max_tokens,
+                                    new_max_tokens = recommendation.recommended_tokens,
+                                    p95_tokens = recommendation.p95_tokens,
+                                    "SUPERVISOR: token budget auto-tuned"
+                                );
+                                let _ = boot_result
+                                    .bus
+                                    .broadcast(Event::System(SystemEvent::TokenBudgetAutoTuned {
+                                        old_max_tokens,
+                                        new_max_tokens: recommendation.recommended_tokens,
+                                        p95_tokens: recommendation.p95_tokens,
+                                    }))
+                                    .await;
+                            }
+                            Err(e) => {
+                                boot_result.config.inference_max_tokens = old_max_tokens;
+                                warn!(error = %e, "SUPERVISOR: failed to persist auto-tuned token budget");
+                            }
                         }
                     }
                 }
@@ -300,6 +338,7 @@ mod tests {
         let readiness_rx = bus.subscribe_broadcast();
         let boot_result = BootResult {
             bus,
+            config: crate::config::SenaConfig::default(),
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
@@ -325,6 +364,7 @@ mod tests {
         let readiness_rx = bus.subscribe_broadcast();
         let mut boot_result = BootResult {
             bus,
+            config: crate::config::SenaConfig::default(),
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
@@ -342,6 +382,7 @@ mod tests {
         let readiness_rx = bus.subscribe_broadcast();
         let _boot_result = BootResult {
             bus,
+            config: crate::config::SenaConfig::default(),
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],

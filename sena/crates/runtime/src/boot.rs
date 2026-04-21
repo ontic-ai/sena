@@ -21,6 +21,8 @@ const BOOT_STEP_WARN_THRESHOLD_MS: u128 = 500;
 pub struct BootResult {
     /// Event bus shared by all actors.
     pub bus: Arc<EventBus>,
+    /// Runtime configuration loaded during boot.
+    pub config: crate::config::SenaConfig,
     /// Encryption layer for encrypted storage.
     pub encryption: Arc<dyn EncryptionLayer>,
     /// Spawned actor handles with their names.
@@ -36,7 +38,7 @@ pub struct BootResult {
 /// Execute the boot sequence.
 ///
 /// Boot order:
-/// 1. Config load (stub)
+/// 1. Config load
 /// 2. Onboarding state detection
 /// 3. Encryption init
 /// 4. EventBus init
@@ -54,7 +56,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Step 1: Config load
     let step_start = Instant::now();
     info!("Step 1/7: Loading configuration");
-    load_config().await?;
+    let config = load_config().await?;
     check_step_timing("config load", step_start);
 
     // Step 2: Onboarding state detection
@@ -107,7 +109,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Step 7: Core actors spawn
     let step_start = Instant::now();
     info!("Step 7/7: Spawning core actors");
-    let (actor_handles, expected_actors) = spawn_actors(bus.clone()).await?;
+    let (actor_handles, expected_actors) = spawn_actors(bus.clone(), &config).await?;
     check_step_timing("actor spawn", step_start);
 
     let boot_elapsed = boot_start.elapsed();
@@ -119,6 +121,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
 
     Ok(BootResult {
         bus,
+        config,
         encryption,
         actor_handles,
         expected_actors,
@@ -354,14 +357,10 @@ fn hash_string(s: &str) -> u64 {
 }
 
 /// Load configuration from disk or create defaults.
-async fn load_config() -> Result<(), RuntimeError> {
-    // Load or create config using the real config module.
-    // This ensures onboarding-written config is actually read on subsequent boots.
-    let _config = crate::config::load_or_create_config()
+async fn load_config() -> Result<crate::config::SenaConfig, RuntimeError> {
+    crate::config::load_or_create_config()
         .await
-        .map_err(|e| RuntimeError::ConfigLoadFailed(e.to_string()))?;
-    tracing::debug!("config loaded successfully");
-    Ok(())
+        .map_err(|e| RuntimeError::ConfigLoadFailed(e.to_string()))
 }
 
 /// Initialize the encryption layer.
@@ -398,6 +397,7 @@ async fn init_soul(
 /// of actor names that must emit ActorReady before BootComplete.
 async fn spawn_actors(
     bus: std::sync::Arc<EventBus>,
+    config: &crate::config::SenaConfig,
 ) -> Result<
     (
         Vec<(&'static str, tokio::task::JoinHandle<()>)>,
@@ -419,7 +419,7 @@ async fn spawn_actors(
     handles.push((soul_name, soul_handle));
 
     // Step 5: Inference actor spawn
-    let inference_actor = builder::build_inference_actor()?;
+    let inference_actor = builder::build_inference_actor(config.inference_max_tokens)?;
     let inference_name: &'static str = "inference";
     expected.push(inference_name);
     let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
@@ -436,7 +436,11 @@ async fn spawn_actors(
     let platform_actor = builder::build_platform_actor()?;
     let platform_name: &'static str = "platform";
     expected.push(platform_name);
-    let platform_handle = spawn_platform_actor(platform_actor, bus.clone());
+    let platform_handle = spawn_platform_actor(
+        platform_actor,
+        bus.clone(),
+        config.clipboard_observation_enabled,
+    );
     handles.push((platform_name, platform_handle));
 
     // Step 8: CTP actor spawn
@@ -457,7 +461,7 @@ async fn spawn_actors(
     handles.push((prompt_name, prompt_handle));
 
     // Speech actors are spawned conditionally (stub: always spawn for now)
-    let speech_enabled = true;
+    let speech_enabled = config.speech_enabled;
     if speech_enabled {
         // Step 10: STT actor spawn
         let stt_actor = builder::build_stt_actor(&models_dir)?;
@@ -624,6 +628,7 @@ mod poll_intervals {
 fn spawn_platform_actor(
     actor: platform::PlatformActor,
     bus: std::sync::Arc<EventBus>,
+    clipboard_enabled: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let name = "platform";
@@ -640,6 +645,7 @@ fn spawn_platform_actor(
                 poll_intervals::WINDOW,
                 poll_intervals::CLIPBOARD,
                 poll_intervals::KEYSTROKE,
+                clipboard_enabled,
             )
             .await;
 
@@ -852,7 +858,8 @@ mod tests {
     #[tokio::test]
     async fn spawn_actors_creates_expected_list() {
         let bus = Arc::new(EventBus::new());
-        let result = spawn_actors(bus).await;
+        let config = crate::config::SenaConfig::default();
+        let result = spawn_actors(bus, &config).await;
         assert!(result.is_ok());
 
         let (handles, expected) = result.unwrap();
@@ -865,6 +872,22 @@ mod tests {
         assert!(expected.contains(&"prompt"));
         assert!(expected.contains(&"stt"));
         assert!(expected.contains(&"tts"));
+    }
+
+    #[tokio::test]
+    async fn spawn_actors_skips_speech_when_disabled() {
+        let bus = Arc::new(EventBus::new());
+        let config = crate::config::SenaConfig {
+            speech_enabled: false,
+            ..Default::default()
+        };
+
+        let (_handles, expected) = spawn_actors(bus, &config)
+            .await
+            .expect("spawn_actors should succeed when speech is disabled");
+
+        assert!(!expected.contains(&"stt"));
+        assert!(!expected.contains(&"tts"));
     }
 
     #[tokio::test]
