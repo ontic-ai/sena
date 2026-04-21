@@ -29,6 +29,7 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 | 2 | Nested Speech Backend Recovery (Parakeet/Piper) | #59 | `feat/speech-backend-recovery` | Merged | #84 | Merged at commit `28747196c10518bd2827bbbde321775d9271d071`. Includes Parakeet STT and Piper TTS integration into nested actors. |
 | 3 | Documentation and Refactor Cleanup | #67 | `feat/docs-refactor-cleanup` | `planned` | | Documentation alignment for the daemon/CLI split and general refactor debt cleanup. |
 | 4 | Process Split Governance Alignment | #85 | `feat/process-split-governance` | `pr-open` | #93 | Activating branch for governance alignment and milestone reconciliation. |
+| 5 | Inference backend recovery | #86 | `feat/inference-backend-recovery` | `pr-open` | #94 | Full Llama-backend integration, nested bus layout fix, and graceful fallback. |
 
 ### Recovery Notes
 
