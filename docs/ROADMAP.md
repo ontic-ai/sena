@@ -1,5 +1,5 @@
 # Sena — Development Roadmap
-**Version:** 0.3.0  
+**Version:** 0.4.0  
 **Reconcile against:** `PRD.md`, `architecture.md`
 
 ---
@@ -366,6 +366,47 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 ---
 
+## M-Process-Split — Daemon and CLI Binary Separation ✅
+
+**Scope:** Historical reconciliation milestone. Documents the implemented two-binary architecture (daemon + CLI) that diverged from the originally prescribed single-binary-with-subcommands design.
+
+**Context:** Early design documents (PRD, architecture v0.1–v0.4) described Sena as "one binary" with two invocation modes (`sena` for daemon, `sena cli` for CLI). The implemented architecture evolved to **two separate binaries** (`sena` daemon and `sena-cli` CLI tool) communicating over IPC. This milestone reconciles the governance documents with the implemented reality.
+
+**What was implemented:**
+- **Two distinct binaries:**
+  - `crates/daemon/` → produces `sena` binary (daemon process: boots runtime, hosts IPC server, runs tray, owns all actors)
+  - `crates/cli/` → produces `sena-cli` binary (CLI tool: IPC client, TUI renderer, event dispatcher)
+- **IPC protocol layer:**
+  - `crates/ipc/` → protocol crate for daemon-CLI communication (JSON-over-newline, named pipes on Windows, Unix domain sockets on macOS/Linux)
+- **Dependency graph:**
+  - `daemon` imports: `runtime`, `ipc`, `bus`
+  - `cli` imports: `ipc` only (no `runtime`, no `bus` — all work dispatched to daemon)
+- **Process lifetime:**
+  - Daemon (`sena`): always-on background process, survives CLI disconnects
+  - CLI (`sena-cli`): ephemeral client session, auto-starts daemon if not running, dispatches commands via IPC
+
+**Why this diverged:**
+- **Crash isolation:** CLI crashes cannot affect the daemon's supervision loop or actor state
+- **Session multiplicity:** Multiple simultaneous CLI sessions supported (each gets own IPC stream)
+- **Deployment simplicity:** Daemon auto-start on first CLI invocation eliminates user-facing "run daemon first" step
+- **Governance clarity:** Separate binaries make the "CLI is a thin wrapper" contract architecturally enforceable (CLI cannot import actor logic)
+
+**Governance reconciliation:**
+- Architecture.md updated (v0.6.0): workspace layout, dependency graph, and process lifetime sections now document two-binary reality
+- copilot-instructions.md updated: §8.1 CLI Design Principle codifies "wrapper not owner" with IPC-only import rule
+- This roadmap milestone: documents historical context so future contributors understand the evolution
+
+**Completion:**
+- [x] Two binaries built and invokable: `cargo build --bin sena`, `cargo build --bin sena-cli`
+- [x] IPC infrastructure complete: named pipes (Windows), Unix domain sockets (macOS/Linux)
+- [x] CLI auto-starts daemon if not running (tested in Phase 6 integration tests)
+- [x] Daemon survives CLI crashes and disconnects (verified by `ipc_server_survives_client_disconnect` test)
+- [x] Multiple simultaneous CLI sessions supported (verified by `ipc_multiple_clients_connect_simultaneously` test)
+- [x] Architecture.md and copilot-instructions.md updated to reflect two-binary architecture
+- [x] Dependency graph enforced: CLI imports only `ipc`, daemon imports `runtime` + `ipc` + `bus`
+
+---
+
 ## Phase 5.5 — Streaming Inference and Ordered TTS
 
 **Goal:** Sena's responses stream token-by-token to the TTS actor, producing natural speech with minimal latency. Sentence boundaries are detected in real-time and each complete sentence is synthesized and played in order as inference continues.
@@ -434,6 +475,11 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 
 **Goal:** CLI becomes a fully separated thin wrapper process communicating over IPC. Every CLI command dispatches a typed bus event to the daemon; the daemon owns all actors and business logic. Configuration is accessible through CLI menu and auto-tuned based on local analytics.
 
+**Architecture:** Two separate binaries communicate over IPC:
+- **Daemon binary** (`sena`): always-on background process, boots runtime, hosts IPC server, owns all actors
+- **CLI binary** (`sena-cli`): ephemeral IPC client, TUI renderer, event dispatcher with zero business logic
+- **IPC layer** (`crates/ipc`): protocol crate for daemon-CLI communication
+
 **Design contract (non-negotiable):** The CLI is a wrapper, not an owner. It dispatches events, renders responses, and never contains business logic that duplicates what a daemon actor already does. See `architecture.md §4.3` and `copilot-instructions.md §8.1`.
 
 **Entry gate:** Phase 5 exit gate fully satisfied.
@@ -444,16 +490,17 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [x] Unix domain socket (macOS/Linux) / Named pipe (Windows) server in runtime
 - [x] Protocol: typed event serialization over IPC channel (JSON-over-newline, IpcMessage/IpcPayload/LineStyle in bus crate)
 - [x] Authentication: local process verification (socket file permissions on Unix, pipe ACL on Windows)
-- [x] CLI connects as a client, receives bus event stream, sends commands
+- [x] IPC server hosted in daemon binary, CLI connects as client
 
 #### M6.2 — CLI as Separate Process ✅
-- [x] CLI binary connects to running daemon over IPC (daemon must be running)
+- [x] Separate `sena-cli` binary implemented in `crates/cli` (distinct from `sena` daemon binary)
+- [x] CLI connects to running daemon over IPC (daemon must be running for CLI to function)
 - [x] CLI is a pure event dispatcher + renderer: every slash command maps to one IPC command or bus event
 - [x] CLI crash does not affect runtime (verified by ipc_server_survives_client_disconnect integration test)
 - [x] Multiple CLI sessions supported simultaneously (verified by ipc_multiple_clients_connect_simultaneously integration test)
 - [x] Session attach/detach without runtime restart
-- [x] `sena cli` with daemon already running: connect and attach, do not start a second runtime
-- [x] `sena cli` with daemon not running: auto-start daemon, connect IPC, shut daemon down on CLI exit
+- [x] CLI auto-starts daemon if not running: detects missing IPC endpoint, spawns `sena` process, waits for readiness, connects
+- [x] Daemon lifecycle: survives CLI exit, continues background operation until explicit shutdown or system reboot
 
 #### M6.2.1 — Loop Registry and Visibility ✅
 - [x] `SystemEvent::LoopControlRequested { loop_name, enabled }` and `SystemEvent::LoopStatusChanged { loop_name, enabled }` defined in bus
@@ -483,7 +530,9 @@ Phases are sequential. Parallelism within a phase is allowed. Parallelism across
 - [ ] Analytics dashboard in CLI: show recommended vs current settings
 
 **Exit gate — Phase 6 complete when:**
+- [x] Two separate binaries (`sena` daemon and `sena-cli` CLI tool) built and functional
 - [x] CLI is a separate process, runtime survives CLI crashes
+- [x] IPC infrastructure complete: daemon hosts server, CLI connects as client, protocol supports typed events
 - [x] Every CLI slash command maps 1:1 to a daemon-side bus event handler — no orphaned commands
 - [x] Configuration viewable and editable from CLI
 - [x] Token limits auto-tuned based on hardware profile
