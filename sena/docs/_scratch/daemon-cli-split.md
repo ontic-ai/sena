@@ -31,6 +31,8 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 | 4 | Process Split Governance Alignment | #85 | `feat/process-split-governance` | `pr-open` | #93 | Activating branch for governance alignment and milestone reconciliation. |
 | 5 | Inference backend recovery | #86 | `feat/inference-backend-recovery` | `pr-open` | #94 | Full Llama-backend integration, nested bus layout fix, and graceful fallback. |
 
+| 6 | bootstrap-safety-recovery | #87 | `feat/bootstrap-safety-recovery` | `active` | | Create or reuse the physical branch from the latest dev, mark it active, and return the branch name. |
+
 ### Recovery Notes
 
 - Canonical PR from this session: #80 → `feat/loop-registry` targeting `dev`, merged on 2026-04-19.
