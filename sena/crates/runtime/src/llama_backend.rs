@@ -1,0 +1,261 @@
+//! LlamaBackend construction helper for runtime.
+//!
+//! Provides `build_llama_backend` which attempts to construct a real
+//! `infer::LlamaBackend` wrapped in an adapter that implements Sena's
+//! `inference::InferenceBackend` trait. Falls back gracefully if no model
+//! is available.
+
+use crate::error::RuntimeError;
+use async_trait::async_trait;
+use inference::{BackendType, InferenceError, InferenceParams, InferenceStream, LlmBackend};
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+use tracing::{info, warn};
+
+/// Adapter that wraps `infer::LlamaBackend` and implements `inference::InferenceBackend`.
+///
+/// This bridges the two trait definitions so we can use the external `infer` crate's
+/// LlamaBackend with Sena's InferenceActor.
+struct LlamaBackendAdapter {
+    inner: Arc<Mutex<inference::LlamaBackend>>,
+}
+
+impl LlamaBackendAdapter {
+    /// Create a new adapter from a constructed and loaded LlamaBackend.
+    fn new(backend: inference::LlamaBackend) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(backend)),
+        }
+    }
+}
+
+#[async_trait]
+impl inference::InferenceBackend for LlamaBackendAdapter {
+    fn backend_type(&self) -> BackendType {
+        // All real backends map to LlamaCpp in Sena's type system
+        BackendType::LlamaCpp
+    }
+
+    fn is_loaded(&self) -> bool {
+        // If we've constructed the adapter, the model is loaded
+        true
+    }
+
+    async fn infer(
+        &self,
+        prompt: String,
+        params: InferenceParams,
+    ) -> Result<InferenceStream, InferenceError> {
+        // Convert Sena's InferenceParams to infer crate's params
+        let infer_params = infer::InferenceParams {
+            request_id: uuid::Uuid::new_v4(),
+            prompt: prompt.clone(),
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            ctx_size: 2048, // Default context size
+        };
+
+        // Run inference in a blocking task since the infer crate's methods are sync
+        let backend_clone = self.inner.clone();
+        let stream_rx = tokio::task::spawn_blocking(move || {
+            let backend = backend_clone.blocking_lock();
+            backend.stream(infer_params)
+        })
+        .await
+        .map_err(|e| InferenceError::ExecutionFailed(format!("spawn_blocking failed: {}", e)))?
+        .map_err(|e| InferenceError::ExecutionFailed(format!("stream failed: {}", e)))?;
+
+        // Convert std::sync::mpsc::Receiver to tokio::sync::mpsc::Receiver
+        // and wrap in InferenceStream
+        let (tx, rx) = mpsc::channel(100);
+
+        tokio::task::spawn_blocking(move || {
+            while let Ok(token) = stream_rx.recv() {
+                if tx.blocking_send(Ok(token)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(InferenceStream::new(rx))
+    }
+
+    async fn shutdown(&mut self) -> Result<(), InferenceError> {
+        // LlamaBackend doesn't have an explicit shutdown method; drop handles cleanup
+        Ok(())
+    }
+}
+
+/// Attempt to construct a real LlamaBackend from a model path.
+///
+/// Returns a boxed `InferenceBackend` trait object on success.
+/// If construction fails, returns a RuntimeError.
+///
+/// # Parameters
+/// - `model_path`: Path to the GGUF model file
+///
+/// # Errors
+/// - `ModelLoadFailed` if backend construction or model loading fails
+pub fn build_llama_backend(
+    model_path: &Path,
+) -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    info!(path = ?model_path, "attempting to load LlamaBackend");
+
+    // Construct the backend
+    let mut backend = inference::LlamaBackend::new()
+        .map_err(|e| RuntimeError::ModelLoadFailed(format!("backend init failed: {}", e)))?;
+
+    // Auto-detect the best backend type (Metal on macOS, CUDA if available, CPU otherwise)
+    let backend_type = infer::BackendType::auto_detect();
+    info!(backend_type = ?backend_type, "detected compute backend");
+
+    // Load the model
+    backend.load_model(model_path, backend_type).map_err(|e| {
+        RuntimeError::ModelLoadFailed(format!(
+            "failed to load model from {}: {}",
+            model_path.display(),
+            e
+        ))
+    })?;
+
+    info!(path = ?model_path, backend = ?backend_type, "LlamaBackend loaded successfully");
+
+    // Wrap in adapter
+    Ok(Box::new(LlamaBackendAdapter::new(backend)))
+}
+
+/// Discover a usable model and construct a backend, or return None if unavailable.
+///
+/// Scans the default models directory for GGUF files and attempts to load the first
+/// one found. Returns None (with a warning) if no models are discovered.
+///
+/// This is a minimal bootstrap implementation. Full model discovery and selection
+/// logic will be implemented in a future unit.
+pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend>> {
+    // Resolve the default models directory.
+    // For now, use a hardcoded pattern. Full discovery will be added later.
+    let models_dir = resolve_default_models_dir().ok()?;
+
+    if !models_dir.exists() {
+        warn!(
+            path = ?models_dir,
+            "default models directory does not exist — no backend available"
+        );
+        return None;
+    }
+
+    // Scan for GGUF files
+    let entries = match std::fs::read_dir(&models_dir) {
+        Ok(e) => e,
+        Err(err) => {
+            warn!(path = ?models_dir, error = %err, "failed to read models directory");
+            return None;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+            info!(path = ?path, "discovered GGUF model file");
+            match build_llama_backend(&path) {
+                Ok(backend) => return Some(backend),
+                Err(e) => {
+                    warn!(path = ?path, error = %e, "failed to load discovered model — trying next");
+                    continue;
+                }
+            }
+        }
+    }
+
+    warn!("no usable GGUF models found in models directory");
+    None
+}
+
+/// Resolve the default models directory path.
+///
+/// Returns `<sena_dir>/models/inference/` where `<sena_dir>` is:
+/// - Windows: `%APPDATA%\sena\`
+/// - macOS: `~/Library/Application Support/sena/`
+/// - Linux: `~/.config/sena/`
+fn resolve_default_models_dir() -> Result<std::path::PathBuf, RuntimeError> {
+    let sena_dir = resolve_sena_dir()?;
+    Ok(sena_dir.join("models").join("inference"))
+}
+
+/// Resolve the Sena config directory.
+///
+/// - Windows: `%APPDATA%\sena\`
+/// - macOS: `~/Library/Application Support/sena/`
+/// - Linux: `~/.config/sena/`
+fn resolve_sena_dir() -> Result<std::path::PathBuf, RuntimeError> {
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA")
+            .map_err(|_| RuntimeError::DirectoryResolutionFailed("APPDATA not set".to_string()))?;
+        Ok(std::path::PathBuf::from(appdata).join("sena"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME")
+            .map_err(|_| RuntimeError::DirectoryResolutionFailed("HOME not set".to_string()))?;
+        Ok(std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("sena"))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME")
+            .map_err(|_| RuntimeError::DirectoryResolutionFailed("HOME not set".to_string()))?;
+        Ok(std::path::PathBuf::from(home).join(".config").join("sena"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_sena_dir_returns_platform_specific_path() {
+        let sena_dir = resolve_sena_dir().expect("should resolve sena dir");
+        assert!(sena_dir.to_str().is_some());
+
+        #[cfg(target_os = "windows")]
+        assert!(sena_dir.to_str().unwrap().contains("\\sena"));
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            sena_dir
+                .to_str()
+                .unwrap()
+                .contains("/Application Support/sena")
+        );
+
+        #[cfg(target_os = "linux")]
+        assert!(sena_dir.to_str().unwrap().contains("/.config/sena"));
+    }
+
+    #[test]
+    fn test_resolve_default_models_dir_appends_models_inference() {
+        let models_dir = resolve_default_models_dir().expect("should resolve default models dir");
+        let path_str = models_dir.to_str().expect("path should be UTF-8");
+
+        assert!(
+            path_str.contains("models") && path_str.ends_with("inference"),
+            "expected path to end with models/inference, got: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_try_build_default_backend_returns_none_when_no_models() {
+        // This test will return None because the models directory likely doesn't exist
+        // in test environment. Just verify it doesn't panic.
+        let result = try_build_default_backend();
+        assert!(result.is_none());
+    }
+}

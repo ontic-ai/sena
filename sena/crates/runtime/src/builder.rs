@@ -191,11 +191,30 @@ pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
 pub fn build_inference_actor(
     inference_max_tokens: usize,
 ) -> Result<inference::InferenceActor, RuntimeError> {
-    tracing::debug!("building inference actor with stub backend");
-    let backend = Box::new(StubInferenceBackend);
-    let actor =
-        inference::InferenceActor::new(backend).with_inference_max_tokens(inference_max_tokens);
-    Ok(actor)
+/// Build the inference actor with a real backend if available, stub otherwise.
+///
+/// Attempts to discover and load a GGUF model from the default models directory.
+/// Falls back to stub backend if no model is available (with a warning).
+pub fn build_inference_actor(
+    inference_max_tokens: usize,
+) -> Result<inference::InferenceActor, RuntimeError> {
+    use crate::llama_backend::try_build_default_backend;
+
+    match try_build_default_backend() {
+        Some(backend) => {
+            tracing::info!("inference actor: using real LlamaBackend");
+            Ok(inference::InferenceActor::new(backend)
+                .with_inference_max_tokens(inference_max_tokens))
+        }
+        None => {
+            tracing::warn!(
+                "inference actor: no model available, falling back to StubInferenceBackend"
+            );
+            let backend = Box::new(StubInferenceBackend);
+            Ok(inference::InferenceActor::new(backend)
+                .with_inference_max_tokens(inference_max_tokens))
+        }
+    }
 }
 
 /// Build the CTP actor.
