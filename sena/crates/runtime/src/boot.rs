@@ -3,6 +3,7 @@
 use crate::builder;
 use crate::download_manager::{DownloadClient, ModelCache};
 use crate::error::RuntimeError;
+use crate::single_instance::InstanceGuard;
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::EncryptionLayer;
 use sha2::Digest;
@@ -33,12 +34,16 @@ pub struct BootResult {
     /// Subscribed BEFORE actors are spawned to avoid missing early ActorReady events.
     /// Should be taken (consumed) by the supervisor's readiness gate.
     pub readiness_rx: Option<tokio::sync::broadcast::Receiver<Event>>,
+    /// Single-instance guard. Must be held for process lifetime.
+    /// When dropped, another daemon instance can start.
+    pub instance_guard: InstanceGuard,
 }
 
 /// Execute the boot sequence.
 ///
 /// Boot order:
-/// 1. Config load
+/// 0. Single-instance enforcement (acquire lock)
+/// 1. Config load (stub)
 /// 2. Onboarding state detection
 /// 3. Encryption init
 /// 4. EventBus init
@@ -56,6 +61,28 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Suppress llama.cpp stderr logs early to prevent corruption of TUI terminal state.
     // Must be called before any inference backend initialization occurs.
     inference::suppress_llama_logs();
+
+    // Step 0: Single-instance enforcement
+    let step_start = Instant::now();
+    info!("Step 0/7: Acquiring instance lock");
+    let sena_dir = resolve_sena_dir()?;
+    fs::create_dir_all(&sena_dir)
+        .await
+        .map_err(|e| RuntimeError::DirectoryResolutionFailed(e.to_string()))?;
+
+    let instance_guard = InstanceGuard::acquire(&sena_dir).map_err(|e| {
+        let lock_path = sena_dir.join(".sena.lock");
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock => RuntimeError::InstanceAlreadyRunning {
+                lock_path: lock_path.display().to_string(),
+            },
+            _ => RuntimeError::DirectoryResolutionFailed(format!(
+                "failed to acquire instance lock: {}",
+                e
+            )),
+        }
+    })?;
+    check_step_timing("instance lock", step_start);
 
     // Step 1: Config load
     let step_start = Instant::now();
@@ -130,6 +157,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         actor_handles,
         expected_actors,
         readiness_rx: Some(readiness_rx),
+        instance_guard,
     })
 }
 
