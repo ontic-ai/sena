@@ -30,6 +30,8 @@ sena/
 ├── crates/
 │   ├── bus/                ← event bus, actor trait, all typed events
 │   ├── crypto/             ← encryption primitives, key management, file encryption
+│   ├── daemon/             ← daemon binary — boots runtime, hosts IPC server, runs tray
+│   ├── ipc/                ← protocol layer for daemon-CLI communication
 │   ├── runtime/            ← boot sequence, actor registry, shutdown
 │   ├── platform/           ← OS adapter trait + per-OS implementations
 │   ├── ctp/                ← continuous thought processing loop
@@ -39,7 +41,7 @@ sena/
 │   ├── text/               ← sentence boundary detection and text utilities
 │   ├── soul/               ← SoulBox: identity, schema, event log
 │   ├── speech/             ← STT, TTS, wakeword — primary interaction surface
-│   └── cli/                ← binary entrypoint — thin shell only
+│   └── cli/                ← CLI binary — IPC client, TUI renderer
 │
 ├── xtask/                  ← cargo xtask automation (Rust, not shell scripts)
 ├── docs/
@@ -53,6 +55,7 @@ sena/
 **Hard rules:**
 - The root `Cargo.toml` is a virtual manifest. It has no `[package]` section and no `src/`.
 - Every crate under `crates/` is named without a `sena-` prefix. Names are functional: `bus`, `runtime`, `soul`.
+- Binary crates: `daemon` (produces `sena` binary) and `cli` (produces `sena-cli` binary). All other crates are `lib`.
 - Crates are published to crates.io only if explicitly decided. Default: workspace-internal.
 - No `Makefile`. No shell scripts in root. All automation lives in `xtask/`.
 
@@ -63,9 +66,15 @@ sena/
 This is the law. Arrows mean "may depend on." Absence of an arrow means the dependency is **forbidden.**
 
 ```
+daemon
+ ├── runtime      ← boots runtime, owns supervision loop
+ ├── ipc          ← hosts IPC server
+ └── bus          ← event subscriptions for shutdown and tray menu
+
 cli
- ├── runtime      ← only dependency (runtime re-exports discover_models, ollama_models_dir)
- └── bus          ← event subscriptions and slash command dispatch
+ └── ipc          ← IPC client only — all work dispatched to daemon
+
+ipc               ← protocol layer: no Sena crate dependencies, external-only leaf
 
 runtime           ← composition root: constructs ALL concrete actor instances
  ├── bus
@@ -111,13 +120,15 @@ speech
 ```
 
 **Hard rules:**
-- `runtime` is the composition root. It constructs all concrete actor instances (soul, platform, ctp, memory, inference, speech) inside `boot()`. CLI never constructs actors.
-- `cli` may only import `runtime` and `bus`. All other crate imports in `cli` are forbidden. The `runtime` crate re-exports `discover_models`, `ollama_models_dir`, etc. so CLI can use these without importing `inference` or `platform` directly.
-- `crypto` has zero dependencies on any other Sena crate. Like `bus`, it is a leaf node in the graph. It provides encryption primitives consumed by `runtime`, `soul`, and `memory`.
+- `runtime` is the composition root. It constructs all concrete actor instances (soul, platform, ctp, memory, inference, speech) inside `boot()`. The daemon binary calls `runtime::boot()`. CLI never constructs actors.
+- `daemon` imports `runtime`, `ipc`, and `bus`. It is the process owner for Sena's background operation.
+- `cli` imports only `ipc`. It is a thin IPC client with no business logic. All work is dispatched to the daemon via IPC commands.
+- `ipc` is a protocol-only crate with zero Sena crate dependencies. It is an external-only leaf node, depending only on `tokio`, `serde`, `thiserror`, and `async-trait`.
+- `crypto` has zero dependencies on any other Sena crate. Like `bus` and `ipc`, it is a leaf node in the graph. It provides encryption primitives consumed by `runtime`, `soul`, and `memory`.
 - `soul` has no knowledge of `ctp`, `inference`, `memory`, or `prompt`. It only knows `bus` and `crypto`. Other crates emit events; soul absorbs them. Soul's internals are never reached into from outside.
 - `speech` depends only on `bus`. It receives events and emits events. It never imports `inference`, `memory`, or `soul`.
 - `bus` has zero dependencies on any other Sena crate. It is the bottom of the graph.
-- `cli` is the developer-facing tool surface. It has no business logic and no actor construction. If business logic appears in `cli`, it belongs in another crate.
+- `cli` is the developer-facing tool surface. It has no business logic, no actor construction, and no runtime import. All functionality is accessed via IPC. If business logic appears in `cli`, it belongs in an actor in the daemon.
 - Circular dependencies are a build error. The graph above must remain a DAG.
 - `platform` never imports OS-specific crates at the crate root level. Platform-specific code is gated behind `#[cfg(target_os = ...)]` within the crate.
 
@@ -216,26 +227,42 @@ After `boot::boot()` returns, the supervisor (`crates/runtime/src/supervisor.rs`
 
 This ensures `BootComplete` listeners (like CTP and inference) only activate once all lower-level actors are confirmed up.
 
-### 4.3 Process Lifetime (Daemon vs CLI Mode)
+### 4.3 Process Architecture (Two Binaries)
 
-**CLI design principle — wrapper, not owner:**
-The CLI is a thin wrapper over the daemon's capabilities. All business logic (inference, memory, STT, CTP, Soul writes) lives in the daemon and its actors. The CLI dispatches typed bus events to request work and renders the resulting event stream. It has no actors of its own. In Phase 6+, CLI always connects to the running daemon over IPC. The CLI never boots the runtime in-process — it either connects to an existing daemon or auto-starts one as a background process.
+**As of Phase 6, Sena operates as two separate binaries:**
 
-Two entry points, one binary:
+| Binary | Artifact | Entry Point | Lifetime Owner |
+|---|---|---|---|
+| `sena` | `crates/daemon/` | `daemon/src/main.rs` | `runtime::boot()` → supervision loop → tray loop |
+| `sena-cli` | `crates/cli/` | `cli/src/main.rs` | IPC connection → shell → TUI → disconnect |
 
-| Mode | Invocation | Lifetime owner |
-|---|---|---|
-| Daemon | `sena` (no args) | `runtime::run_background()` → supervision loop |
-| CLI | `sena cli` | IPC connection → `shell::run_with_ipc()` → TUI → disconnect |
+**Daemon binary (`sena`):**
+- Always boots as background process — no subcommand parsing
+- Calls `runtime::boot()` to construct all actors
+- Hosts IPC server on named pipe (`\\.\pipe\sena-daemon` on Windows, equivalent on macOS/Linux)
+- Registers all command handlers via `CommandRegistry`
+- Runs supervision loop in background task
+- Runs tray loop on main thread (blocking)
+- Handles `ShutdownSignal` gracefully, flushes Soul, stops all actors
 
-**CLI mode (Phase 6+ only):**
-- If daemon is running: `sena cli` connects via IPC (`shell::run_with_ipc()`)
-- If daemon is NOT running: `sena cli` auto-starts daemon in background, waits for IPC readiness (30s timeout), then connects
-- The `run_with_runtime()` path (pre-Phase-6 local-only CLI) has been removed as of this unit
+**CLI binary (`sena-cli`):**
+- **CLI design principle — wrapper, not owner:** All business logic (inference, memory, STT, CTP, Soul writes) lives in the daemon and its actors. The CLI dispatches IPC commands to request work and renders the resulting event stream. It has no actors of its own and never boots the runtime.
+- Checks if daemon is running via IPC health check
+- If daemon not running: auto-starts daemon binary (`sena.exe` or `sena`) in background, waits for IPC readiness (30s timeout)
+- Connects to daemon via `IpcClient::connect()`
+- All slash commands and user actions dispatch IPC commands to daemon
+- Renders responses from IPC event stream in TUI
+- On exit, disconnects from daemon — daemon continues running
 
-In daemon mode, `runtime::run_background()` boots, passes the readiness gate, broadcasts BootComplete, optionally emits TTS greeting, then enters `supervisor::supervision_loop()` which blocks until ShutdownSignal or Ctrl+C.
+**IPC connection flow:**
+1. CLI starts, calls `ensure_daemon_running()`
+2. If daemon not detected, CLI spawns daemon binary as detached child process
+3. CLI polls for IPC server availability (retry loop, 30s timeout)
+4. CLI connects via `IpcClient` to named pipe
+5. CLI sends commands, daemon responds with structured events
+6. CLI disconnects on exit; daemon remains alive
 
-**Open CLI from tray:** The "Open CLI" tray menu item broadcasts `CliAttachRequested`. The supervision loop handles this by calling `open_cli_in_new_terminal()` which spawns a new terminal process running `sena cli`. This keeps the daemon and CLI as independent processes.
+**Open CLI from tray:** The "Open CLI" tray menu item spawns a new terminal process running `sena-cli`. This keeps the daemon and CLI as independent processes.
 
 ### 4.4 Shutdown Protocol
 
