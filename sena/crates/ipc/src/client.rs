@@ -1,12 +1,12 @@
-use crate::{IpcError, IpcRequest};
 #[cfg(target_os = "windows")]
-use crate::{IpcResponse, PIPE_NAME, framing};
+use crate::{framing, IpcResponse, PIPE_NAME};
+use crate::{IpcError, IpcRequest};
 use serde_json::Value;
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// IPC client for connecting to Sena daemon.
 ///
@@ -21,6 +21,7 @@ pub struct IpcClient {
 }
 
 /// Internal message types for client communication.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum ClientMessage {
     /// Send a request and expect a response.
     Request {
