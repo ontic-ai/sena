@@ -6,6 +6,7 @@
 //! - Stub implementations for testing and development
 
 pub mod audio_input;
+pub mod audio_output;
 pub mod backend;
 pub mod error;
 pub mod models;
@@ -16,6 +17,7 @@ pub mod tts_actor;
 pub mod types;
 
 pub use audio_input::{AudioChunk, AudioInputConfig, AudioInputStream};
+pub use audio_output::{AudioBuffer, AudioOutputConfig, AudioOutputStream};
 pub use backend::{AudioDevice, SttBackend, TtsBackend};
 pub use error::{SpeechActorError, SttError, TtsError};
 pub use models::{ModelCache, ModelInfo, ModelManifest, ModelType};
