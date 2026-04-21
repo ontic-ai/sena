@@ -47,11 +47,12 @@ pub struct BootResult {
 /// 2. Onboarding state detection
 /// 3. Encryption init
 /// 4. EventBus init
-/// 5. Speech model verification and repair
-/// 6. Soul init
-/// 7. Core actors spawn
-/// 8. Wait for all ActorReady events (handled by supervisor)
-/// 9. Emit BootComplete (handled by supervisor)
+/// 5. Speech model verification and repair (permissive)
+/// 6. Required embed model verification (strict — boot fails if missing)
+/// 7. Soul init
+/// 8. Core actors spawn
+/// 9. Wait for all ActorReady events (handled by supervisor)
+/// 10. Emit BootComplete (handled by supervisor)
 ///
 /// Returns BootResult on success, RuntimeError on failure.
 pub async fn boot() -> Result<BootResult, RuntimeError> {
@@ -127,19 +128,25 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
 
     // Step 5: Speech model verification and repair
     let step_start = Instant::now();
-    info!("Step 5/7: Verifying speech models");
+    info!("Step 5/8: Verifying speech models");
     verify_and_repair_speech_models(bus.clone()).await?;
     check_step_timing("speech model verification", step_start);
 
-    // Step 6: Soul init
+    // Step 6: Required embed model verification (strict)
     let step_start = Instant::now();
-    info!("Step 6/7: Initializing Soul subsystem");
+    info!("Step 6/8: Verifying required embedding model");
+    verify_required_embed_model(bus.clone()).await?;
+    check_step_timing("embed model verification", step_start);
+
+    // Step 7: Soul init
+    let step_start = Instant::now();
+    info!("Step 7/8: Initializing Soul subsystem");
     init_soul(bus.clone(), encryption.clone()).await?;
     check_step_timing("soul init", step_start);
 
-    // Step 7: Core actors spawn
+    // Step 8: Core actors spawn
     let step_start = Instant::now();
-    info!("Step 7/7: Spawning core actors");
+    info!("Step 8/8: Spawning core actors");
     let (actor_handles, expected_actors) = spawn_actors(bus.clone(), &config).await?;
     check_step_timing("actor spawn", step_start);
 
@@ -220,6 +227,14 @@ fn resolve_models_dir() -> Result<PathBuf, RuntimeError> {
     Ok(sena_dir.join("models").join("speech"))
 }
 
+/// Resolve the embedding models directory within the Sena config directory.
+///
+/// Returns `<sena_dir>/models/embed/`.
+fn resolve_embed_models_dir() -> Result<PathBuf, RuntimeError> {
+    let sena_dir = resolve_sena_dir()?;
+    Ok(sena_dir.join("models").join("embed"))
+}
+
 /// Detect first boot and onboarding state.
 ///
 /// Returns `true` if onboarding is required (first boot detected).
@@ -285,6 +300,54 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
 
     info!("Speech model verification complete — available models verified");
     Ok(())
+}
+
+/// Verify and download the required embedding model.
+///
+/// This is a STRICT boot requirement. Unlike speech models, the embedding model
+/// is mandatory for Sena's memory subsystem to function. If the model is missing
+/// or corrupt, this function will:
+/// - Attempt to download it
+/// - FAIL BOOT if download fails
+///
+/// Returns Ok(()) if the model is present and verified.
+/// Returns Err(RuntimeError::RequiredModelMissing) if the model cannot be obtained.
+async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeError> {
+    let embed_models_dir = resolve_embed_models_dir()?;
+
+    // Ensure embed models directory exists
+    fs::create_dir_all(&embed_models_dir)
+        .await
+        .map_err(|e| RuntimeError::DirectoryResolutionFailed(e.to_string()))?;
+
+    info!("Embed models directory: {}", embed_models_dir.display());
+
+    // Get the required embed model
+    let embed_model = ModelManifest::required_embed_model();
+    info!(
+        "Verifying required embed model: {} ({:.2} MB)",
+        embed_model.name,
+        embed_model.size_bytes as f64 / 1_000_000.0
+    );
+
+    // Verify or download the model — STRICT: fail boot on error
+    match verify_model(&embed_models_dir, &embed_model, bus.clone()).await {
+        Ok(()) => {
+            info!(
+                "Required embed model verified: {} at {}",
+                embed_model.name,
+                ModelCache::cached_path(&embed_models_dir, &embed_model).display()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // FAIL BOOT — embed model is a hard requirement
+            Err(RuntimeError::RequiredModelMissing {
+                model_name: embed_model.name.clone(),
+                reason: format!("verification/download failed: {}", e),
+            })
+        }
+    }
 }
 
 /// Verify a single model or download it if missing/corrupt.
@@ -870,7 +933,7 @@ mod tests {
         let result = boot().await;
         assert!(result.is_ok());
 
-        let boot_result = result.unwrap();
+        let boot_result = result.expect("boot should complete successfully without speech models");
         assert!(!boot_result.actor_handles.is_empty());
         assert!(!boot_result.expected_actors.is_empty());
     }
@@ -894,7 +957,7 @@ mod tests {
         let result = spawn_actors(bus, &config).await;
         assert!(result.is_ok());
 
-        let (handles, expected) = result.unwrap();
+        let (handles, expected) = result.expect("spawn_actors should create handles and expected list");
         assert_eq!(handles.len(), expected.len());
         assert!(expected.contains(&"soul"));
         assert!(expected.contains(&"inference"));
@@ -940,7 +1003,7 @@ mod tests {
 
         let result = detect_onboarding_state().await;
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should be true (onboarding required)
+        assert!(result.expect("detect_onboarding_state should return Ok for first boot")); // Should be true (onboarding required)
     }
 
     // NOTE: Test for onboarding_complete marker is omitted due to environment
