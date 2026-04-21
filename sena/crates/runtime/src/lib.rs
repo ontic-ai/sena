@@ -31,7 +31,6 @@ pub mod config;
 pub mod download_manager;
 pub mod error;
 pub mod health;
-pub mod ipc_server;
 pub mod llama_backend;
 pub mod supervisor;
 
