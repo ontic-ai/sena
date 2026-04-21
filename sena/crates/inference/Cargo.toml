@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 bus = { path = "../bus" }
 text = { path = "../text" }
+infer.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true

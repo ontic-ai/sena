@@ -19,3 +19,9 @@ pub use queue::{InferenceQueue, WorkItem, WorkKind};
 pub use registry::{ModelInfo, ModelRegistry, discover_models};
 pub use stream::InferenceStream;
 pub use types::{BackendType, InferenceParams};
+
+// Re-export infer backend types for use by inference subsystem components.
+pub use infer::{
+    ChatTemplate, ExtractionResult, InferError as BackendError, InferenceBackend as LlmBackend,
+    LlamaBackend,
+};
