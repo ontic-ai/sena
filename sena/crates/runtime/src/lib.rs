@@ -32,7 +32,6 @@ pub mod download_manager;
 pub mod error;
 pub mod health;
 pub mod llama_backend;
-pub mod ipc_server;
 pub mod single_instance;
 pub mod supervisor;
 
@@ -41,7 +40,6 @@ pub use config::{SenaConfig, load_or_create_config, save_config};
 pub use download_manager::{DownloadClient, DownloadError, ModelCache};
 pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};
-pub use ipc_server::{IpcCommand, IpcServer, spawn_ipc_server};
 pub use single_instance::InstanceGuard;
 pub use supervisor::supervision_loop;
 
