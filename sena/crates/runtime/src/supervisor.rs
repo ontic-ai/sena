@@ -296,6 +296,10 @@ mod tests {
 
     #[tokio::test]
     async fn supervision_loop_completes_with_no_actors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let instance_guard =
+            crate::single_instance::InstanceGuard::acquire(temp_dir.path()).unwrap();
+
         let bus = Arc::new(EventBus::new());
         let readiness_rx = bus.subscribe_broadcast();
         let boot_result = BootResult {
@@ -304,6 +308,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec![],
             readiness_rx: Some(readiness_rx),
+            instance_guard,
         };
 
         // Spawn a task to send shutdown signal after a short delay
@@ -321,6 +326,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_gate_passes_with_no_actors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let instance_guard =
+            crate::single_instance::InstanceGuard::acquire(temp_dir.path()).unwrap();
+
         let bus = Arc::new(EventBus::new());
         let readiness_rx = bus.subscribe_broadcast();
         let mut boot_result = BootResult {
@@ -329,6 +338,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec![],
             readiness_rx: Some(readiness_rx),
+            instance_guard,
         };
 
         let mut actor_registry = ActorRegistry::new();
@@ -338,6 +348,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_gate_times_out_if_actors_dont_respond() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let instance_guard =
+            crate::single_instance::InstanceGuard::acquire(temp_dir.path()).unwrap();
+
         let bus = Arc::new(EventBus::new());
         let readiness_rx = bus.subscribe_broadcast();
         let _boot_result = BootResult {
@@ -346,6 +360,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],
             readiness_rx: Some(readiness_rx),
+            instance_guard,
         };
 
         // Don't send ActorReady — should timeout (but we use a short timeout for testing)

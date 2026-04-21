@@ -49,6 +49,10 @@ pub enum RuntimeError {
     /// Directory resolution failed.
     #[error("directory resolution failed: {0}")]
     DirectoryResolutionFailed(String),
+
+    /// Another Sena daemon instance is already running.
+    #[error("another Sena instance is already running (lock file: {lock_path})")]
+    InstanceAlreadyRunning { lock_path: String },
 }
 
 #[cfg(test)]
