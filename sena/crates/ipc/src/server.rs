@@ -11,8 +11,10 @@ use tokio::sync::{RwLock, broadcast};
 /// Requests are dispatched to registered command handlers via `CommandRegistry`.
 /// Push events can be broadcast to all connected clients via the push channel.
 pub struct IpcServer {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     registry: Arc<RwLock<CommandRegistry>>,
     /// Push event broadcast channel — daemon forwards bus events here.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     push_tx: broadcast::Sender<Value>,
 }
 

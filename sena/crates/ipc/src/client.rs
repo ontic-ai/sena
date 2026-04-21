@@ -1,6 +1,6 @@
-use crate::IpcError;
+use crate::{IpcError, IpcRequest};
 #[cfg(target_os = "windows")]
-use crate::{IpcRequest, IpcResponse, PIPE_NAME, framing};
+use crate::{IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
@@ -21,7 +21,6 @@ pub struct IpcClient {
 }
 
 /// Internal message types for client communication.
-#[cfg(target_os = "windows")]
 enum ClientMessage {
     /// Send a request and expect a response.
     Request {
