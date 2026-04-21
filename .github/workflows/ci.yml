@@ -27,7 +27,8 @@ jobs:
             libxtst-dev \
             libx11-dev \
             libxi-dev \
-            xclip
+            xclip \
+            libgtk-3-dev
 
       # ── Rust toolchain — pinned to stable per rust-toolchain.toml ──
       - name: Install Rust (stable)

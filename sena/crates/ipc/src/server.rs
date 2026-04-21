@@ -1,4 +1,6 @@
-use crate::{CommandRegistry, IpcError, IpcRequest, IpcResponse, PIPE_NAME, framing};
+use crate::{CommandRegistry, IpcError};
+#[cfg(target_os = "windows")]
+use crate::{IpcRequest, IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};

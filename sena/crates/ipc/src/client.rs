@@ -1,5 +1,8 @@
-use crate::{IpcError, IpcRequest, IpcResponse, PIPE_NAME, framing};
+use crate::IpcError;
+#[cfg(target_os = "windows")]
+use crate::{IpcRequest, IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
+#[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +21,7 @@ pub struct IpcClient {
 }
 
 /// Internal message types for client communication.
+#[cfg(target_os = "windows")]
 enum ClientMessage {
     /// Send a request and expect a response.
     Request {
