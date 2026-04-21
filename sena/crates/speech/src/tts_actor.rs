@@ -121,12 +121,22 @@ impl TtsActor {
             }
         }
 
+        // Stub: synthesize immediately
+        let audio = match self.backend.synthesize(&text) {
+            Ok(audio_stream) => Some(audio_stream),
+            Err(e) => {
+                error!(error = %e, "Synthesis failed for sentence {}", sentence_index);
+                None
+            }
+        };
+
         // Insert sentence into queue (ready for stub, not ready for real impl)
+        let ready = audio.is_some(); // check before move
         let pending = PendingSentence {
             text: text.clone(),
             sentence_index,
-            audio: Some(vec![0u8; text.len() * 100]), // Stub audio
-            ready: true,                              // Stub: immediately ready
+            audio,
+            ready,
         };
         self.queue.insert(sentence_index, pending);
 
@@ -195,10 +205,12 @@ impl TtsActor {
 
     /// Play ready sentences in index order.
     async fn play_ready_sentences(&mut self, causal_id: CausalId) -> Result<(), SpeechActorError> {
+        // Clone Arc to avoid holding immutable borrow across mutable operations
         let bus = self
             .bus
             .as_ref()
-            .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
+            .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?
+            .clone();
 
         // Find all ready sentences starting from next_playback_index
         let mut indices_to_play = Vec::new();
@@ -265,10 +277,12 @@ impl TtsActor {
 
         // Emit interrupted event if we were speaking
         if self.is_speaking {
+            // Clone Arc to avoid holding immutable borrow
             let bus = self
                 .bus
                 .as_ref()
-                .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
+                .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?
+                .clone();
 
             bus.broadcast(Event::Speech(SpeechEvent::SpeakingInterrupted {
                 causal_id: CausalId::new(),
@@ -474,7 +488,7 @@ mod tests {
             PendingSentence {
                 text: "Sentence 1".to_string(),
                 sentence_index: 1,
-                audio: None,
+                audio: Some(AudioStream::new(vec![0.0; 100], 16000)),
                 ready: false,
             },
         );
@@ -483,7 +497,7 @@ mod tests {
             PendingSentence {
                 text: "Sentence 2".to_string(),
                 sentence_index: 2,
-                audio: None,
+                audio: Some(AudioStream::new(vec![0.0; 100], 16000)),
                 ready: false,
             },
         );
@@ -522,7 +536,7 @@ mod tests {
                 PendingSentence {
                     text: format!("Sentence {}", i),
                     sentence_index: i,
-                    audio: None,
+                    audio: Some(AudioStream::new(vec![0.0; 100], 16000)),
                     ready: false,
                 },
             );
@@ -600,7 +614,7 @@ mod tests {
             PendingSentence {
                 text: "Test".to_string(),
                 sentence_index: 0,
-                audio: Some(vec![0u8; 100]),
+                audio: Some(AudioStream::new(vec![0.0; 100], 16000)),
                 ready: true,
             },
         );

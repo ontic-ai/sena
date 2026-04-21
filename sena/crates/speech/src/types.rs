@@ -88,7 +88,7 @@ pub struct PendingSentence {
     /// Sentence index for ordering.
     pub sentence_index: u32,
     /// Synthesized audio (None if synthesis not yet complete).
-    pub audio: Option<Vec<u8>>,
+    pub audio: Option<AudioStream>,
     /// Whether synthesis is complete and audio is ready for playback.
     pub ready: bool,
 }
@@ -131,7 +131,7 @@ mod tests {
         let sentence = PendingSentence {
             text: "Test sentence".to_string(),
             sentence_index: 5,
-            audio: Some(vec![1, 2, 3, 4]),
+            audio: Some(AudioStream::new(vec![1.0, 2.0, 3.0, 4.0], 16000)),
             ready: true,
         };
         assert_eq!(sentence.text, "Test sentence");
