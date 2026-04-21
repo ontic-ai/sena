@@ -28,6 +28,7 @@ This section is the canonical recovery ledger for the daemon/CLI split workflow.
 | 1 | Loop registry and real-time control | #68 | `feat/loop-registry` | Merged | #80 | Merged at commit `929e58dd86f22c65e9fd652fd370cd2221501c7f`. CI follow-up issues filed: #81, #82, #83. |
 | 2 | Nested Speech Backend Recovery (Parakeet/Piper) | #59 | `feat/speech-backend-recovery` | Merged | #84 | Merged at commit `28747196c10518bd2827bbbde321775d9271d071`. Includes Parakeet STT and Piper TTS integration into nested actors. |
 | 3 | Documentation and Refactor Cleanup | #67 | `feat/docs-refactor-cleanup` | `planned` | | Documentation alignment for the daemon/CLI split and general refactor debt cleanup. |
+| 4 | Process Split Governance Alignment | #85 | `feat/process-split-governance` | `active` | | Activating branch for governance alignment and milestone reconciliation. |
 
 ### Recovery Notes
 
