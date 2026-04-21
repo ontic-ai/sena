@@ -53,6 +53,10 @@ pub enum RuntimeError {
     /// Another Sena daemon instance is already running.
     #[error("another Sena instance is already running (lock file: {lock_path})")]
     InstanceAlreadyRunning { lock_path: String },
+
+    /// Required model missing and download failed.
+    #[error("required model missing: {model_name}. Boot cannot continue. Reason: {reason}")]
+    RequiredModelMissing { model_name: String, reason: String },
 }
 
 #[cfg(test)]
@@ -73,5 +77,16 @@ mod tests {
         };
         assert!(err.to_string().contains("test_actor"));
         assert!(err.to_string().contains("channel closed"));
+    }
+
+    #[test]
+    fn required_model_missing_displays_model_name_and_reason() {
+        let err = RuntimeError::RequiredModelMissing {
+            model_name: "test-model".to_string(),
+            reason: "download failed".to_string(),
+        };
+        assert!(err.to_string().contains("test-model"));
+        assert!(err.to_string().contains("download failed"));
+        assert!(err.to_string().contains("Boot cannot continue"));
     }
 }
