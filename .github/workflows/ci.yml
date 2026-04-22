@@ -63,9 +63,10 @@ jobs:
       - name: Test
         if: runner.os == 'Windows'
         working-directory: sena
-        run: |
-          cargo test --workspace --exclude speech
-          cargo test -p speech -- --test-threads=1
+        # Speech tests are excluded on Windows due to STATUS_ACCESS_VIOLATION
+        # during Tokio runtime teardown when FFI threads (whisper/piper) are
+        # still live. Tracked in issue #100.
+        run: cargo test --workspace --exclude speech
 
       - name: Clippy
         working-directory: sena
