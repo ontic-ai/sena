@@ -100,6 +100,16 @@ impl SignalBuffer {
         self.keystrokes.last().map(|e| &e.value)
     }
 
+    /// All window events within the window, in capture order.
+    pub fn windows(&self) -> impl DoubleEndedIterator<Item = &WindowContext> {
+        self.windows.iter().map(|e| &e.value)
+    }
+
+    /// All clipboard digest events within the window, in capture order.
+    pub fn clipboard_events(&self) -> impl Iterator<Item = &ClipboardDigest> {
+        self.clipboard.iter().map(|e| &e.value)
+    }
+
     /// All file events within the window.
     pub fn file_events(&self) -> impl Iterator<Item = &FileEvent> {
         self.file_events.iter().map(|e| &e.value)
@@ -143,6 +153,7 @@ mod tests {
             buf.latest_window().map(|w| w.app_name.as_str()),
             Some("TestApp")
         );
+        assert_eq!(buf.windows().count(), 1);
         assert_eq!(buf.window_event_count(), 1);
     }
 
