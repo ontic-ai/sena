@@ -4,8 +4,8 @@
 //! the LLM. When the inference actor is available, this engine will delegate
 //! to it via the bus.
 
-use bus::events::ctp::EnrichedInferredTask;
 use crate::signal_buffer::SignalBuffer;
+use bus::events::ctp::EnrichedInferredTask;
 
 /// Derives an inferred task from the current signal buffer state.
 ///

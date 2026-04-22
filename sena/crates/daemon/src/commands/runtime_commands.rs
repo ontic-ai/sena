@@ -213,9 +213,7 @@ impl CommandHandler for SubmitOnboardingNameHandler {
             .ok_or_else(|| IpcError::InvalidPayload("missing 'name' field".to_string()))?;
 
         if name.trim().is_empty() {
-            return Err(IpcError::InvalidPayload(
-                "name cannot be empty".to_string(),
-            ));
+            return Err(IpcError::InvalidPayload("name cannot be empty".to_string()));
         }
 
         if name.len() > 50 {

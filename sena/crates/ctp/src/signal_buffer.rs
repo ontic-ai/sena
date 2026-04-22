@@ -117,10 +117,7 @@ impl SignalBuffer {
 
     /// Total number of buffered signals across all types.
     pub fn total_count(&self) -> usize {
-        self.windows.len()
-            + self.clipboard.len()
-            + self.file_events.len()
-            + self.keystrokes.len()
+        self.windows.len() + self.clipboard.len() + self.file_events.len() + self.keystrokes.len()
     }
 }
 
@@ -142,7 +139,10 @@ mod tests {
     fn buffer_stores_and_retrieves_window() {
         let mut buf = SignalBuffer::new(Duration::from_secs(60));
         buf.push_window(make_window("TestApp"));
-        assert_eq!(buf.latest_window().map(|w| w.app_name.as_str()), Some("TestApp"));
+        assert_eq!(
+            buf.latest_window().map(|w| w.app_name.as_str()),
+            Some("TestApp")
+        );
         assert_eq!(buf.window_event_count(), 1);
     }
 

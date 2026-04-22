@@ -60,7 +60,10 @@ mod tests {
     #[tokio::test]
     async fn extract_returns_empty_graph() {
         let extractor = SenaExtractor::new();
-        let result = extractor.extract("Alice works at ACME.").await.expect("extract failed");
+        let result = extractor
+            .extract("Alice works at ACME.")
+            .await
+            .expect("extract failed");
         assert!(result.is_empty());
     }
 

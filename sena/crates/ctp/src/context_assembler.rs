@@ -54,9 +54,7 @@ impl ContextAssembler {
             });
 
         // Clipboard digest summary
-        let clipboard_digest = buffer
-            .latest_clipboard()
-            .and_then(|d| d.digest.clone());
+        let clipboard_digest = buffer.latest_clipboard().and_then(|d| d.digest.clone());
 
         // Recent file events (up to 10)
         let recent_files: Vec<_> = buffer.file_events().take(10).cloned().collect();
@@ -119,8 +117,7 @@ mod tests {
     fn assembler_produces_snapshot_from_empty_buffer() {
         let assembler = ContextAssembler::new();
         let buffer = SignalBuffer::new(Duration::from_secs(60));
-        let snapshot =
-            assembler.assemble_with_previous(&buffer, Instant::now(), None);
+        let snapshot = assembler.assemble_with_previous(&buffer, Instant::now(), None);
         assert_eq!(snapshot.active_app.app_name, "Unknown");
     }
 
@@ -134,8 +131,7 @@ mod tests {
             bundle_id: None,
             timestamp: Instant::now(),
         });
-        let snapshot =
-            assembler.assemble_with_previous(&buffer, Instant::now(), None);
+        let snapshot = assembler.assemble_with_previous(&buffer, Instant::now(), None);
         assert_eq!(snapshot.active_app.app_name, "Code");
     }
 }

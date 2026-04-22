@@ -99,43 +99,73 @@ impl EventBus {
         let event_type = match &event {
             Event::System(e) => {
                 let s = format!("System::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Platform(e) => {
                 let s = format!("Platform::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::CTP(e) => {
                 let s = format!("CTP::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Inference(e) => {
                 let s = format!("Inference::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Memory(e) => {
                 let s = format!("Memory::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Soul(e) => {
                 let s = format!("Soul::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Speech(e) => {
                 let s = format!("Speech::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Model(e) => {
                 let s = format!("Model::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Download(e) => {
                 let s = format!("Download::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
             Event::Telemetry(e) => {
                 let s = format!("Telemetry::{:?}", e);
-                s.split('(').next().map(|s| s.to_string()).unwrap_or_else(|| s)
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
             }
         };
 

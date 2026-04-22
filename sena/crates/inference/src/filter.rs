@@ -33,11 +33,7 @@ impl OutputFilter {
         // Strip horizontal rules
         let text = text.replace("---", "");
         // Collapse excess whitespace without changing sentence structure
-        let text: String = text
-            .lines()
-            .map(|l| l.trim())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let text: String = text.lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         // Collapse multiple spaces
         let mut output = String::with_capacity(text.len());
         let mut prev_space = false;

@@ -16,12 +16,14 @@
 //! - On non-Windows platforms, tray is unavailable and returns an error.
 
 use std::sync::mpsc;
+#[cfg(target_os = "windows")]
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
 /// Tray menu item IDs.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     LaunchCli,
@@ -31,12 +33,14 @@ pub enum TrayAction {
 }
 
 /// Tray tooltip update message.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct TooltipUpdate {
     pub text: String,
 }
 
 /// Tray loop result.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug)]
 pub enum TrayLoopResult {
     Shutdown,
@@ -249,27 +253,19 @@ fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     Ok(icon)
 }
 
-#[cfg(target_os = "macos")]
-fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    Err("Icon loading not supported on macOS".into())
-}
-
-#[cfg(target_os = "linux")]
-fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    Err("Icon loading not supported on Linux".into())
-}
-
 /// Decode ICO file to RGBA bytes.
 ///
 /// # Phase 2 Limitation
 ///
 /// ICO decoding is not implemented. Returns an error.
 /// When needed, use the `ico` crate or similar for proper ICO parsing.
+#[cfg(target_os = "windows")]
 fn decode_ico(_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Err("ICO decoding not implemented — .ico asset not available in Phase 2".into())
 }
 
 /// Create a magenta fallback icon (32x32 solid magenta).
+#[cfg(target_os = "windows")]
 fn create_magenta_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     let mut rgba = Vec::with_capacity(32 * 32 * 4);
     for _ in 0..(32 * 32) {

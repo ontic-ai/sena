@@ -38,7 +38,10 @@ impl Default for SenaEmbedder {
 #[async_trait]
 impl Embedder for SenaEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EchoError> {
-        debug!(text_len = text.len(), "SenaEmbedder: embed (stub — zero vector)");
+        debug!(
+            text_len = text.len(),
+            "SenaEmbedder: embed (stub — zero vector)"
+        );
 
         if text.is_empty() {
             return Err(EchoError {
