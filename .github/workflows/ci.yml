@@ -56,8 +56,16 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
+        if: runner.os != 'Windows'
         working-directory: sena
         run: cargo test --workspace
+
+      - name: Test
+        if: runner.os == 'Windows'
+        working-directory: sena
+        run: |
+          cargo test --workspace --exclude speech
+          cargo test -p speech -- --test-threads=1
 
       - name: Clippy
         working-directory: sena
@@ -74,4 +82,4 @@ jobs:
             exit 0
           fi
 
-          rustfmt --check --edition 2024 "${files[@]}"
+          rustup run stable rustfmt --check --edition 2024 "${files[@]}"
