@@ -14,6 +14,7 @@ mod shell;
 use error::CliError;
 use ipc::IpcClient;
 use shell::Shell;
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
