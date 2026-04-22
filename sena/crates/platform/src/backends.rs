@@ -6,9 +6,7 @@
 
 use crate::backend::PlatformBackend;
 use crate::error::PlatformError;
-use crate::types::{
-    ClipboardDigest, KeystrokeCadence, PlatformSignal, ScreenFrame, WindowContext,
-};
+use crate::types::{ClipboardDigest, KeystrokeCadence, PlatformSignal, ScreenFrame, WindowContext};
 use std::time::{Duration, Instant};
 use tracing::debug;
 

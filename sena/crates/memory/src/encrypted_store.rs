@@ -22,7 +22,10 @@ impl EncryptedStore {
     /// The store file is not created or opened until the first actual read/write.
     pub fn new(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
-        debug!(?path, "EncryptedStore: registered path (stub — not yet open)");
+        debug!(
+            ?path,
+            "EncryptedStore: registered path (stub — not yet open)"
+        );
         Self { path }
     }
 

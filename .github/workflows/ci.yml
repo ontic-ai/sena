@@ -72,14 +72,5 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
       - name: Format check
-        shell: bash
-        run: |
-          git fetch origin "${{ github.base_ref }}" --depth=1
-          mapfile -t files < <(git diff --name-only "origin/${{ github.base_ref }}"...HEAD -- 'sena/**/*.rs')
-
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "No Rust files changed"
-            exit 0
-          fi
-
-          rustup run stable rustfmt --check --edition 2024 "${files[@]}"
+        working-directory: sena
+        run: cargo fmt --all -- --check

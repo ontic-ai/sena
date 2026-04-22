@@ -43,9 +43,7 @@ impl ModelRegistry {
     /// Find a model by its name (case-insensitive stem match).
     pub fn find_by_name(&self, name: &str) -> Option<&ModelInfo> {
         let target = name.to_lowercase();
-        self.models
-            .iter()
-            .find(|m| m.name.to_lowercase() == target)
+        self.models.iter().find(|m| m.name.to_lowercase() == target)
     }
 }
 

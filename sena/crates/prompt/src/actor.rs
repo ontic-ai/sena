@@ -70,10 +70,9 @@ impl Actor for PromptActor {
     }
 
     async fn run(&mut self) -> Result<(), ActorError> {
-        let rx = self
-            .rx
-            .as_mut()
-            .ok_or_else(|| ActorError::StartupFailed("rx not initialized — call start() first".to_string()))?;
+        let rx = self.rx.as_mut().ok_or_else(|| {
+            ActorError::StartupFailed("rx not initialized — call start() first".to_string())
+        })?;
 
         let name = "prompt";
         info!(actor = name, "PromptActor running");

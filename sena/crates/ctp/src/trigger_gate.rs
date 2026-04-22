@@ -42,7 +42,11 @@ impl TriggerGate {
     /// Returns `true` if:
     /// 1. The minimum interval since the last trigger has elapsed, AND
     /// 2. The snapshot's significance score exceeds the sensitivity threshold.
-    pub fn should_trigger(&mut self, snapshot: &ContextSnapshot, patterns: &[SignalPattern]) -> bool {
+    pub fn should_trigger(
+        &mut self,
+        snapshot: &ContextSnapshot,
+        patterns: &[SignalPattern],
+    ) -> bool {
         // Enforce minimum interval
         if let Some(last) = self.last_trigger
             && last.elapsed() < self.min_interval
@@ -80,11 +84,7 @@ impl TriggerGate {
     /// Compute a significance score [0.0, 1.0] from the snapshot and patterns.
     ///
     /// BONES stub: uses simple heuristics based on task confidence and pattern count.
-    fn compute_significance(
-        &self,
-        snapshot: &ContextSnapshot,
-        patterns: &[SignalPattern],
-    ) -> f32 {
+    fn compute_significance(&self, snapshot: &ContextSnapshot, patterns: &[SignalPattern]) -> f32 {
         let mut score: f32 = 0.0;
 
         // Boost score if an inferred task is present

@@ -1,12 +1,12 @@
-#[cfg(target_os = "windows")]
-use crate::{framing, IpcResponse, PIPE_NAME};
 use crate::{IpcError, IpcRequest};
+#[cfg(target_os = "windows")]
+use crate::{IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// IPC client for connecting to Sena daemon.
 ///
