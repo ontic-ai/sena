@@ -23,6 +23,8 @@
 //! Runtime depends on all other subsystem crates and constructs their concrete
 //! actor instances via builder functions.
 
+mod analytics;
+
 pub mod boot;
 pub mod builder;
 pub mod config;

@@ -115,6 +115,15 @@ pub enum SystemEvent {
         /// Failure reason.
         reason: String,
     },
+    /// inference_max_tokens was automatically adjusted based on observed usage.
+    TokenBudgetAutoTuned {
+        /// Previous token limit.
+        old_max_tokens: usize,
+        /// New token limit after tuning.
+        new_max_tokens: usize,
+        /// P95 token count from the observation window that drove this decision.
+        p95_tokens: usize,
+    },
     /// System wake event — emitted when OS wakes from sleep.
     SystemWake,
     /// System sleep event — emitted when OS is about to sleep.
@@ -242,6 +251,16 @@ mod tests {
             reason: "speech models unavailable".to_string(),
         };
         assert!(matches!(event, SystemEvent::BootFailed { .. }));
+    }
+
+    #[test]
+    fn token_budget_auto_tuned_event_constructs() {
+        let event = SystemEvent::TokenBudgetAutoTuned {
+            old_max_tokens: 512,
+            new_max_tokens: 768,
+            p95_tokens: 640,
+        };
+        assert!(matches!(event, SystemEvent::TokenBudgetAutoTuned { .. }));
     }
 
     #[test]

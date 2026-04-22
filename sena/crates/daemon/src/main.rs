@@ -241,6 +241,16 @@ async fn forward_bus_events_to_ipc(
                 "type": "boot_failed",
                 "reason": reason,
             })),
+            Event::System(bus::SystemEvent::TokenBudgetAutoTuned {
+                old_max_tokens,
+                new_max_tokens,
+                p95_tokens,
+            }) => Some(json!({
+                "type": "token_budget_auto_tuned",
+                "old_max_tokens": old_max_tokens,
+                "new_max_tokens": new_max_tokens,
+                "p95_tokens": p95_tokens,
+            })),
             // Loop status changed events
             Event::System(bus::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
                 Some(json!({

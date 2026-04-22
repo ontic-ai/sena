@@ -22,13 +22,33 @@ impl CommandHandler for ConfigGetHandler {
             IpcError::InvalidPayload("missing or invalid 'key' field".to_string())
         })?;
 
-        // Phase 2 limitation: no runtime config subsystem yet.
-        // Return null value with note.
-        Ok(json!({
-            "key": key,
-            "value": null,
-            "note": "Config subsystem not yet implemented"
-        }))
+        let config = runtime::load_or_create_config()
+            .await
+            .map_err(|e| IpcError::Internal(format!("failed to load config: {}", e)))?;
+
+        let value = match key {
+            "file_watch_paths" => json!(
+                config
+                    .file_watch_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+            ),
+            "clipboard_observation_enabled" => json!(config.clipboard_observation_enabled),
+            "speech_enabled" => json!(config.speech_enabled),
+            "inference_max_tokens" => json!(config.inference_max_tokens),
+            "auto_tune_tokens" => json!(config.auto_tune_tokens),
+            "auto_tune_min_tokens" => json!(config.auto_tune_min_tokens),
+            "auto_tune_max_tokens" => json!(config.auto_tune_max_tokens),
+            _ => {
+                return Err(IpcError::InvalidPayload(format!(
+                    "unknown config key '{}'",
+                    key
+                )));
+            }
+        };
+
+        Ok(json!({ "key": key, "value": value }))
     }
 }
 
@@ -50,14 +70,22 @@ impl CommandHandler for ConfigSetHandler {
             IpcError::InvalidPayload("missing or invalid 'key' field".to_string())
         })?;
 
-        let _value = payload
+        let value = payload
             .get("value")
-            .ok_or_else(|| IpcError::InvalidPayload("missing 'value' field".to_string()))?;
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                IpcError::InvalidPayload("missing or invalid 'value' field".to_string())
+            })?;
 
-        // Phase 2 limitation: no runtime config subsystem yet.
-        Err(IpcError::CommandNotReady(format!(
-            "Config write not yet implemented (key: {})",
-            key
-        )))
+        runtime::config::apply_config_set(key, value)
+            .await
+            .map_err(IpcError::CommandFailed)?;
+
+        Ok(json!({
+            "key": key,
+            "value": value,
+            "saved": true,
+            "restart_required": true,
+        }))
     }
 }

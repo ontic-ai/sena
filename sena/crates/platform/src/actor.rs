@@ -129,6 +129,7 @@ impl PlatformActor {
         window_interval: Duration,
         clipboard_interval: Duration,
         keystroke_interval: Duration,
+        clipboard_enabled: bool,
     ) {
         use bus::events::system::SystemEvent;
 
@@ -228,7 +229,7 @@ impl PlatformActor {
                 }
 
                 _ = clipboard_tick.tick() => {
-                    if !platform_polling_enabled {
+                    if !platform_polling_enabled || !clipboard_enabled {
                         continue;
                     }
                     match self.backend.clipboard_content() {

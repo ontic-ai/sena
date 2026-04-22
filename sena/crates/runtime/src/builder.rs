@@ -188,10 +188,13 @@ pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
 }
 
 /// Build the inference actor with a stub backend.
-pub fn build_inference_actor() -> Result<inference::InferenceActor, RuntimeError> {
+pub fn build_inference_actor(
+    inference_max_tokens: usize,
+) -> Result<inference::InferenceActor, RuntimeError> {
     tracing::debug!("building inference actor with stub backend");
     let backend = Box::new(StubInferenceBackend);
-    let actor = inference::InferenceActor::new(backend);
+    let actor =
+        inference::InferenceActor::new(backend).with_inference_max_tokens(inference_max_tokens);
     Ok(actor)
 }
 
@@ -335,7 +338,7 @@ mod tests {
 
     #[test]
     fn inference_actor_builds() {
-        let result = build_inference_actor();
+        let result = build_inference_actor(512);
         assert!(result.is_ok());
     }
 
