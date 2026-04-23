@@ -187,10 +187,6 @@ pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
     Ok(actor)
 }
 
-/// Build the inference actor with a stub backend.
-pub fn build_inference_actor(
-    inference_max_tokens: usize,
-) -> Result<inference::InferenceActor, RuntimeError> {
 /// Build the inference actor with a real backend if available, stub otherwise.
 ///
 /// Attempts to discover and load a GGUF model from the default models directory.
