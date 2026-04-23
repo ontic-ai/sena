@@ -3,6 +3,7 @@
 use crate::builder;
 use crate::download_manager::{DownloadClient, ModelCache};
 use crate::error::RuntimeError;
+use crate::single_instance::InstanceGuard;
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::EncryptionLayer;
 use sha2::Digest;
@@ -33,20 +34,25 @@ pub struct BootResult {
     /// Subscribed BEFORE actors are spawned to avoid missing early ActorReady events.
     /// Should be taken (consumed) by the supervisor's readiness gate.
     pub readiness_rx: Option<tokio::sync::broadcast::Receiver<Event>>,
+    /// Single-instance guard. Must be held for process lifetime.
+    /// When dropped, another daemon instance can start.
+    pub instance_guard: InstanceGuard,
 }
 
 /// Execute the boot sequence.
 ///
 /// Boot order:
-/// 1. Config load
+/// 0. Single-instance enforcement (acquire lock)
+/// 1. Config load (stub)
 /// 2. Onboarding state detection
 /// 3. Encryption init
 /// 4. EventBus init
-/// 5. Speech model verification and repair
-/// 6. Soul init
-/// 7. Core actors spawn
-/// 8. Wait for all ActorReady events (handled by supervisor)
-/// 9. Emit BootComplete (handled by supervisor)
+/// 5. Speech model verification and repair (permissive)
+/// 6. Required embed model verification (strict — boot fails if missing)
+/// 7. Soul init
+/// 8. Core actors spawn
+/// 9. Wait for all ActorReady events (handled by supervisor)
+/// 10. Emit BootComplete (handled by supervisor)
 ///
 /// Returns BootResult on success, RuntimeError on failure.
 pub async fn boot() -> Result<BootResult, RuntimeError> {
@@ -56,6 +62,28 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Suppress llama.cpp stderr logs early to prevent corruption of TUI terminal state.
     // Must be called before any inference backend initialization occurs.
     inference::suppress_llama_logs();
+
+    // Step 0: Single-instance enforcement
+    let step_start = Instant::now();
+    info!("Step 0/7: Acquiring instance lock");
+    let sena_dir = resolve_sena_dir()?;
+    fs::create_dir_all(&sena_dir)
+        .await
+        .map_err(|e| RuntimeError::DirectoryResolutionFailed(e.to_string()))?;
+
+    let instance_guard = InstanceGuard::acquire(&sena_dir).map_err(|e| {
+        let lock_path = sena_dir.join(".sena.lock");
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock => RuntimeError::InstanceAlreadyRunning {
+                lock_path: lock_path.display().to_string(),
+            },
+            _ => RuntimeError::DirectoryResolutionFailed(format!(
+                "failed to acquire instance lock: {}",
+                e
+            )),
+        }
+    })?;
+    check_step_timing("instance lock", step_start);
 
     // Step 1: Config load
     let step_start = Instant::now();
@@ -100,19 +128,25 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
 
     // Step 5: Speech model verification and repair
     let step_start = Instant::now();
-    info!("Step 5/7: Verifying speech models");
+    info!("Step 5/8: Verifying speech models");
     verify_and_repair_speech_models(bus.clone()).await?;
     check_step_timing("speech model verification", step_start);
 
-    // Step 6: Soul init
+    // Step 6: Required embed model verification (strict)
     let step_start = Instant::now();
-    info!("Step 6/7: Initializing Soul subsystem");
+    info!("Step 6/8: Verifying required embedding model");
+    verify_required_embed_model(bus.clone()).await?;
+    check_step_timing("embed model verification", step_start);
+
+    // Step 7: Soul init
+    let step_start = Instant::now();
+    info!("Step 7/8: Initializing Soul subsystem");
     init_soul(bus.clone(), encryption.clone()).await?;
     check_step_timing("soul init", step_start);
 
-    // Step 7: Core actors spawn
+    // Step 8: Core actors spawn
     let step_start = Instant::now();
-    info!("Step 7/7: Spawning core actors");
+    info!("Step 8/8: Spawning core actors");
     let (actor_handles, expected_actors) = spawn_actors(bus.clone(), &config).await?;
     check_step_timing("actor spawn", step_start);
 
@@ -130,6 +164,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         actor_handles,
         expected_actors,
         readiness_rx: Some(readiness_rx),
+        instance_guard,
     })
 }
 
@@ -190,6 +225,14 @@ fn resolve_sena_dir() -> Result<PathBuf, RuntimeError> {
 fn resolve_models_dir() -> Result<PathBuf, RuntimeError> {
     let sena_dir = resolve_sena_dir()?;
     Ok(sena_dir.join("models").join("speech"))
+}
+
+/// Resolve the embedding models directory within the Sena config directory.
+///
+/// Returns `<sena_dir>/models/embed/`.
+fn resolve_embed_models_dir() -> Result<PathBuf, RuntimeError> {
+    let sena_dir = resolve_sena_dir()?;
+    Ok(sena_dir.join("models").join("embed"))
 }
 
 /// Detect first boot and onboarding state.
@@ -257,6 +300,54 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
 
     info!("Speech model verification complete — available models verified");
     Ok(())
+}
+
+/// Verify and download the required embedding model.
+///
+/// This is a STRICT boot requirement. Unlike speech models, the embedding model
+/// is mandatory for Sena's memory subsystem to function. If the model is missing
+/// or corrupt, this function will:
+/// - Attempt to download it
+/// - FAIL BOOT if download fails
+///
+/// Returns Ok(()) if the model is present and verified.
+/// Returns Err(RuntimeError::RequiredModelMissing) if the model cannot be obtained.
+async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeError> {
+    let embed_models_dir = resolve_embed_models_dir()?;
+
+    // Ensure embed models directory exists
+    fs::create_dir_all(&embed_models_dir)
+        .await
+        .map_err(|e| RuntimeError::DirectoryResolutionFailed(e.to_string()))?;
+
+    info!("Embed models directory: {}", embed_models_dir.display());
+
+    // Get the required embed model
+    let embed_model = ModelManifest::required_embed_model();
+    info!(
+        "Verifying required embed model: {} ({:.2} MB)",
+        embed_model.name,
+        embed_model.size_bytes as f64 / 1_000_000.0
+    );
+
+    // Verify or download the model — STRICT: fail boot on error
+    match verify_model(&embed_models_dir, &embed_model, bus.clone()).await {
+        Ok(()) => {
+            info!(
+                "Required embed model verified: {} at {}",
+                embed_model.name,
+                ModelCache::cached_path(&embed_models_dir, &embed_model).display()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // FAIL BOOT — embed model is a hard requirement
+            Err(RuntimeError::RequiredModelMissing {
+                model_name: embed_model.name.clone(),
+                reason: format!("verification/download failed: {}", e),
+            })
+        }
+    }
 }
 
 /// Verify a single model or download it if missing/corrupt.
@@ -836,13 +927,62 @@ mod tests {
 
     #[tokio::test]
     async fn boot_sequence_completes() {
-        // Boot sequence should complete successfully even without speech models.
+        // Boot sequence should complete successfully with minimal setup.
         // Speech model verification is permissive: missing models trigger warnings
         // but do not block boot. Actors fall back to stub backends.
+        //
+        // Embed model verification is STRICT: boot fails if the required embed
+        // model is missing. This test creates a stub embed model file to satisfy
+        // the strict requirement.
+        let temp_dir = tempdir().expect("create tempdir");
+
+        // Override APPDATA/HOME for this test
+        #[cfg(target_os = "windows")]
+        unsafe {
+            std::env::set_var("APPDATA", temp_dir.path());
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+
+        // Create embed models directory and stub embed model file
+        let embed_model = ModelManifest::required_embed_model();
+
+        #[cfg(target_os = "windows")]
+        let embed_models_dir = temp_dir.path().join("sena").join("models").join("embed");
+
+        #[cfg(target_os = "macos")]
+        let embed_models_dir = temp_dir
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("sena")
+            .join("models")
+            .join("embed");
+
+        #[cfg(target_os = "linux")]
+        let embed_models_dir = temp_dir
+            .path()
+            .join(".config")
+            .join("sena")
+            .join("models")
+            .join("embed");
+
+        fs::create_dir_all(&embed_models_dir)
+            .await
+            .expect("create embed models dir");
+
+        let model_path = ModelCache::cached_path(&embed_models_dir, &embed_model);
+        fs::write(&model_path, b"stub embed model data")
+            .await
+            .expect("write stub embed model");
+
         let result = boot().await;
         assert!(result.is_ok());
 
-        let boot_result = result.unwrap();
+        let boot_result = result.expect("boot should complete successfully with stub embed model");
         assert!(!boot_result.actor_handles.is_empty());
         assert!(!boot_result.expected_actors.is_empty());
     }
@@ -866,7 +1006,8 @@ mod tests {
         let result = spawn_actors(bus, &config).await;
         assert!(result.is_ok());
 
-        let (handles, expected) = result.unwrap();
+        let (handles, expected) =
+            result.expect("spawn_actors should create handles and expected list");
         assert_eq!(handles.len(), expected.len());
         assert!(expected.contains(&"soul"));
         assert!(expected.contains(&"inference"));
@@ -912,7 +1053,7 @@ mod tests {
 
         let result = detect_onboarding_state().await;
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should be true (onboarding required)
+        assert!(result.expect("detect_onboarding_state should return Ok for first boot")); // Should be true (onboarding required)
     }
 
     // NOTE: Test for onboarding_complete marker is omitted due to environment
