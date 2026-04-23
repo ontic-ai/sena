@@ -53,6 +53,10 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     let boot_start = Instant::now();
     info!("BOOT START: Sena runtime initializing");
 
+    // Suppress llama.cpp stderr logs early to prevent corruption of TUI terminal state.
+    // Must be called before any inference backend initialization occurs.
+    inference::suppress_llama_logs();
+
     // Step 1: Config load
     let step_start = Instant::now();
     info!("Step 1/7: Loading configuration");

@@ -77,7 +77,7 @@ Before adding any dependency, ask:
 
 | Crate | Reason |
 |---|---|
-| `reqwest` / any HTTP client | No network calls in Phase 1–3 |
+| `reqwest` / any HTTP client | Banned for general networking and cloud AI usage (no cloud LLM calls, no user-facing HTTP features). **Narrow exception:** `crates/runtime` download manager for automated provisioning of local GGUF model files only. Must not be used outside this specific local-model-download use case. |
 | `openai` / any cloud AI SDK | Violates P1 (local-first) |
 | `rusqlite` / `sqlite` / `sqlx` | Replaced by `redb` (Soul) and `ech0` (memory). SQLite is not in this stack. |
 | `lazy_static` | Use `std::sync::OnceLock` or `once_cell` |

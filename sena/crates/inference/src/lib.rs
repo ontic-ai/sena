@@ -19,3 +19,20 @@ pub use queue::{InferenceQueue, WorkItem, WorkKind};
 pub use registry::{ModelInfo, ModelRegistry, discover_models};
 pub use stream::InferenceStream;
 pub use types::{BackendType, InferenceParams};
+
+// Re-export infer backend types for use by inference subsystem components.
+pub use infer::{
+    ChatTemplate, ExtractionResult, InferError as BackendError, InferenceBackend as LlmBackend,
+    LlamaBackend,
+};
+
+/// Suppress all llama.cpp log output to prevent TUI terminal corruption.
+///
+/// Call this before entering any full-screen TUI mode or early in boot.
+/// llama.cpp writes model-load progress and debug info directly to stderr
+/// via C callbacks, which corrupts ratatui's alternate screen buffer.
+/// This installs a no-op log callback globally, silencing all llama.cpp
+/// output permanently for the lifetime of the process.
+pub fn suppress_llama_logs() {
+    infer::suppress_llama_logs();
+}

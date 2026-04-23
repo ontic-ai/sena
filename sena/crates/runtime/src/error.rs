@@ -46,6 +46,10 @@ pub enum RuntimeError {
     #[error("model verification failed: {0}")]
     ModelVerificationFailed(String),
 
+    /// Model loading failed.
+    #[error("model load failed: {0}")]
+    ModelLoadFailed(String),
+
     /// Directory resolution failed.
     #[error("directory resolution failed: {0}")]
     DirectoryResolutionFailed(String),

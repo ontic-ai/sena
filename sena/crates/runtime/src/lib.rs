@@ -31,6 +31,7 @@ pub mod config;
 pub mod download_manager;
 pub mod error;
 pub mod health;
+pub mod llama_backend;
 pub mod supervisor;
 
 pub use boot::{BootResult, boot};
@@ -39,6 +40,9 @@ pub use download_manager::{DownloadClient, DownloadError, ModelCache};
 pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};
 pub use supervisor::supervision_loop;
+
+// Re-export llama.cpp log suppression for CLI use.
+pub use inference::suppress_llama_logs;
 
 #[cfg(test)]
 mod tests {
