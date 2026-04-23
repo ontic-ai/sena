@@ -222,7 +222,7 @@ impl TtsActor {
             text: text.clone(),
             sentence_index,
             audio,
-                ready: true, // Synthesis is synchronous, so queue entry is ready.
+            ready: true, // Synthesis is synchronous, so queue entry is ready.
         };
         self.queue.insert(sentence_index, pending);
 
