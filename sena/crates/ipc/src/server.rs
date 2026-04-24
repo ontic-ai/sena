@@ -73,7 +73,25 @@ impl IpcServer {
             let connected = std::mem::replace(&mut server, next);
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(connected, registry, push_rx).await {
-                    error!(error = %e, "IPC client error");
+                    match &e {
+                        IpcError::ConnectionClosed => {
+                            tracing::debug!("IPC client disconnected");
+                        }
+                        IpcError::Io(io_err)
+                            if matches!(
+                                io_err.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::UnexpectedEof
+                            ) =>
+                        {
+                            tracing::debug!(error = %io_err, "IPC client disconnected");
+                        }
+                        _ => {
+                            error!(error = %e, "IPC client error");
+                        }
+                    }
                 }
             });
         }

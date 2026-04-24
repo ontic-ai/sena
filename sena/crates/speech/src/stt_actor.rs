@@ -8,6 +8,7 @@ use bus::causal::CausalId;
 use bus::events::{SpeechEvent, SystemEvent};
 use bus::{Actor, ActorError, Event, EventBus};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 #[cfg(test)]
 use tracing::debug;
@@ -37,6 +38,12 @@ pub struct SttActor {
 impl SttActor {
     /// Create a new STT actor with the given backend.
     pub fn new(backend: Box<dyn SttBackend>) -> Self {
+        let preferred_chunk_samples = backend.preferred_chunk_samples().max(1);
+        let mut audio_config = AudioInputConfig::default();
+        let preferred_chunk_secs =
+            preferred_chunk_samples as f32 / audio_config.sample_rate as f32;
+        audio_config.buffer_duration_secs = preferred_chunk_secs.clamp(0.05, 0.25);
+
         Self {
             backend,
             bus: None,
@@ -46,7 +53,7 @@ impl SttActor {
             listen_mode_active: false,
             listen_mode_causal_id: None,
             loop_enabled: true,
-            audio_config: AudioInputConfig::default(),
+            audio_config,
             audio_stream: None,
             audio_rx: None,
             #[cfg(test)]
@@ -382,6 +389,7 @@ impl Actor for SttActor {
 impl SttActor {
     /// Process an incoming audio chunk by feeding it to the backend and handling events.
     async fn process_audio_chunk(&mut self, chunk: AudioChunk) -> Result<(), SpeechActorError> {
+        let start = Instant::now();
         match self.backend.feed(&chunk.samples) {
             Ok(events) => {
                 for event in events {
@@ -391,6 +399,11 @@ impl SttActor {
             Err(e) => {
                 return Err(SpeechActorError::Stt(e));
             }
+        }
+
+        let elapsed_ms = start.elapsed().as_millis();
+        if elapsed_ms > 250 {
+            warn!(elapsed_ms = elapsed_ms, "STT chunk processing latency is high");
         }
         Ok(())
     }

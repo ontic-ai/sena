@@ -168,10 +168,7 @@ impl Shell {
 
                 if let Some(line) = Self::format_push_event(&event) {
                     if let Ok(mut log) = push_log.lock() {
-                        log.push(line);
-                        if log.len() > 500 {
-                            log.drain(0..100);
-                        }
+                        Self::append_push_line(&mut log, line);
                     }
                 }
             }
@@ -194,6 +191,24 @@ impl Shell {
         })
     }
 
+    fn append_push_line(log: &mut Vec<String>, line: String) {
+        if let Some(fragment) = line.strip_prefix("[STT~] ") {
+            if let Some(last) = log.last_mut()
+                && last.starts_with("[STT~] ")
+            {
+                last.push_str(fragment);
+            } else {
+                log.push(line);
+            }
+        } else {
+            log.push(line);
+        }
+
+        if log.len() > 500 {
+            log.drain(0..100);
+        }
+    }
+
     fn format_push_event(event: &Value) -> Option<String> {
         let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let data = event.get("data").cloned().unwrap_or(Value::Null);
@@ -207,6 +222,10 @@ impl Shell {
                 } else {
                     Some(format!("[STT] \"{}\"", text))
                 }
+            }
+            "ListenModeTranscription" => {
+                let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                Some(format!("[STT~] {}", text))
             }
             "InferenceSentenceReady" => {
                 let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -822,6 +841,12 @@ impl Shell {
             spans.push(Span::styled(
                 format!("[{}] {:.1} / {:.1} GB", bar, used_gb, total_gb),
                 vram_style,
+            ));
+        } else {
+            spans.push(Span::raw("  VRAM "));
+            spans.push(Span::styled(
+                "[░░░░░░░░░░] n/a",
+                Style::default().fg(Color::DarkGray),
             ));
         }
 

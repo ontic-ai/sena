@@ -14,6 +14,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::process::Command;
 use text::SentenceBoundaryIterator;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
@@ -650,8 +652,20 @@ impl InferenceActor {
                     if enabled {
                         let backend_guard = backend.lock().await;
                         if backend_guard.is_loaded() {
-                            let (used_mb, total_mb, percent) = backend_guard.vram_usage();
+                            let (mut used_mb, mut total_mb, mut percent) = backend_guard.vram_usage();
                             drop(backend_guard);
+
+                            if total_mb == 0 {
+                                let (fallback_used, fallback_total) = poll_system_vram_usage();
+                                used_mb = fallback_used;
+                                total_mb = fallback_total;
+                                percent = if fallback_total == 0 {
+                                    0
+                                } else {
+                                    ((fallback_used.saturating_mul(100)) / fallback_total)
+                                        .min(100) as u8
+                                };
+                            }
 
                             let normalized_percent = if total_mb == 0 { 0 } else { percent };
                             let _ = bus.broadcast(Event::System(bus::SystemEvent::VramUsageUpdated {
@@ -696,6 +710,54 @@ impl InferenceActor {
 
         debug!("vram monitoring loop exited");
     }
+}
+
+#[cfg(target_os = "windows")]
+fn poll_system_vram_usage() -> (u32, u32) {
+    parse_nvidia_smi_vram(
+        Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
+            .output(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn poll_system_vram_usage() -> (u32, u32) {
+    parse_nvidia_smi_vram(
+        Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
+            .output(),
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn poll_system_vram_usage() -> (u32, u32) {
+    (0, 0)
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn parse_nvidia_smi_vram(output: std::io::Result<std::process::Output>) -> (u32, u32) {
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(first_line) = stdout.lines().next() {
+            let parts: Vec<&str> = first_line.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 2
+                && let (Ok(used), Ok(total)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+            {
+                return (used, total);
+            }
+        }
+    }
+
+    (0, 0)
 }
 
 impl Actor for InferenceActor {

@@ -33,7 +33,8 @@ impl Default for AudioInputConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16_000,
-            buffer_duration_secs: 1.0,
+            // 100ms chunks keep streaming responsive while remaining stable on CPU.
+            buffer_duration_secs: 0.1,
         }
     }
 }
@@ -335,7 +336,7 @@ mod tests {
     fn audio_input_config_defaults() {
         let config = AudioInputConfig::default();
         assert_eq!(config.sample_rate, 16_000);
-        assert_eq!(config.buffer_duration_secs, 1.0);
+        assert_eq!(config.buffer_duration_secs, 0.1);
     }
 
     #[test]

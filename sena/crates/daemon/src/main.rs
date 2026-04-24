@@ -198,10 +198,9 @@ async fn forward_bus_events_to_ipc(
             })),
             Event::Speech(bus::SpeechEvent::ListenModeTranscription { text, .. }) => {
                 Some(json!({
-                    "type": "TranscriptionCompleted",
+                    "type": "ListenModeTranscription",
                     "data": {
                         "text": text,
-                        "confidence": serde_json::Value::Null,
                     }
                 }))
             }
