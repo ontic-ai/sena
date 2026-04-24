@@ -110,7 +110,7 @@ async fn main() -> Result<(), DaemonError> {
                 runtime_state_clone.mark_ready();
                 tooltip_tx_clone
                     .send(tray::TooltipUpdate {
-                        text: "Sena — Ready".to_string(),
+                        text: "Sena — Running".to_string(),
                     })
                     .ok();
                 break;
@@ -134,6 +134,8 @@ async fn main() -> Result<(), DaemonError> {
     match tray_result {
         tray::TrayLoopResult::Shutdown => {
             info!("Tray loop requested shutdown");
+            // Unblock the select! below so shutdown proceeds immediately.
+            let _ = shutdown_tx.send(());
         }
         tray::TrayLoopResult::Error(e) => {
             warn!("Tray loop error: {}", e);
@@ -185,80 +187,151 @@ async fn forward_bus_events_to_ipc(
 
     while let Ok(event) = rx.recv().await {
         let push_event = match event {
-            // Download lifecycle events
-            Event::Download(bus::DownloadEvent::Started {
-                model_name,
-                total_bytes,
-                request_id,
+            Event::Speech(bus::SpeechEvent::TranscriptionCompleted {
+                text, confidence, ..
             }) => Some(json!({
-                "type": "download_started",
-                "model_name": model_name,
-                "total_bytes": total_bytes,
-                "request_id": request_id,
+                "type": "TranscriptionCompleted",
+                "data": {
+                    "text": text,
+                    "confidence": confidence,
+                }
             })),
-            Event::Download(bus::DownloadEvent::Progress {
-                model_name,
-                bytes_downloaded,
-                total_bytes,
-                request_id,
-            }) => Some(json!({
-                "type": "download_progress",
-                "model_name": model_name,
-                "bytes_downloaded": bytes_downloaded,
-                "total_bytes": total_bytes,
-                "percent": if total_bytes > 0 { (bytes_downloaded as f64 / total_bytes as f64 * 100.0) as u8 } else { 0 },
-                "request_id": request_id,
-            })),
-            Event::Download(bus::DownloadEvent::Completed {
-                model_name,
-                cached_path,
-                request_id,
-            }) => Some(json!({
-                "type": "download_completed",
-                "model_name": model_name,
-                "cached_path": cached_path,
-                "request_id": request_id,
-            })),
-            Event::Download(bus::DownloadEvent::Failed {
-                model_name,
-                reason,
-                request_id,
-            }) => Some(json!({
-                "type": "download_failed",
-                "model_name": model_name,
-                "reason": reason,
-                "request_id": request_id,
-            })),
-            // Onboarding events
-            Event::System(bus::SystemEvent::OnboardingRequired) => Some(json!({
-                "type": "onboarding_required",
-            })),
-            Event::System(bus::SystemEvent::OnboardingCompleted) => Some(json!({
-                "type": "onboarding_completed",
-            })),
-            // Boot failed event
-            Event::System(bus::SystemEvent::BootFailed { reason }) => Some(json!({
-                "type": "boot_failed",
-                "reason": reason,
-            })),
-            Event::System(bus::SystemEvent::TokenBudgetAutoTuned {
-                old_max_tokens,
-                new_max_tokens,
-                p95_tokens,
-            }) => Some(json!({
-                "type": "token_budget_auto_tuned",
-                "old_max_tokens": old_max_tokens,
-                "new_max_tokens": new_max_tokens,
-                "p95_tokens": p95_tokens,
-            })),
-            // Loop status changed events
-            Event::System(bus::SystemEvent::LoopStatusChanged { loop_name, enabled }) => {
+            Event::Speech(bus::SpeechEvent::ListenModeTranscription { text, .. }) => {
                 Some(json!({
-                    "type": "loop_status_changed",
-                    "loop_name": loop_name,
-                    "enabled": enabled,
+                    "type": "TranscriptionCompleted",
+                    "data": {
+                        "text": text,
+                        "confidence": serde_json::Value::Null,
+                    }
                 }))
             }
+            Event::Speech(bus::SpeechEvent::SpeakingStarted { .. }) => Some(json!({
+                "type": "SpeakingStarted",
+                "data": {}
+            })),
+            Event::Speech(bus::SpeechEvent::SpeakingCompleted { .. }) => Some(json!({
+                "type": "SpeakingCompleted",
+                "data": {}
+            })),
+
+            Event::Inference(bus::InferenceEvent::InferenceSentenceReady { text, .. }) => {
+                Some(json!({
+                    "type": "InferenceSentenceReady",
+                    "data": {
+                        "text": text,
+                    }
+                }))
+            }
+            Event::Inference(bus::InferenceEvent::InferenceStreamCompleted {
+                token_count, ..
+            }) => Some(json!({
+                "type": "InferenceStreamCompleted",
+                "data": {
+                    "token_count": token_count,
+                }
+            })),
+            Event::Inference(bus::InferenceEvent::ModelLoaded {
+                model_path,
+                model_name,
+                ..
+            }) => Some(json!({
+                "type": "ModelLoaded",
+                "data": {
+                    "model_path": model_path,
+                    "model_name": model_name,
+                }
+            })),
+            Event::Inference(bus::InferenceEvent::ModelLoadFailed {
+                model_path,
+                reason,
+                ..
+            }) => Some(json!({
+                "type": "ModelLoadFailed",
+                "data": {
+                    "model_path": model_path,
+                    "reason": reason,
+                }
+            })),
+
+            Event::Memory(bus::MemoryEvent::MemoryWriteCompleted { .. })
+            | Event::Memory(bus::MemoryEvent::IngestCompleted { .. }) => Some(json!({
+                "type": "MemoryWriteCompleted",
+                "data": {}
+            })),
+            Event::Memory(bus::MemoryEvent::MemoryWriteFailed { reason, .. })
+            | Event::Memory(bus::MemoryEvent::IngestFailed { reason, .. }) => Some(json!({
+                "type": "MemoryWriteFailed",
+                "data": {
+                    "reason": reason,
+                }
+            })),
+
+            Event::System(bus::SystemEvent::ActorFailed { actor, reason }) => Some(json!({
+                "type": "ActorFailed",
+                "data": {
+                    "actor": actor,
+                    "reason": reason,
+                }
+            })),
+            Event::System(bus::SystemEvent::BootComplete) => Some(json!({
+                "type": "BootComplete",
+                "data": {}
+            })),
+            Event::System(bus::SystemEvent::ConfigUpdated { path }) => Some(json!({
+                "type": "ConfigUpdated",
+                "data": {
+                    "path": path,
+                }
+            })),
+            Event::System(bus::SystemEvent::VramUsageUpdated {
+                used_mb,
+                total_mb,
+                percent,
+            }) => Some(json!({
+                "type": "VramUsageUpdated",
+                "data": {
+                    "used_mb": used_mb,
+                    "total_mb": total_mb,
+                    "percent": percent,
+                }
+            })),
+
+            Event::CTP(ctp_event) => match ctp_event.as_ref() {
+                bus::CTPEvent::ThoughtEventTriggered(snapshot) => Some(json!({
+                    "type": "ThoughtEventTriggered",
+                    "data": {
+                        "app": snapshot.active_app.app_name,
+                        "task": snapshot
+                            .inferred_task
+                            .as_ref()
+                            .map(|t| t.semantic_description.clone()),
+                    }
+                })),
+                _ => None,
+            },
+
+            // Platform stream is preserved for acceptance checks.
+            Event::Platform(bus::PlatformEvent::ActiveWindowChanged(ctx)) => Some(json!({
+                "type": "PlatformWindowChanged",
+                "data": {
+                    "app": ctx.app_name,
+                    "title": ctx.window_title,
+                }
+            })),
+            Event::Platform(bus::PlatformEvent::ClipboardChanged(digest)) => Some(json!({
+                "type": "PlatformClipboardChanged",
+                "data": {
+                    "char_count": digest.char_count,
+                }
+            })),
+            Event::Platform(bus::PlatformEvent::FileEvent(fe)) => Some(json!({
+                "type": "PlatformFileEvent",
+                "data": {
+                    "path": fe.path.to_string_lossy(),
+                    "kind": format!("{:?}", fe.event_kind),
+                }
+            })),
+
             _ => None,
         };
 
@@ -322,13 +395,15 @@ fn handle_tray_actions(
         match action {
             tray::TrayAction::LaunchCli => {
                 info!("Tray action: Launch CLI");
-                if let Err(e) = launch_cli() {
+                if let Err(e) = launch_cli(false) {
                     error!("Failed to launch CLI: {}", e);
                 }
             }
             tray::TrayAction::ConfigEditor => {
                 info!("Tray action: Config Editor");
-                warn!("Config editor not yet implemented");
+                if let Err(e) = launch_cli(true) {
+                    error!("Failed to launch config editor: {}", e);
+                }
             }
             tray::TrayAction::OpenModels => {
                 info!("Tray action: Open Models Folder");
@@ -353,7 +428,7 @@ fn handle_tray_actions(
 /// and the CLI binary is `sena-cli.exe`. This function launches the CLI in a new
 /// terminal window by spawning `sena-cli.exe`.
 #[cfg(target_os = "windows")]
-fn launch_cli() -> Result<(), DaemonError> {
+fn launch_cli(config_mode: bool) -> Result<(), DaemonError> {
     use std::process::Command;
 
     // Get path to current executable
@@ -364,24 +439,35 @@ fn launch_cli() -> Result<(), DaemonError> {
         DaemonError::CliLaunchFailed("no parent directory for executable".to_string())
     })?;
 
-    // Look for CLI binary (Phase 4+: CLI is separate binary named "sena-cli")
-    let cli_path = exe_dir.join("sena-cli.exe");
-
-    if !cli_path.exists() {
-        return Err(DaemonError::CliLaunchFailed(format!(
-            "CLI binary not found at {:?}",
-            cli_path
-        )));
+    // Look for CLI binary in common dev/runtime layouts.
+    let mut candidates = vec![exe_dir.join("sena-cli.exe")];
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("target").join("debug").join("sena-cli.exe"));
+        candidates.push(
+            cwd.join("sena")
+                .join("target")
+                .join("debug")
+                .join("sena-cli.exe"),
+        );
     }
+
+    let cli_path = candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| DaemonError::CliLaunchFailed("CLI binary not found in expected locations".to_string()))?;
 
     // Convert path to string without unwrap — gracefully handle non-UTF8 paths
     let cli_path_str = cli_path.to_str().ok_or_else(|| {
         DaemonError::CliLaunchFailed("CLI path contains invalid UTF-8".to_string())
     })?;
 
-    // Launch in new console window
-    Command::new("cmd")
-        .args(["/c", "start", "cmd", "/k", cli_path_str])
+    // Launch in new console window via `start` with explicit title argument.
+    let mut command = Command::new("cmd");
+    command.args(["/c", "start", "", cli_path_str]);
+    if config_mode {
+        command.arg("--config");
+    }
+    command
         .spawn()
         .map_err(|e| DaemonError::CliLaunchFailed(format!("failed to spawn CLI process: {}", e)))?;
 
@@ -389,7 +475,7 @@ fn launch_cli() -> Result<(), DaemonError> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn launch_cli() -> Result<(), DaemonError> {
+fn launch_cli(_config_mode: bool) -> Result<(), DaemonError> {
     Err(DaemonError::CliLaunchFailed(
         "CLI launch not yet implemented on this platform".to_string(),
     ))

@@ -1,11 +1,21 @@
 //! Speech-related IPC command handlers.
 
 use async_trait::async_trait;
+use bus::{CausalId, Event, EventBus, SpeechEvent, SystemEvent};
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// Handler for "speech.listen_start" command.
-pub struct SpeechListenStartHandler;
+pub struct SpeechListenStartHandler {
+    bus: Arc<EventBus>,
+}
+
+impl SpeechListenStartHandler {
+    pub fn new(bus: Arc<EventBus>) -> Self {
+        Self { bus }
+    }
+}
 
 #[async_trait]
 impl CommandHandler for SpeechListenStartHandler {
@@ -18,15 +28,39 @@ impl CommandHandler for SpeechListenStartHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // Phase 2 limitation: speech loop control via bus events not yet wired.
-        Err(IpcError::CommandNotReady(
-            "Speech listen start not yet implemented".to_string(),
-        ))
+        let causal_id = CausalId::new();
+
+        self.bus
+            .broadcast(Event::System(SystemEvent::LoopControlRequested {
+                loop_name: "speech".to_string(),
+                enabled: true,
+            }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        self.bus
+            .broadcast(Event::Speech(SpeechEvent::ListenModeRequested { causal_id }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        Ok(json!({
+            "status": "requested",
+            "listening": true,
+            "causal_id": causal_id.as_u64(),
+        }))
     }
 }
 
 /// Handler for "speech.listen_stop" command.
-pub struct SpeechListenStopHandler;
+pub struct SpeechListenStopHandler {
+    bus: Arc<EventBus>,
+}
+
+impl SpeechListenStopHandler {
+    pub fn new(bus: Arc<EventBus>) -> Self {
+        Self { bus }
+    }
+}
 
 #[async_trait]
 impl CommandHandler for SpeechListenStopHandler {
@@ -39,10 +73,28 @@ impl CommandHandler for SpeechListenStopHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // Phase 2 limitation: speech loop control via bus events not yet wired.
-        Err(IpcError::CommandNotReady(
-            "Speech listen stop not yet implemented".to_string(),
-        ))
+        let causal_id = CausalId::new();
+
+        self.bus
+            .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
+                causal_id,
+            }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        self.bus
+            .broadcast(Event::System(SystemEvent::LoopControlRequested {
+                loop_name: "speech".to_string(),
+                enabled: false,
+            }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        Ok(json!({
+            "status": "requested",
+            "listening": false,
+            "causal_id": causal_id.as_u64(),
+        }))
     }
 }
 
@@ -60,11 +112,17 @@ impl CommandHandler for SpeechStatusHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // Phase 2 limitation: no runtime helper for speech actor status.
+        let status = runtime::speech_status_snapshot()
+            .await
+            .map_err(IpcError::CommandFailed)?;
+
         Ok(json!({
-            "stt_enabled": false,
-            "tts_enabled": false,
-            "note": "Speech status query not yet implemented"
+            "speech_enabled": status.speech_enabled,
+            "stt_enabled": status.stt_enabled,
+            "tts_enabled": status.tts_enabled,
+            "stt_backend": status.stt_backend,
+            "speech_models_dir": status.speech_models_dir,
+            "mode": if status.speech_enabled { "enabled" } else { "disabled" },
         }))
     }
 }

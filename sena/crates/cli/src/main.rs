@@ -21,6 +21,9 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let config_mode = args.iter().any(|arg| arg == "--config");
+
     // Route INFO-level (and above) logs to stdout by default.
     // RUST_LOG overrides the level when set.
     tracing_subscriber::fmt()
@@ -40,11 +43,20 @@ async fn main() -> anyhow::Result<()> {
     // Connect to daemon
     let ipc_client = connect_to_daemon().await?;
 
-    // Run shell
-    let shell = Shell::new(ipc_client).await?;
-    if let Err(e) = shell.run().await {
-        error!("Shell error: {}", e);
-        return Err(anyhow::anyhow!("Shell failed: {}", e));
+    if config_mode {
+        let mut ipc_client = ipc_client;
+        let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client);
+        if let Err(e) = editor.run().await {
+            error!("Config editor error: {}", e);
+            return Err(anyhow::anyhow!("Config editor failed: {}", e));
+        }
+    } else {
+        // Run shell
+        let shell = Shell::new(ipc_client).await?;
+        if let Err(e) = shell.run().await {
+            error!("Shell error: {}", e);
+            return Err(anyhow::anyhow!("Shell failed: {}", e));
+        }
     }
 
     info!("Sena CLI exiting");
@@ -61,9 +73,9 @@ async fn ensure_daemon_running() -> Result<(), CliError> {
     info!("Daemon not running, auto-starting...");
     start_daemon()?;
 
-    // Wait for daemon to become ready (max 30 seconds)
-    for attempt in 1..=60 {
-        sleep(Duration::from_millis(500)).await;
+    // Wait for daemon to become ready (max 10 seconds)
+    for attempt in 1..=50 {
+        sleep(Duration::from_millis(200)).await;
         if IpcClient::daemon_running().await {
             info!("Daemon ready after {} attempts", attempt);
             return Ok(());
@@ -76,6 +88,8 @@ async fn ensure_daemon_running() -> Result<(), CliError> {
 /// Start the daemon as a background process.
 #[cfg(target_os = "windows")]
 fn start_daemon() -> Result<(), CliError> {
+    use std::os::windows::process::CommandExt;
+
     // Find daemon binary relative to CLI binary
     let cli_exe =
         std::env::current_exe().map_err(|e| CliError::DaemonStartFailed(e.to_string()))?;
@@ -93,6 +107,7 @@ fn start_daemon() -> Result<(), CliError> {
 
     // Spawn daemon in detached mode
     Command::new(daemon_exe)
+        .creation_flags(0x00000008)
         .spawn()
         .map_err(|e| CliError::DaemonStartFailed(e.to_string()))?;
 

@@ -11,6 +11,8 @@ repository.workspace = true
 cuda = ["infer/cuda"]
 # Enable Apple Metal GPU inference (macOS only).
 metal = ["infer/metal"]
+# Enable Vulkan GPU inference (Windows/Linux).
+vulkan = ["infer/vulkan"]
 
 [dependencies]
 bus = { path = "../bus" }
@@ -23,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.8"

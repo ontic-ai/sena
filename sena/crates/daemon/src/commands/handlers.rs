@@ -57,22 +57,34 @@ pub fn register_all(
 
     // Inference commands
     registry.register(Arc::new(ListModelsHandler));
-    registry.register(Arc::new(LoadModelHandler));
+    registry.register(Arc::new(LoadModelHandler::new(
+        boot_result.bus.clone(),
+    )));
     registry.register(Arc::new(InferenceStatusHandler));
-    registry.register(Arc::new(RunInferenceHandler));
+    registry.register(Arc::new(RunInferenceHandler::new(
+        boot_result.bus.clone(),
+    )));
 
     // Speech commands
-    registry.register(Arc::new(SpeechListenStartHandler));
-    registry.register(Arc::new(SpeechListenStopHandler));
+    registry.register(Arc::new(SpeechListenStartHandler::new(
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(SpeechListenStopHandler::new(
+        boot_result.bus.clone(),
+    )));
     registry.register(Arc::new(SpeechStatusHandler));
 
     // Memory commands
-    registry.register(Arc::new(MemoryStatsHandler));
-    registry.register(Arc::new(MemoryQueryHandler));
+    registry.register(Arc::new(MemoryStatsHandler::new(
+        boot_result.bus.clone(),
+    )));
+    registry.register(Arc::new(MemoryQueryHandler::new(
+        boot_result.bus.clone(),
+    )));
 
     // Config commands
     registry.register(Arc::new(ConfigGetHandler));
-    registry.register(Arc::new(ConfigSetHandler));
+    registry.register(Arc::new(ConfigSetHandler::new(boot_result.bus.clone())));
 
     // Event commands
     registry.register(Arc::new(EventsSubscribeHandler));

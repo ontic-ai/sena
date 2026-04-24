@@ -303,6 +303,31 @@ impl Actor for MemoryActor {
                                     .await;
                             }
                             Ok(Event::Memory(memory_event)) => match memory_event {
+                                MemoryEvent::StatsRequested { causal_id } => {
+                                    match self.backend.stats().await {
+                                        Ok(stats) => {
+                                            bus.broadcast(Event::Memory(MemoryEvent::StatsCompleted {
+                                                working_memory_chunks: stats.working_memory_chunks,
+                                                long_term_memory_nodes: stats.long_term_memory_nodes,
+                                                causal_id,
+                                            }))
+                                            .await
+                                            .map_err(|e| {
+                                                ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                            })?;
+                                        }
+                                        Err(e) => {
+                                            bus.broadcast(Event::Memory(MemoryEvent::StatsFailed {
+                                                causal_id,
+                                                reason: e.to_string(),
+                                            }))
+                                            .await
+                                            .map_err(|e| {
+                                                ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                            })?;
+                                        }
+                                    }
+                                }
                                 MemoryEvent::IngestRequested {
                                     text,
                                     kind,

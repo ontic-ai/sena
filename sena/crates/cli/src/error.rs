@@ -15,7 +15,7 @@ pub enum CliError {
     DaemonStartFailed(String),
 
     /// Daemon start timeout.
-    #[error("daemon failed to become ready within 30 seconds")]
+    #[error("daemon failed to become ready within 10 seconds")]
     DaemonStartTimeout,
 
     /// Platform not supported.

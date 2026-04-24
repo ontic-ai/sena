@@ -489,7 +489,6 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bus",
  "crossterm",
  "ipc",
  "ratatui",
@@ -2097,7 +2096,7 @@ dependencies = [
 [[package]]
 name = "infer"
 version = "0.1.1"
-source = "git+https://github.com/ontic-ai/infer?tag=v0.1.1#47b05eb9889ce74f12ffa1647033a856d26e3820"
+source = "git+https://github.com/ontic-ai/infer?tag=v0.1.2#83379353f373da2cf3cbad697f4c3a8343eee3ca"
 dependencies = [
  "encoding_rs",
  "llama-cpp-2",
@@ -2124,6 +2123,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2177,6 +2177,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -12,13 +12,11 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
-    /// Create a new empty registry with the built-in "list_commands" handler.
+    /// Create a new empty registry.
     pub fn new() -> Self {
-        let mut registry = Self {
+        Self {
             handlers: HashMap::new(),
-        };
-        registry.register(Arc::new(ListCommandsHandler));
-        registry
+        }
     }
 
     /// Register a command handler.
@@ -44,6 +42,22 @@ impl CommandRegistry {
     /// Returns `IpcError::UnknownCommand` if no handler is registered for the command.
     /// Returns handler-specific errors propagated from `CommandHandler::handle`.
     pub async fn dispatch(&self, command: &str, payload: Value) -> Result<Value, IpcError> {
+        if command == "list_commands" {
+            let commands: Vec<Value> = self
+                .list()
+                .into_iter()
+                .map(|(name, description, requires_boot)| {
+                    json!({
+                        "name": name,
+                        "description": description,
+                        "requires_boot": requires_boot,
+                    })
+                })
+                .collect();
+
+            return Ok(json!({ "commands": commands }));
+        }
+
         let handler = self
             .handlers
             .get(command)
@@ -56,49 +70,28 @@ impl CommandRegistry {
     ///
     /// Returns a vector of (name, description, requires_boot) tuples.
     pub fn list(&self) -> Vec<(&'static str, &'static str, bool)> {
-        self.handlers
+        let mut items: Vec<(&'static str, &'static str, bool)> = self
+            .handlers
             .values()
             .map(|h| (h.name(), h.description(), h.requires_boot()))
             .collect()
+            ;
+
+        // Built-in meta command.
+        items.push((
+            "list_commands",
+            "List all available IPC commands",
+            false,
+        ));
+
+        items.sort_by(|a, b| a.0.cmp(b.0));
+        items
     }
 }
 
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Built-in meta-handler that lists all registered commands.
-struct ListCommandsHandler;
-
-#[async_trait::async_trait]
-impl CommandHandler for ListCommandsHandler {
-    fn name(&self) -> &'static str {
-        "list_commands"
-    }
-
-    fn description(&self) -> &'static str {
-        "List all available IPC commands"
-    }
-
-    fn requires_boot(&self) -> bool {
-        false
-    }
-
-    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // NOTE: Phase 1 limitation — this implementation cannot access the registry.
-        // In Phase 2+, the handler will receive &CommandRegistry or use Arc<RwLock<Registry>>.
-        // For now, return a static placeholder.
-        Ok(json!({
-            "commands": [
-                {
-                    "name": "list_commands",
-                    "description": "List all available IPC commands",
-                    "requires_boot": false
-                }
-            ]
-        }))
     }
 }
 
@@ -158,8 +151,16 @@ mod tests {
         let mut registry = CommandRegistry::new();
         registry.register(Arc::new(TestHandler));
 
-        let commands = registry.list();
-        assert!(commands.iter().any(|(name, _, _)| *name == "test"));
-        assert!(commands.iter().any(|(name, _, _)| *name == "list_commands"));
+        let response = registry.dispatch("list_commands", json!({})).await.unwrap();
+        let commands = response
+            .get("commands")
+            .and_then(|v| v.as_array())
+            .expect("list_commands should return commands array");
+        assert!(commands.iter().any(|cmd| {
+            cmd.get("name").and_then(|v| v.as_str()) == Some("test")
+        }));
+        assert!(commands.iter().any(|cmd| {
+            cmd.get("name").and_then(|v| v.as_str()) == Some("list_commands")
+        }));
     }
 }

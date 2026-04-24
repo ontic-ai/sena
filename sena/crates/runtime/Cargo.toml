@@ -11,6 +11,8 @@ repository.workspace = true
 cuda = ["inference/cuda"]
 # Enable Apple Metal GPU inference (macOS only).
 metal = ["inference/metal"]
+# Enable Vulkan GPU inference (Windows/Linux).
+vulkan = ["inference/vulkan"]
 
 [dependencies]
 # Workspace crates
@@ -37,7 +39,6 @@ serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
 infer.workspace = true
-fs2 = "0.4"
 fs2 = "0.4"
 
 [dev-dependencies]

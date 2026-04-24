@@ -40,6 +40,27 @@ impl std::fmt::Debug for ScoredChunk {
 /// Memory subsystem events.
 #[derive(Clone)]
 pub enum MemoryEvent {
+    /// Request current memory statistics.
+    StatsRequested {
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Current memory statistics snapshot.
+    StatsCompleted {
+        working_memory_chunks: usize,
+        long_term_memory_nodes: usize,
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Memory stats request failed.
+    StatsFailed {
+        /// Causal chain ID.
+        causal_id: CausalId,
+        reason: String,
+    },
+
     /// Request to ingest text into long-term memory.
     IngestRequested {
         text: String,
@@ -136,6 +157,10 @@ pub enum MemoryEvent {
 impl std::fmt::Debug for MemoryEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::StatsRequested { causal_id } => f
+                .debug_struct("StatsRequested")
+                .field("causal_id", causal_id)
+                .finish(),
             Self::IngestRequested {
                 kind, causal_id, ..
             }
@@ -146,6 +171,21 @@ impl std::fmt::Debug for MemoryEvent {
                 .field("text", &"[REDACTED]")
                 .field("kind", kind)
                 .field("causal_id", causal_id)
+                .finish(),
+            Self::StatsCompleted {
+                working_memory_chunks,
+                long_term_memory_nodes,
+                causal_id,
+            } => f
+                .debug_struct("StatsCompleted")
+                .field("working_memory_chunks", working_memory_chunks)
+                .field("long_term_memory_nodes", long_term_memory_nodes)
+                .field("causal_id", causal_id)
+                .finish(),
+            Self::StatsFailed { causal_id, reason } => f
+                .debug_struct("StatsFailed")
+                .field("causal_id", causal_id)
+                .field("reason", reason)
                 .finish(),
             Self::IngestCompleted { causal_id } | Self::MemoryWriteCompleted { causal_id } => f
                 .debug_struct("IngestCompleted/MemoryWriteCompleted")
@@ -204,7 +244,10 @@ impl std::fmt::Debug for MemoryEvent {
 impl MemoryEvent {
     pub fn causal_id(&self) -> Option<CausalId> {
         match self {
-            Self::IngestRequested { causal_id, .. }
+            Self::StatsRequested { causal_id, .. }
+            | Self::StatsCompleted { causal_id, .. }
+            | Self::StatsFailed { causal_id, .. }
+            | Self::IngestRequested { causal_id, .. }
             | Self::IngestCompleted { causal_id, .. }
             | Self::IngestFailed { causal_id, .. }
             | Self::QueryRequested { causal_id, .. }

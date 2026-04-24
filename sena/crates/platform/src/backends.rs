@@ -16,8 +16,8 @@ use tracing::debug;
 
 /// Windows-native platform backend.
 ///
-/// BONES stub: returns typed defaults for all signals.
-/// Real implementation will use the Win32 API for active-window, clipboard, etc.
+/// Active window detection uses Win32 APIs (GetForegroundWindow + QueryFullProcessImageNameW).
+/// Clipboard, keystrokes, and screen capture remain stubs pending full implementation.
 #[cfg(target_os = "windows")]
 pub struct WindowsBackend;
 
@@ -25,7 +25,7 @@ pub struct WindowsBackend;
 impl WindowsBackend {
     /// Construct the Windows backend.
     pub fn new() -> Result<Self, PlatformError> {
-        debug!("WindowsBackend initializing (BONES stub)");
+        debug!("WindowsBackend initializing");
         Ok(Self)
     }
 }
@@ -33,9 +33,75 @@ impl WindowsBackend {
 #[cfg(target_os = "windows")]
 impl PlatformBackend for WindowsBackend {
     fn active_window(&self) -> Result<PlatformSignal, PlatformError> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+        };
+
+        // SAFETY: Win32 calls follow documented contracts.
+        let (app_name, window_title) = unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd == HWND(std::ptr::null_mut()) {
+                return Ok(PlatformSignal::Window(WindowContext {
+                    app_name: "Unknown".to_string(),
+                    window_title: None,
+                    bundle_id: None,
+                    timestamp: Instant::now(),
+                }));
+            }
+
+            // Window title
+            let mut title_buf = [0u16; 512];
+            let title_len = GetWindowTextW(hwnd, &mut title_buf) as usize;
+            let window_title = if title_len > 0 {
+                Some(String::from_utf16_lossy(&title_buf[..title_len]))
+            } else {
+                None
+            };
+
+            // Process name from PID
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let app_name = if pid != 0 {
+                match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                    Ok(handle) => {
+                        let mut name_buf = [0u16; 260];
+                        let mut size: u32 = 260;
+                        let ok = QueryFullProcessImageNameW(
+                            handle,
+                            PROCESS_NAME_WIN32,
+                            windows::core::PWSTR(name_buf.as_mut_ptr()),
+                            &mut size,
+                        );
+                        let _ = windows::Win32::Foundation::CloseHandle(handle);
+                        if ok.is_ok() {
+                            let full_path =
+                                String::from_utf16_lossy(&name_buf[..size as usize]);
+                            std::path::Path::new(&full_path)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Unknown")
+                                .to_string()
+                        } else {
+                            "Unknown".to_string()
+                        }
+                    }
+                    Err(_) => "Unknown".to_string(),
+                }
+            } else {
+                "Unknown".to_string()
+            };
+
+            (app_name, window_title)
+        };
+
         Ok(PlatformSignal::Window(WindowContext {
-            app_name: "Unknown".to_string(),
-            window_title: None,
+            app_name,
+            window_title,
             bundle_id: None,
             timestamp: Instant::now(),
         }))

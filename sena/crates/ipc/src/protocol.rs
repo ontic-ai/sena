@@ -17,33 +17,22 @@ pub struct IpcRequest {
 pub struct IpcResponse {
     /// Request ID this response corresponds to (0 for push events).
     pub id: u64,
-    /// Response status.
-    #[serde(flatten)]
-    pub status: ResponseStatus,
-}
-
-/// Response status: success or error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub enum ResponseStatus {
-    /// Command succeeded.
-    Success {
-        /// Command-specific result payload.
-        result: Value,
-    },
-    /// Command failed.
-    Error {
-        /// Error message.
-        error: String,
-    },
+    /// Whether the command succeeded.
+    pub success: bool,
+    /// Command-specific result payload or pushed event payload.
+    pub payload: Value,
+    /// Human-readable error when success = false.
+    pub error: Option<String>,
 }
 
 impl IpcResponse {
     /// Create a success response.
-    pub fn success(id: u64, result: Value) -> Self {
+    pub fn success(id: u64, payload: Value) -> Self {
         Self {
             id,
-            status: ResponseStatus::Success { result },
+            success: true,
+            payload,
+            error: None,
         }
     }
 
@@ -51,15 +40,19 @@ impl IpcResponse {
     pub fn error(id: u64, error: String) -> Self {
         Self {
             id,
-            status: ResponseStatus::Error { error },
+            success: false,
+            payload: Value::Null,
+            error: Some(error),
         }
     }
 
     /// Create a push event (unsolicited response with id=0).
-    pub fn push_event(result: Value) -> Self {
+    pub fn push_event(payload: Value) -> Self {
         Self {
             id: 0,
-            status: ResponseStatus::Success { result },
+            success: true,
+            payload,
+            error: None,
         }
     }
 }

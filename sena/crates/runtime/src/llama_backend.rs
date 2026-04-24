@@ -134,8 +134,8 @@ pub fn build_llama_backend(
 ///
 /// Graceful fallback: boot remains non-fatal if no models are available.
 pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend>> {
-    // Resolve the default models directory
-    let models_dir = resolve_default_models_dir().ok()?;
+    // Resolve the default Ollama models directory.
+    let models_dir = infer::ollama_models_dir().ok()?;
 
     if !models_dir.exists() {
         warn!(
@@ -147,12 +147,13 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
 
     // Use inference crate's discovery system
     info!(path = ?models_dir, "scanning for GGUF models");
-    let registry = inference::discover_models(&models_dir);
-
-    if registry.is_empty() {
-        warn!(path = ?models_dir, "no GGUF models found in models directory");
-        return None;
-    }
+    let registry = match inference::discover_models(&models_dir) {
+        Ok(registry) => registry,
+        Err(e) => {
+            warn!(path = ?models_dir, error = %e, "model discovery failed");
+            return None;
+        }
+    };
 
     info!(
         count = registry.len(),
@@ -190,83 +191,9 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
     None
 }
 
-/// Resolve the default models directory path.
-///
-/// Returns `<sena_dir>/models/inference/` where `<sena_dir>` is:
-/// - Windows: `%APPDATA%\sena\`
-/// - macOS: `~/Library/Application Support/sena/`
-/// - Linux: `~/.config/sena/`
-fn resolve_default_models_dir() -> Result<std::path::PathBuf, RuntimeError> {
-    let sena_dir = resolve_sena_dir()?;
-    Ok(sena_dir.join("models").join("inference"))
-}
-
-/// Resolve the Sena config directory.
-///
-/// - Windows: `%APPDATA%\sena\`
-/// - macOS: `~/Library/Application Support/sena/`
-/// - Linux: `~/.config/sena/`
-fn resolve_sena_dir() -> Result<std::path::PathBuf, RuntimeError> {
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA")
-            .map_err(|_| RuntimeError::DirectoryResolutionFailed("APPDATA not set".to_string()))?;
-        Ok(std::path::PathBuf::from(appdata).join("sena"))
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME")
-            .map_err(|_| RuntimeError::DirectoryResolutionFailed("HOME not set".to_string()))?;
-        Ok(std::path::PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("sena"))
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME")
-            .map_err(|_| RuntimeError::DirectoryResolutionFailed("HOME not set".to_string()))?;
-        Ok(std::path::PathBuf::from(home).join(".config").join("sena"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_resolve_sena_dir_returns_platform_specific_path() {
-        let sena_dir = resolve_sena_dir().expect("should resolve sena dir");
-        assert!(sena_dir.to_str().is_some());
-
-        #[cfg(target_os = "windows")]
-        assert!(sena_dir.to_str().unwrap().contains("\\sena"));
-
-        #[cfg(target_os = "macos")]
-        assert!(
-            sena_dir
-                .to_str()
-                .unwrap()
-                .contains("/Application Support/sena")
-        );
-
-        #[cfg(target_os = "linux")]
-        assert!(sena_dir.to_str().unwrap().contains("/.config/sena"));
-    }
-
-    #[test]
-    fn test_resolve_default_models_dir_appends_models_inference() {
-        let models_dir = resolve_default_models_dir().expect("should resolve default models dir");
-        let path_str = models_dir.to_str().expect("path should be UTF-8");
-
-        assert!(
-            path_str.contains("models") && path_str.ends_with("inference"),
-            "expected path to end with models/inference, got: {}",
-            path_str
-        );
-    }
 
     #[test]
     fn test_try_build_default_backend_returns_none_when_no_models() {

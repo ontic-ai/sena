@@ -179,10 +179,10 @@ pub fn build_soul_actor() -> Result<soul::SoulActor, RuntimeError> {
     Ok(actor)
 }
 
-/// Build the memory actor with a stub backend.
+/// Build the memory actor with the in-memory Echo0 backend.
 pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
-    tracing::debug!("building memory actor with stub backend");
-    let backend = Box::new(memory::StubBackend);
+    tracing::debug!("building memory actor with Echo0 backend");
+    let backend = Box::new(memory::Echo0Backend::new());
     let actor = memory::MemoryActor::new(backend);
     Ok(actor)
 }

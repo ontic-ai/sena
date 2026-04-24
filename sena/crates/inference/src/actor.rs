@@ -1,6 +1,7 @@
 //! Inference actor — receives InferenceRequested events and produces token streams.
 
 use crate::backend::InferenceBackend;
+use crate::build_loaded_llama_backend;
 use crate::error::InferenceError;
 use crate::filter::OutputFilter;
 use crate::queue::{InferenceQueue, WorkItem, WorkKind};
@@ -118,6 +119,38 @@ impl InferenceActor {
         if let Some(tx) = &self.work_tx {
             // Ignore error if channel is full - worker will pick it up on next poll anyway
             let _ = tx.try_send(());
+        }
+
+        Ok(())
+    }
+
+    async fn handle_model_load_request(
+        &self,
+        model_path: String,
+        causal_id: bus::CausalId,
+    ) -> Result<(), InferenceError> {
+        let path = std::path::PathBuf::from(&model_path);
+        let new_backend = tokio::task::spawn_blocking(move || build_loaded_llama_backend(&path))
+            .await
+            .map_err(|e| InferenceError::ExecutionFailed(format!("model load task failed: {}", e)))??;
+
+        {
+            let mut backend = self.backend.lock().await;
+            *backend = new_backend;
+        }
+
+        if let Some(bus) = &self.bus {
+            let model_name = std::path::Path::new(&model_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            bus.broadcast(Event::Inference(InferenceEvent::ModelLoaded {
+                model_path,
+                model_name,
+                causal_id,
+            }))
+            .await?;
         }
 
         Ok(())
@@ -759,6 +792,21 @@ impl Actor for InferenceActor {
                                 .await
                             {
                                 warn!(error = ?e, "inference request handling failed");
+                            }
+                        }
+                        Ok(Event::Inference(InferenceEvent::ModelLoadRequested {
+                            model_path,
+                            causal_id,
+                        })) => {
+                            if let Err(e) = self.handle_model_load_request(model_path.clone(), causal_id).await {
+                                warn!(error = ?e, model_path = %model_path, "model load request handling failed");
+                                if let Some(bus) = &self.bus {
+                                    let _ = bus.broadcast(Event::Inference(InferenceEvent::ModelLoadFailed {
+                                        model_path,
+                                        reason: e.to_string(),
+                                        causal_id,
+                                    })).await;
+                                }
                             }
                         }
                         Ok(_) => {

@@ -121,17 +121,20 @@ impl IpcClient {
 
                     if response.id == 0 {
                         // Push event
-                        if let crate::protocol::ResponseStatus::Success { result } = response.status {
-                            let _ = push_tx.send(result);
+                        if response.success {
+                            let _ = push_tx.send(response.payload);
                         }
                     } else {
                         // Response to a pending request
                         if let Some(response_tx) = pending_requests.remove(&response.id) {
-                            let result = match response.status {
-                                crate::protocol::ResponseStatus::Success { result } => Ok(result),
-                                crate::protocol::ResponseStatus::Error { error } => {
-                                    Err(IpcError::CommandFailed(error))
-                                }
+                            let result = if response.success {
+                                Ok(response.payload)
+                            } else {
+                                Err(IpcError::CommandFailed(
+                                    response
+                                        .error
+                                        .unwrap_or_else(|| "unknown command error".to_string()),
+                                ))
                             };
                             let _ = response_tx.send(result);
                         }

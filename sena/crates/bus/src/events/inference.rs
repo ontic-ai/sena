@@ -51,6 +51,29 @@ pub enum InferenceEvent {
         causal_id: CausalId,
     },
 
+    /// Request to load a GGUF model into the active inference backend.
+    ModelLoadRequested {
+        model_path: String,
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Active model changed successfully.
+    ModelLoaded {
+        model_path: String,
+        model_name: String,
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Active model load failed.
+    ModelLoadFailed {
+        model_path: String,
+        reason: String,
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
     /// Inference response produced.
     InferenceCompleted {
         text: String,
@@ -129,6 +152,9 @@ impl InferenceEvent {
     pub fn causal_id(&self) -> Option<CausalId> {
         match self {
             Self::InferenceRequested { causal_id, .. }
+            | Self::ModelLoadRequested { causal_id, .. }
+            | Self::ModelLoaded { causal_id, .. }
+            | Self::ModelLoadFailed { causal_id, .. }
             | Self::InferenceCompleted { causal_id, .. }
             | Self::InferenceFailed { causal_id, .. }
             | Self::InferenceFailedWithOrigin { causal_id, .. }

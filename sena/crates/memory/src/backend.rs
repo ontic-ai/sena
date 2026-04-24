@@ -5,6 +5,12 @@ use async_trait::async_trait;
 use bus::CausalId;
 use bus::events::{MemoryKind, ScoredChunk};
 
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryStats {
+    pub working_memory_chunks: usize,
+    pub long_term_memory_nodes: usize,
+}
+
 /// Trait for memory storage backends.
 ///
 /// Implementations provide persistence, indexing, and retrieval of memory chunks.
@@ -40,6 +46,9 @@ pub trait MemoryBackend: Send + Sync {
     /// # Errors
     /// Returns `MemoryError` if the query fails.
     async fn query(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>, MemoryError>;
+
+    /// Return current backend statistics.
+    async fn stats(&self) -> Result<MemoryStats, MemoryError>;
 
     /// Perform periodic background consolidation/maintenance.
     ///
@@ -95,6 +104,13 @@ impl MemoryBackend for StubBackend {
     async fn query(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>, MemoryError> {
         tracing::debug!(query_len = query.len(), limit, "stub backend: query called");
         Ok(Vec::new())
+    }
+
+    async fn stats(&self) -> Result<MemoryStats, MemoryError> {
+        Ok(MemoryStats {
+            working_memory_chunks: 0,
+            long_term_memory_nodes: 0,
+        })
     }
 
     async fn consolidate(&mut self) -> Result<usize, MemoryError> {

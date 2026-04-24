@@ -46,6 +46,97 @@ pub use supervisor::supervision_loop;
 // Re-export llama.cpp log suppression for CLI use.
 pub use inference::suppress_llama_logs;
 
+/// Resolve the default Ollama models directory for this host.
+pub fn ollama_models_dir() -> Result<std::path::PathBuf, inference::InferenceError> {
+    infer::ollama_models_dir().map_err(|e| inference::InferenceError::BackendFailed(e.to_string()))
+}
+
+/// Discover models from an Ollama models directory.
+pub fn discover_models(
+    models_dir: &std::path::Path,
+) -> Result<inference::ModelRegistry, inference::InferenceError> {
+    inference::discover_models(models_dir)
+}
+
+/// Return the currently auto-detected backend type label.
+pub fn auto_detect_backend_name() -> String {
+    infer::BackendType::auto_detect().to_string()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpeechStatusSnapshot {
+    pub speech_enabled: bool,
+    pub stt_enabled: bool,
+    pub tts_enabled: bool,
+    pub stt_backend: String,
+    pub speech_models_dir: std::path::PathBuf,
+}
+
+pub async fn speech_status_snapshot() -> Result<SpeechStatusSnapshot, String> {
+    let config = load_or_create_config()
+        .await
+        .map_err(|e| format!("failed to load config: {}", e))?;
+
+    let speech_models_dir = resolve_speech_models_dir()?;
+    let encoder = speech::ModelCache::cached_path(
+        &speech_models_dir,
+        &speech::ModelManifest::parakeet_encoder(),
+    );
+    let decoder = speech::ModelCache::cached_path(
+        &speech_models_dir,
+        &speech::ModelManifest::parakeet_decoder(),
+    );
+    let tokenizer = speech::ModelCache::cached_path(
+        &speech_models_dir,
+        &speech::ModelManifest::parakeet_tokenizer(),
+    );
+    let parakeet_ready = encoder.exists() && decoder.exists() && tokenizer.exists();
+
+    Ok(SpeechStatusSnapshot {
+        speech_enabled: config.speech_enabled,
+        stt_enabled: config.speech_enabled && parakeet_ready,
+        tts_enabled: config.speech_enabled,
+        stt_backend: if parakeet_ready {
+            "parakeet".to_string()
+        } else {
+            "stub".to_string()
+        },
+        speech_models_dir,
+    })
+}
+
+fn resolve_speech_models_dir() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").map_err(|e| format!("APPDATA not set: {}", e))?;
+        return Ok(std::path::PathBuf::from(appdata)
+            .join("sena")
+            .join("models")
+            .join("speech"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+        return Ok(std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("sena")
+            .join("models")
+            .join("speech"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+        return Ok(std::path::PathBuf::from(home)
+            .join(".config")
+            .join("sena")
+            .join("models")
+            .join("speech"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

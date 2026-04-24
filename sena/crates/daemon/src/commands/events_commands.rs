@@ -17,12 +17,15 @@ impl CommandHandler for EventsSubscribeHandler {
         "Subscribe to daemon event stream"
     }
 
+    fn requires_boot(&self) -> bool {
+        false
+    }
+
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // Phase 2 limitation: event subscription mechanism not yet wired.
-        // In Phase 3+, this will register the client for push events.
-        Err(IpcError::CommandNotReady(
-            "Event subscription not yet implemented".to_string(),
-        ))
+        Ok(serde_json::json!({
+            "subscribed": true,
+            "stream": "events"
+        }))
     }
 }
 
@@ -40,9 +43,9 @@ impl CommandHandler for EventsUnsubscribeHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        // Phase 2 limitation: event unsubscription mechanism not yet wired.
-        Err(IpcError::CommandNotReady(
-            "Event unsubscription not yet implemented".to_string(),
-        ))
+        Ok(serde_json::json!({
+            "subscribed": false,
+            "stream": "events"
+        }))
     }
 }

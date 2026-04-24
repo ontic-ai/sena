@@ -3,6 +3,18 @@
 /// Errors that can occur during inference operations.
 #[derive(Debug, thiserror::Error)]
 pub enum InferenceError {
+    /// Ollama models directory was not found.
+    #[error("ollama not installed: {0}")]
+    OllamaNotInstalled(String),
+
+    /// No models were discovered in the Ollama models directory.
+    #[error("no models found")]
+    NoModelsFound,
+
+    /// Discovery or backend operation failed.
+    #[error("backend failed: {0}")]
+    BackendFailed(String),
+
     /// Backend initialization failed.
     #[error("backend initialization failed: {0}")]
     BackendInit(String),

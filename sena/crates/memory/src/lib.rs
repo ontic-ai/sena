@@ -19,7 +19,7 @@ pub mod types;
 pub mod working_memory;
 
 pub use actor::{BackupConfig, MemoryActor};
-pub use backend::{MemoryBackend, StubBackend};
+pub use backend::{MemoryBackend, MemoryStats, StubBackend};
 pub use echo0_backend::Echo0Backend;
 pub use embedder::{EMBEDDING_DIMENSIONS, SenaEmbedder};
 pub use error::MemoryError;

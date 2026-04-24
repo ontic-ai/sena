@@ -151,6 +151,12 @@ pub enum SystemEvent {
         /// New state (true = enabled, false = disabled).
         enabled: bool,
     },
+
+    /// Runtime configuration was updated.
+    ConfigUpdated {
+        /// Dotted config path that changed.
+        path: String,
+    },
 }
 
 #[cfg(test)]

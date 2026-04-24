@@ -10,6 +10,9 @@ repository.workspace = true
 name = "sena"
 path = "src/main.rs"
 
+[features]
+vulkan = ["runtime/vulkan"]
+
 [dependencies]
 runtime = { path = "../runtime" }
 ipc = { path = "../ipc" }

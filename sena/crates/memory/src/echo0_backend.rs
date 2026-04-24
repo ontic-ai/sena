@@ -5,7 +5,7 @@
 //! be wired to an `ech0::Store` once the encryption layer and embedder are
 //! integrated.
 
-use crate::backend::MemoryBackend;
+use crate::backend::{MemoryBackend, MemoryStats};
 use crate::error::MemoryError;
 use async_trait::async_trait;
 use bus::CausalId;
@@ -127,6 +127,13 @@ impl MemoryBackend for Echo0Backend {
         scored.truncate(limit);
 
         Ok(scored)
+    }
+
+    async fn stats(&self) -> Result<MemoryStats, MemoryError> {
+        Ok(MemoryStats {
+            working_memory_chunks: 0,
+            long_term_memory_nodes: self.chunks.len(),
+        })
     }
 
     async fn consolidate(&mut self) -> Result<usize, MemoryError> {

@@ -131,6 +131,7 @@ impl SttActor {
                         warn!(error = %e, "failed to start audio capture on loop enable");
                     }
                 } else if !enabled && previous_state {
+                    self.flush_backend_events().await?;
                     self.stop_audio_capture();
                 }
 
@@ -155,6 +156,7 @@ impl SttActor {
             }
             Event::Speech(SpeechEvent::ListenModeStopRequested { causal_id }) => {
                 info!("Listen mode stop requested");
+                self.flush_backend_events().await?;
                 self.listen_mode_active = false;
                 self.listen_mode_causal_id = None;
 
@@ -165,6 +167,14 @@ impl SttActor {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    async fn flush_backend_events(&mut self) -> Result<(), SpeechActorError> {
+        let events = self.backend.flush().map_err(SpeechActorError::Stt)?;
+        for event in events {
+            self.handle_stt_event_internal(event).await?;
         }
         Ok(())
     }
@@ -319,19 +329,31 @@ impl Actor for SttActor {
                     if let Err(e) = self.handle_bus_event(event).await {
                         error!(error = %e, "Failed to handle bus event");
                     }
+
+                    if self.loop_enabled && audio_receiver.is_none() {
+                        audio_receiver = self.audio_rx.take();
+                    } else if !self.loop_enabled {
+                        audio_receiver = None;
+                    }
                 }
 
-                Some(chunk) = async {
+                chunk = async {
                     match &mut audio_receiver {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    // Real background loop work: process incoming audio from microphone
-                    if self.loop_enabled
-                        && let Err(e) = self.process_audio_chunk(chunk).await
-                    {
-                        warn!(error = %e, "Audio chunk processing failed (non-fatal)");
+                    match chunk {
+                        Some(chunk) => {
+                            if self.loop_enabled
+                                && let Err(e) = self.process_audio_chunk(chunk).await
+                            {
+                                warn!(error = %e, "Audio chunk processing failed (non-fatal)");
+                            }
+                        }
+                        None => {
+                            audio_receiver = None;
+                        }
                     }
                 }
             }
@@ -382,12 +404,21 @@ impl SttActor {
 
         match event {
             SttEvent::Word {
-                text: _,
+                text,
                 confidence: _,
             } => {
-                // Do not log raw speech text at info level (privacy)
-                #[cfg(test)]
-                debug!("Word recognized (debug only)");
+                if self.listen_mode_active {
+                    let causal_id = self.listen_mode_causal_id.unwrap_or_else(CausalId::new);
+                    bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
+                        text,
+                        causal_id,
+                    }))
+                    .await
+                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                } else {
+                    #[cfg(test)]
+                    debug!("Word recognized (debug only)");
+                }
             }
             SttEvent::Completed { text, confidence } => {
                 // Do not log raw speech text at info level (privacy)

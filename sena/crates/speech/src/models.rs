@@ -93,9 +93,9 @@ impl ModelManifest {
         ModelInfo {
             name: "parakeet-nemotron-encoder".to_string(),
             filename: "encoder.onnx".to_string(),
-            url: "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/encoder.onnx"
+            url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/encoder.onnx"
                 .to_string(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            sha256: "d24be4aff18dd9d2aa3433cb89c5a457df5015abf79e06a63dde76b1cd6386bb".to_string(),
             size_bytes: 450_000_000, // ~450MB
             model_type: ModelType::ParakeetEncoder,
         }
@@ -106,8 +106,8 @@ impl ModelManifest {
         ModelInfo {
             name: "parakeet-nemotron-decoder".to_string(),
             filename: "decoder_joint.onnx".to_string(),
-            url: "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/decoder_joint.onnx".to_string(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            url: "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/decoder_joint.onnx".to_string(),
+            sha256: "c86d527e4ae27251a741609eaddd4429ba5c32050e2f532cea1052d9e21f4f09".to_string(),
             size_bytes: 50_000_000, // ~50MB
             model_type: ModelType::ParakeetDecoder,
         }
@@ -119,9 +119,9 @@ impl ModelManifest {
             name: "parakeet-nemotron-tokenizer".to_string(),
             filename: "tokenizer.model".to_string(),
             url:
-                "https://huggingface.co/nvidia/parakeet-ctc-1.1b-int8/resolve/main/tokenizer.model"
+                "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model"
                     .to_string(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            sha256: "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9".to_string(),
             size_bytes: 2_500_000, // ~2.5MB
             model_type: ModelType::ParakeetTokenizer,
         }
