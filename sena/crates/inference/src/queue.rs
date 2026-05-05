@@ -107,6 +107,9 @@ impl InferenceQueue {
     /// Enqueue a work item.
     ///
     /// Returns `Err(item)` (the rejected item) if the queue is at capacity.
+    // allowed: returning the rejected `WorkItem` preserves the existing
+    // ownership handoff without introducing heap allocation or wider API churn.
+    #[allow(clippy::result_large_err)]
     pub fn enqueue(&mut self, item: WorkItem) -> Result<(), WorkItem> {
         if self.len() >= self.capacity {
             return Err(item);
