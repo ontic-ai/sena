@@ -247,36 +247,43 @@ impl<'a> ConfigEditor<'a> {
             return Ok(());
         }
 
+        if let KeyCode::Enter = code {
+            match self.fields.get(self.selected) {
+                Some(ConfigField {
+                    editable: true,
+                    kind: ConfigFieldKind::Bool,
+                    ..
+                }) => {
+                    self.status_line = "Use ← / → to toggle true or false".to_string();
+                }
+                Some(field) if field.editable => {
+                    self.edit_mode = true;
+                    self.edit_buffer = field.value.clone();
+                    self.status_line = format!("Editing {}", field.path);
+                }
+                Some(_) => {
+                    self.status_line = "managed by runtime".to_string();
+                }
+                None => {}
+            }
+            return Ok(());
+        }
+
         match code {
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down | KeyCode::Tab => {
-                if self.selected + 1 < self.fields.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Up => {}
+            KeyCode::Down | KeyCode::Tab if self.selected + 1 < self.fields.len() => {
+                self.selected += 1;
             }
-            KeyCode::Enter => {
-                if let Some(field) = self.fields.get(self.selected) {
-                    if field.editable {
-                        if matches!(field.kind, ConfigFieldKind::Bool) {
-                            self.status_line = "Use ← / → to toggle true or false".to_string();
-                        } else {
-                            self.edit_mode = true;
-                            self.edit_buffer = field.value.clone();
-                            self.status_line = format!("Editing {}", field.path);
-                        }
-                    } else {
-                        self.status_line = "managed by runtime".to_string();
-                    }
-                }
-            }
+            KeyCode::Down | KeyCode::Tab => {}
             KeyCode::Left | KeyCode::Right => {
-                if let Some(field) = self.fields.get_mut(self.selected)
-                    && field.editable
-                    && matches!(field.kind, ConfigFieldKind::Bool)
+                if let Some(field @ ConfigField {
+                    editable: true,
+                    kind: ConfigFieldKind::Bool,
+                    ..
+                }) = self.fields.get_mut(self.selected)
                 {
                     field.value = if field.value == "true" {
                         "false".to_string()

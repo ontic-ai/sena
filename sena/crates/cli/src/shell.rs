@@ -339,6 +339,18 @@ enum ModalState {
     Models(ModelModal),
 }
 
+struct ShellRenderState<'a> {
+    message_log: &'a [String],
+    loops: &'a [LoopInfo],
+    input_buffer: &'a str,
+    daemon_status: &'a str,
+    daemon_uptime_secs: u64,
+    log_scroll: usize,
+    vram: Option<VramState>,
+    slash_dropdown: Option<&'a SlashDropdown>,
+    modal: Option<&'a ModalState>,
+}
+
 pub struct Shell {
     ipc: IpcClient,
     message_log: Arc<Mutex<Vec<String>>>,
@@ -472,10 +484,10 @@ impl Shell {
                     continue;
                 }
 
-                if let Some(line) = Self::format_push_event(&event) {
-                    if let Ok(mut log) = push_log.lock() {
-                        Self::append_push_line(&mut log, line);
-                    }
+                if let Some(line) = Self::format_push_event(&event)
+                    && let Ok(mut log) = push_log.lock()
+                {
+                    Self::append_push_line(&mut log, line);
                 }
             }
             connection_alive_task.store(false, Ordering::SeqCst);
@@ -667,15 +679,17 @@ impl Shell {
             let uptime_secs = self.current_uptime_secs();
             Self::render_tui(
                 &mut self.terminal,
-                &log,
-                &loops_vec,
-                &self.input_buffer,
-                &self.daemon_status,
-                uptime_secs,
-                self.log_scroll,
-                self.vram.lock().ok().and_then(|v| *v),
-                self.slash_dropdown.as_ref(),
-                self.modal.as_ref(),
+                ShellRenderState {
+                    message_log: &log,
+                    loops: &loops_vec,
+                    input_buffer: &self.input_buffer,
+                    daemon_status: &self.daemon_status,
+                    daemon_uptime_secs: uptime_secs,
+                    log_scroll: self.log_scroll,
+                    vram: self.vram.lock().ok().and_then(|v| *v),
+                    slash_dropdown: self.slash_dropdown.as_ref(),
+                    modal: self.modal.as_ref(),
+                },
             )
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         }
@@ -700,15 +714,17 @@ impl Shell {
                 let uptime_secs = self.current_uptime_secs();
                 Self::render_tui(
                     &mut self.terminal,
-                    &log,
-                    &loops_vec,
-                    &self.input_buffer,
-                    &self.daemon_status,
-                    uptime_secs,
-                    self.log_scroll,
-                    self.vram.lock().ok().and_then(|v| *v),
-                    self.slash_dropdown.as_ref(),
-                    self.modal.as_ref(),
+                    ShellRenderState {
+                        message_log: &log,
+                        loops: &loops_vec,
+                        input_buffer: &self.input_buffer,
+                        daemon_status: &self.daemon_status,
+                        daemon_uptime_secs: uptime_secs,
+                        log_scroll: self.log_scroll,
+                        vram: self.vram.lock().ok().and_then(|v| *v),
+                        slash_dropdown: self.slash_dropdown.as_ref(),
+                        modal: self.modal.as_ref(),
+                    },
                 )
                 .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
             }
@@ -1254,28 +1270,27 @@ impl Shell {
         use crate::transparency_format;
 
         // Try to parse the response into a structured type
-        if let Some(observation) = value.get("Observation") {
-            if let Ok(resp) = serde_json::from_value::<bus::events::transparency::ObservationResponse>(
+        if let Some(observation) = value.get("Observation")
+            && let Ok(resp) = serde_json::from_value::<bus::events::transparency::ObservationResponse>(
                 observation.clone(),
-            ) {
-                return transparency_format::format_observation_response(&resp);
-            }
+            )
+        {
+            return transparency_format::format_observation_response(&resp);
         }
 
-        if let Some(memory) = value.get("Memory") {
-            if let Ok(resp) =
+        if let Some(memory) = value.get("Memory")
+            && let Ok(resp) =
                 serde_json::from_value::<bus::events::transparency::MemoryResponse>(memory.clone())
-            {
-                return transparency_format::format_memory_response(&resp);
-            }
+        {
+            return transparency_format::format_memory_response(&resp);
         }
 
-        if let Some(reasoning) = value.get("Reasoning") {
-            if let Ok(resp) = serde_json::from_value::<bus::events::transparency::ReasoningResponse>(
+        if let Some(reasoning) = value.get("Reasoning")
+            && let Ok(resp) = serde_json::from_value::<bus::events::transparency::ReasoningResponse>(
                 reasoning.clone(),
-            ) {
-                return transparency_format::format_reasoning_response(&resp);
-            }
+            )
+        {
+            return transparency_format::format_reasoning_response(&resp);
         }
 
         // Fallback to generic JSON formatting if structured parsing fails
@@ -1336,15 +1351,7 @@ impl Shell {
 
     fn render_tui(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        message_log: &[String],
-        loops: &[LoopInfo],
-        input_buffer: &str,
-        daemon_status: &str,
-        daemon_uptime_secs: u64,
-        log_scroll: usize,
-        vram: Option<VramState>,
-        slash_dropdown: Option<&SlashDropdown>,
-        modal: Option<&ModalState>,
+        render: ShellRenderState<'_>,
     ) -> Result<(), io::Error> {
         terminal.draw(|frame| {
             let main_chunks = Layout::default()
@@ -1364,18 +1371,23 @@ impl Shell {
             Self::render_header(
                 frame,
                 left_chunks[0],
-                daemon_status,
-                daemon_uptime_secs,
-                vram,
+                render.daemon_status,
+                render.daemon_uptime_secs,
+                render.vram,
             );
-            Self::render_message_log(frame, left_chunks[1], message_log, log_scroll);
-            Self::render_input(frame, left_chunks[2], input_buffer);
-            Self::render_loops_sidebar(frame, main_chunks[1], loops);
+            Self::render_message_log(
+                frame,
+                left_chunks[1],
+                render.message_log,
+                render.log_scroll,
+            );
+            Self::render_input(frame, left_chunks[2], render.input_buffer);
+            Self::render_loops_sidebar(frame, main_chunks[1], render.loops);
 
-            if modal.is_none() {
-                Self::render_slash_dropdown(frame, left_chunks[2], slash_dropdown);
+            if render.modal.is_none() {
+                Self::render_slash_dropdown(frame, left_chunks[2], render.slash_dropdown);
             }
-            if let Some(modal_state) = modal {
+            if let Some(modal_state) = render.modal {
                 Self::render_modal(frame, modal_state);
             }
         })?;
@@ -1550,7 +1562,7 @@ impl Shell {
                 let text = if loop_info.description.is_empty() {
                     loop_info.name.clone()
                 } else {
-                    format!("{}", loop_info.name)
+                    format!("{} — {}", loop_info.name, loop_info.description)
                 };
                 ListItem::new(Line::from(vec![dot, Span::styled(text, theme::text())]))
             })

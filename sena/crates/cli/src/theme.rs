@@ -61,9 +61,7 @@ pub fn readonly() -> Style {
 }
 
 pub fn log_line(message: &str) -> Style {
-    if message.starts_with("[ERR]") {
-        danger()
-    } else if message.starts_with("[unclear]") {
+    if message.starts_with("[ERR]") || message.starts_with("[unclear]") {
         danger()
     } else if message.starts_with("[STT~]") {
         muted()
