@@ -54,6 +54,9 @@ pub struct ContextInterpretationInput {
 
 /// Inference-layer events.
 #[derive(Debug, Clone)]
+// allowed: boxing the large context-interpretation payload would change the
+// public inference event contract across the workspace, not just local style.
+#[allow(clippy::large_enum_variant)]
 pub enum InferenceEvent {
     /// Inference request submitted.
     InferenceRequested {

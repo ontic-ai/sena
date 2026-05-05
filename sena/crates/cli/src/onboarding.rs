@@ -13,6 +13,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 /// Result of the onboarding wizard.
+// allowed: the wizard returns structured values for tests and future callers,
+// while the current CLI path submits them over IPC and only checks success.
+#[allow(dead_code)]
 pub struct OnboardingResult {
     /// User's chosen name.
     pub user_name: String,

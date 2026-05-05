@@ -118,31 +118,31 @@ fn resolve_speech_models_dir() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var("APPDATA").map_err(|e| format!("APPDATA not set: {}", e))?;
-        return Ok(std::path::PathBuf::from(appdata)
+        Ok(std::path::PathBuf::from(appdata)
             .join("sena")
             .join("models")
-            .join("speech"));
+            .join("speech"))
     }
 
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
-        return Ok(std::path::PathBuf::from(home)
+        Ok(std::path::PathBuf::from(home)
             .join("Library")
             .join("Application Support")
             .join("sena")
             .join("models")
-            .join("speech"));
+            .join("speech"))
     }
 
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
-        return Ok(std::path::PathBuf::from(home)
+        Ok(std::path::PathBuf::from(home)
             .join(".config")
             .join("sena")
             .join("models")
-            .join("speech"));
+            .join("speech"))
     }
 }
 

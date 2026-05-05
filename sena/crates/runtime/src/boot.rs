@@ -526,7 +526,7 @@ async fn spawn_actors_with_data_dir(
     let models_dir = resolve_models_dir()?;
 
     // Step 4: Soul actor spawn
-    let soul_actor = builder::build_soul_actor(&data_dir)?;
+    let soul_actor = builder::build_soul_actor(data_dir)?;
     let soul_name: &'static str = "soul";
     expected.push(soul_name);
     let soul_handle = spawn_soul_actor(soul_actor, bus.clone());

@@ -1375,12 +1375,7 @@ impl Shell {
                 render.daemon_uptime_secs,
                 render.vram,
             );
-            Self::render_message_log(
-                frame,
-                left_chunks[1],
-                render.message_log,
-                render.log_scroll,
-            );
+            Self::render_message_log(frame, left_chunks[1], render.message_log, render.log_scroll);
             Self::render_input(frame, left_chunks[2], render.input_buffer);
             Self::render_loops_sidebar(frame, main_chunks[1], render.loops);
 

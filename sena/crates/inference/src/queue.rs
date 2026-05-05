@@ -53,6 +53,9 @@ impl std::fmt::Debug for WorkKind {
 }
 
 /// The concrete work task to execute.
+// allowed: boxing the large context payload would add heap indirection and
+// reshape the internal worker API during this style-only cleanup.
+#[allow(clippy::large_enum_variant)]
 pub enum WorkKind {
     /// Text generation from a prompt.
     Inference {

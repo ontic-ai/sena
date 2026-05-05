@@ -279,11 +279,13 @@ impl<'a> ConfigEditor<'a> {
             }
             KeyCode::Down | KeyCode::Tab => {}
             KeyCode::Left | KeyCode::Right => {
-                if let Some(field @ ConfigField {
-                    editable: true,
-                    kind: ConfigFieldKind::Bool,
-                    ..
-                }) = self.fields.get_mut(self.selected)
+                if let Some(
+                    field @ ConfigField {
+                        editable: true,
+                        kind: ConfigFieldKind::Bool,
+                        ..
+                    },
+                ) = self.fields.get_mut(self.selected)
                 {
                     field.value = if field.value == "true" {
                         "false".to_string()

@@ -12,6 +12,9 @@ use crate::events::{
 
 /// Unified event type for all bus communication.
 #[derive(Debug, Clone)]
+// allowed: boxing large variants here would change the shared bus event API
+// across producers and consumers, which is outside this style-only cleanup.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// System-level events (boot, shutdown, failures).
     System(SystemEvent),

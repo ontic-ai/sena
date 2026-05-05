@@ -53,6 +53,9 @@ pub struct PromptActor {
     recent_dialogue_turns: VecDeque<String>,
 }
 
+// allowed: boxing the cached snapshot would add heap allocation and reshape
+// this internal pending state during a style-only cleanup.
+#[allow(clippy::large_enum_variant)]
 enum PendingPrompt {
     Voice { user_text: String },
     Ctp { snapshot: ContextSnapshot },
@@ -115,14 +118,14 @@ impl PromptActor {
     ) -> Vec<PromptSegment> {
         let mut segments = Vec::new();
 
-        if let Some(content) = &self.cached_soul_content {
-            if !content.is_empty() {
-                segments.push(PromptSegment::SoulContext(SoulSummary {
-                    content: content.clone(),
-                    event_count: 0,
-                    request_id: 0,
-                }));
-            }
+        if let Some(content) = &self.cached_soul_content
+            && !content.is_empty()
+        {
+            segments.push(PromptSegment::SoulContext(SoulSummary {
+                content: content.clone(),
+                event_count: 0,
+                request_id: 0,
+            }));
         }
 
         if !memory_chunks.is_empty() {
@@ -155,14 +158,14 @@ impl PromptActor {
     ) -> Vec<PromptSegment> {
         let mut segments = Vec::new();
 
-        if let Some(content) = &self.cached_soul_content {
-            if !content.is_empty() {
-                segments.push(PromptSegment::SoulContext(SoulSummary {
-                    content: content.clone(),
-                    event_count: 0,
-                    request_id: 0,
-                }));
-            }
+        if let Some(content) = &self.cached_soul_content
+            && !content.is_empty()
+        {
+            segments.push(PromptSegment::SoulContext(SoulSummary {
+                content: content.clone(),
+                event_count: 0,
+                request_id: 0,
+            }));
         }
 
         if let Some(snapshot) = &self.cached_snapshot {

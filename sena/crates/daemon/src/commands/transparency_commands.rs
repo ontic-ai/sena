@@ -111,18 +111,17 @@ impl CommandHandler for TransparencyQueryHandler {
                     }) = event
                     {
                         // Check if this response matches our query
-                        let matches = match (&query, &response_query) {
+                        let matches = matches!(
+                            (&query, &response_query),
                             (
                                 TransparencyQuery::CurrentObservation,
                                 TransparencyQuery::CurrentObservation,
-                            ) => true,
-                            (TransparencyQuery::UserMemory, TransparencyQuery::UserMemory) => true,
-                            (
-                                TransparencyQuery::ReasoningChain { .. },
-                                TransparencyQuery::ReasoningChain { .. },
-                            ) => true,
-                            _ => false,
-                        };
+                            ) | (TransparencyQuery::UserMemory, TransparencyQuery::UserMemory,)
+                                | (
+                                    TransparencyQuery::ReasoningChain { .. },
+                                    TransparencyQuery::ReasoningChain { .. },
+                                )
+                        );
 
                         if matches {
                             return serde_json::to_value(result).map_err(|e| {
