@@ -1,7 +1,20 @@
 //! Model management events.
 
+use serde::{Deserialize, Serialize};
+
+/// Detailed information about a discovered model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelInfo {
+    /// Friendly name of the model.
+    pub name: String,
+    /// Absolute path to the model file.
+    pub path: String,
+    /// Size of the model file in bytes.
+    pub size_bytes: u64,
+}
+
 /// Model management events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelEvent {
     /// A model was discovered during scanning.
     ModelDiscovered { model_name: String, path: String },

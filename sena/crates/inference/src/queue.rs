@@ -4,7 +4,8 @@
 //! `dequeue()` always returns the highest-priority item available, preserving
 //! FIFO order within each priority level.
 
-use bus::{CausalId, InferenceSource, Priority};
+use bus::events::ctp::EnrichedInferredTask;
+use bus::{CausalId, ContextInterpretationInput, InferenceSource, Priority};
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
@@ -43,6 +44,10 @@ impl std::fmt::Debug for WorkKind {
                 .debug_struct("Extract")
                 .field("causal_id", causal_id)
                 .finish(),
+            WorkKind::InterpretContext { causal_id, .. } => f
+                .debug_struct("InterpretContext")
+                .field("causal_id", causal_id)
+                .finish(),
         }
     }
 }
@@ -68,6 +73,12 @@ pub enum WorkKind {
         text: String,
         causal_id: CausalId,
         response_tx: oneshot::Sender<Result<String, String>>,
+    },
+    /// Model-driven interpretation of a CTP context snapshot.
+    InterpretContext {
+        context: ContextInterpretationInput,
+        causal_id: CausalId,
+        response_tx: oneshot::Sender<Result<Option<EnrichedInferredTask>, String>>,
     },
 }
 

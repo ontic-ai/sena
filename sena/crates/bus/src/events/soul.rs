@@ -1,42 +1,129 @@
 //! Soul subsystem events: event log writes, summaries, identity signals.
 
 use crate::causal::CausalId;
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-/// Compact summary of Soul state for bus communication.
-/// This is a simplified representation — the full SoulSummary type lives in the soul crate.
-#[derive(Debug, Clone)]
+/// Compact summary of Soul state for bus communication and prompt composition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoulSummary {
-    /// Total number of events logged.
-    pub total_events: u64,
-    /// Most recent event timestamp.
-    pub last_event_time: Option<SystemTime>,
-    /// Number of identity signals recorded.
-    pub identity_signal_count: usize,
+    /// Assembled summary content from the Soul event log.
+    pub content: String,
+    /// Number of events included in the summary.
+    pub event_count: usize,
+    /// Correlation ID linking this summary to its originating request.
+    pub request_id: u64,
+}
+
+/// Response verbosity preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Verbosity {
+    Terse,
+    #[default]
+    Balanced,
+    Verbose,
+}
+
+impl Verbosity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terse => "terse",
+            Self::Balanced => "balanced",
+            Self::Verbose => "verbose",
+        }
+    }
+}
+
+/// Response warmth preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Warmth {
+    Professional,
+    #[default]
+    Friendly,
+    Casual,
+}
+
+impl Warmth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Professional => "professional",
+            Self::Friendly => "friendly",
+            Self::Casual => "casual",
+        }
+    }
+}
+
+/// Type of a section within a rich soul summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SoulSectionType {
+    /// Recently observed events.
+    RecentEvents,
+    /// Distilled identity signals (preferences, style, habits).
+    IdentitySignals,
+    /// Temporal behaviour patterns (time-of-day, cadence).
+    TemporalHabits,
+    /// Explicit user preferences.
+    Preferences,
+}
+
+/// A single section within a [`RichSoulSummary`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoulSection {
+    /// Section type.
+    pub section_type: SoulSectionType,
+    /// Text content of the section.
+    pub content: String,
+    /// Relevance score for the current context (0.0–1.0).
+    pub relevance_score: f64,
+}
+
+/// Rich, structured soul summary with multiple sections and token budget tracking.
+///
+/// Used by the prompt subsystem when it wants finer-grained control over which
+/// parts of the Soul context to include within a token budget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RichSoulSummary {
+    /// Ordered list of content sections.
+    pub sections: Vec<SoulSection>,
+    /// Estimated token count across all sections.
+    pub token_count: usize,
+    /// Correlation ID linking this summary to its originating request.
+    pub request_id: u64,
 }
 
 /// Personality metadata for prompt composition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonalityMetadata {
-    /// Verbosity preference: 0.0 (minimal) to 1.0 (comprehensive).
-    pub verbosity: f64,
-    /// Response warmth: 0.0 (formal) to 1.0 (warm/friendly).
-    pub warmth: f64,
+    /// Verbosity preference.
+    pub verbosity: Verbosity,
+    /// Response warmth.
+    pub warmth: Warmth,
     /// Work cadence preference.
     pub work_cadence: WorkCadence,
 }
 
 /// Work cadence preference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkCadence {
     Burst,
+    #[default]
     Steady,
     LongFocus,
 }
 
+impl WorkCadence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Burst => "burst",
+            Self::Steady => "steady",
+            Self::LongFocus => "long_focus",
+        }
+    }
+}
+
 /// Distilled identity signal from Soul for CTP/prompt composition.
 /// Privacy-safe typed representation of learned identity attributes.
-#[derive(Debug, Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DistilledIdentitySignal {
     /// The signal's semantic key (e.g., "voice::rate", "work_style::preferred_cadence").
     pub signal_key: String,
@@ -46,9 +133,19 @@ pub struct DistilledIdentitySignal {
     pub confidence: f32,
 }
 
+impl std::fmt::Debug for DistilledIdentitySignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DistilledIdentitySignal")
+            .field("signal_key", &self.signal_key)
+            .field("signal_value", &"[REDACTED]")
+            .field("confidence", &self.confidence)
+            .finish()
+    }
+}
+
 /// Temporal behavior pattern detected by Soul.
 /// Represents stable/recurring patterns in user's temporal behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemporalBehaviorPattern {
     /// Pattern type identifier (e.g., "high_cadence_work", "late_night_focus").
     pub pattern_type: String,
@@ -219,10 +316,26 @@ mod tests {
     #[test]
     fn soul_summary_constructs() {
         let summary = SoulSummary {
-            total_events: 100,
-            last_event_time: Some(SystemTime::now()),
-            identity_signal_count: 5,
+            content: "Recent activity summary".to_string(),
+            event_count: 100,
+            request_id: 42,
         };
-        assert_eq!(summary.total_events, 100);
+        assert_eq!(summary.event_count, 100);
+    }
+
+    #[test]
+    fn rich_soul_summary_constructs() {
+        let section = SoulSection {
+            section_type: SoulSectionType::RecentEvents,
+            content: "user was coding".to_string(),
+            relevance_score: 0.9,
+        };
+        let rich = RichSoulSummary {
+            sections: vec![section],
+            token_count: 10,
+            request_id: 1,
+        };
+        assert_eq!(rich.sections.len(), 1);
+        assert_eq!(rich.token_count, 10);
     }
 }

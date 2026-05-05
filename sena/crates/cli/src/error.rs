@@ -45,4 +45,8 @@ pub enum CliError {
     /// IPC error.
     #[error("IPC error: {0}")]
     Ipc(#[from] ipc::IpcError),
+
+    /// Onboarding failed.
+    #[error("onboarding failed: {0}")]
+    OnboardingFailed(String),
 }

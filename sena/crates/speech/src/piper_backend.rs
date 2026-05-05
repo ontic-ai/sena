@@ -56,6 +56,8 @@ pub struct PiperTtsBackend {
     pad_id: i64,
     bos_id: i64,
     eos_id: i64,
+    speaking_rate: f32,
+    pitch_scale: f32,
 }
 
 impl PiperTtsBackend {
@@ -129,6 +131,8 @@ impl PiperTtsBackend {
             pad_id,
             bos_id,
             eos_id,
+            speaking_rate: 1.0,
+            pitch_scale: 1.0,
         })
     }
 
@@ -158,6 +162,29 @@ impl PiperTtsBackend {
 
         Ok(phoneme_ids)
     }
+
+    fn apply_pitch_scale(samples: &[f32], pitch_scale: f32) -> Vec<f32> {
+        if samples.is_empty() || (pitch_scale - 1.0).abs() < f32::EPSILON {
+            return samples.to_vec();
+        }
+
+        let scale = pitch_scale.max(0.1);
+        let target_len = ((samples.len() as f32) / scale).round().max(1.0) as usize;
+        let mut output = Vec::with_capacity(target_len);
+
+        for index in 0..target_len {
+            let source_position = (index as f32) * scale;
+            let lower_index = source_position.floor() as usize;
+            let upper_index = (lower_index + 1).min(samples.len().saturating_sub(1));
+            let fraction = source_position - lower_index as f32;
+
+            let lower = samples[lower_index.min(samples.len().saturating_sub(1))];
+            let upper = samples[upper_index];
+            output.push(lower + (upper - lower) * fraction);
+        }
+
+        output
+    }
 }
 
 impl TtsBackend for PiperTtsBackend {
@@ -181,7 +208,7 @@ impl TtsBackend for PiperTtsBackend {
         let input_lengths = Array1::<i64>::from_elem(1, input_len as i64);
         let scales = Array1::<f32>::from_vec(vec![
             self.config.inference.noise_scale,
-            self.config.inference.length_scale,
+            self.config.inference.length_scale / self.speaking_rate.max(0.1),
             self.config.inference.noise_w,
         ]);
 
@@ -217,6 +244,7 @@ impl TtsBackend for PiperTtsBackend {
         }
 
         // Run inference - use input_values slice
+        let pitch_scale = self.pitch_scale;
         let outputs = self
             .session
             .run(&input_values[..])
@@ -226,12 +254,14 @@ impl TtsBackend for PiperTtsBackend {
         let audio_tensor = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
             TtsError::SynthesisFailed(format!("failed to extract audio tensor: {}", e))
         })?;
-        let samples = audio_tensor.1; // Second element is the data slice
+        let samples = Self::apply_pitch_scale(audio_tensor.1, pitch_scale);
 
-        Ok(AudioStream::new(
-            samples.to_vec(),
-            self.config.audio.sample_rate,
-        ))
+        Ok(AudioStream::new(samples, self.config.audio.sample_rate))
+    }
+
+    fn set_prosody(&mut self, speaking_rate: f32, pitch_scale: f32) {
+        self.speaking_rate = speaking_rate;
+        self.pitch_scale = pitch_scale;
     }
 
     fn cancel(&mut self) {

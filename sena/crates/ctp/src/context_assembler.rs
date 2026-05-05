@@ -4,7 +4,7 @@
 //! a typed `ContextSnapshot` suitable for CTP trigger evaluation and broadcast.
 
 use crate::signal_buffer::SignalBuffer;
-use bus::events::ctp::{ContextSnapshot, EnrichedInferredTask};
+use bus::events::ctp::ContextSnapshot;
 use platform::{KeystrokeCadence, WindowContext};
 use std::time::{Duration, Instant};
 
@@ -59,46 +59,18 @@ impl ContextAssembler {
         // Recent file events (up to 10)
         let recent_files: Vec<_> = buffer.file_events().take(10).cloned().collect();
 
-        // Infer task from active window (simple heuristic — real inference is deferred)
-        let inferred_task = Self::infer_task_from_window(&active_app);
-
         ContextSnapshot {
             active_app,
             recent_files,
             clipboard_digest,
             keystroke_cadence,
             session_duration,
-            inferred_task,
+            inferred_task: None,
             user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
             soul_identity_signal: previous.and_then(|p| p.soul_identity_signal.clone()),
         }
-    }
-
-    /// Heuristic task inference from window name.
-    ///
-    /// Returns a low-confidence `EnrichedInferredTask` based on the app name.
-    /// This is replaced by the TaskInferenceEngine in later phases.
-    fn infer_task_from_window(window: &WindowContext) -> Option<EnrichedInferredTask> {
-        let app = window.app_name.to_lowercase();
-        let category = if app.contains("code") || app.contains("vim") || app.contains("nvim") {
-            "coding"
-        } else if app.contains("chrome") || app.contains("firefox") || app.contains("safari") {
-            "browsing"
-        } else if app.contains("terminal") || app.contains("powershell") || app.contains("cmd") {
-            "terminal"
-        } else if app.contains("word") || app.contains("docs") || app.contains("notion") {
-            "writing"
-        } else {
-            return None;
-        };
-
-        Some(EnrichedInferredTask {
-            category: category.to_string(),
-            semantic_description: format!("User is using {}", window.app_name),
-            confidence: 0.3,
-        })
     }
 }
 
@@ -133,5 +105,24 @@ mod tests {
         });
         let snapshot = assembler.assemble_with_previous(&buffer, Instant::now(), None);
         assert_eq!(snapshot.active_app.app_name, "Code");
+    }
+
+    #[test]
+    fn assembler_leaves_task_inference_to_inference_actor() {
+        let assembler = ContextAssembler::new();
+        let mut buffer = SignalBuffer::new(Duration::from_secs(60));
+        buffer.push_window(WindowContext {
+            app_name: "Code".to_string(),
+            window_title: Some("src/main.rs".to_string()),
+            bundle_id: None,
+            timestamp: Instant::now(),
+        });
+
+        let snapshot = assembler.assemble_with_previous(&buffer, Instant::now(), None);
+
+        assert!(
+            snapshot.inferred_task.is_none(),
+            "CTP should not hardcode semantic task meaning in the context assembler"
+        );
     }
 }

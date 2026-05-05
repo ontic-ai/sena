@@ -1,14 +1,15 @@
 //! SoulActor: owns the encrypted store and handles all Soul subsystem events.
 
+use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bus::events::{PersonalityMetadata, WorkCadence as BusWorkCadence};
+use bus::events::PersonalityMetadata;
 use bus::{Actor, ActorError, Event, EventBus, SoulEvent};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::error::SoulError;
-use crate::schema::{SchemaV1, WorkCadence};
+use crate::schema::SchemaV1;
 use crate::store::SoulStore;
 
 const SOUL_ACTOR_NAME: &str = "soul";
@@ -35,6 +36,8 @@ pub struct SoulActor {
     directed_rx: Option<mpsc::Receiver<Event>>,
     /// In-memory schema cache.
     schema: SchemaV1,
+    /// When the current runtime session started.
+    session_started_at: Option<DateTime<Utc>>,
     /// Deletion pending confirmation?
     deletion_pending: bool,
 }
@@ -48,21 +51,47 @@ impl SoulActor {
             broadcast_rx: None,
             directed_rx: None,
             schema: SchemaV1::default(),
+            session_started_at: None,
             deletion_pending: false,
         }
+    }
+
+    fn build_summary_content(&self, recent_summary: &crate::types::SoulSummary) -> String {
+        let last_active = self
+            .schema
+            .last_active
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string());
+
+        let mut lines = vec![
+            format!("Name: {}", self.schema.name),
+            format!("Session count: {}", self.schema.session_count),
+            format!("Created at: {}", self.schema.created_at.to_rfc3339()),
+            format!("Last active: {}", last_active),
+            format!(
+                "Total interaction minutes: {}",
+                self.schema.total_interaction_minutes
+            ),
+            format!("Verbosity: {}", self.schema.verbosity.as_str()),
+            format!("Warmth: {}", self.schema.warmth.as_str()),
+            format!("Work cadence: {}", self.schema.work_cadence.as_str()),
+        ];
+
+        if !recent_summary.content.is_empty() {
+            lines.push("Recent soul events:".to_string());
+            lines.push(recent_summary.content.trim_end().to_string());
+        }
+
+        lines.join("\n")
     }
 
     /// Emit PersonalityUpdated event.
     async fn emit_personality_updated(&self, causal_id: bus::CausalId) {
         if let Some(bus) = &self.bus {
             let metadata = PersonalityMetadata {
-                verbosity: self.schema.verbosity_preference,
-                warmth: self.schema.response_warmth,
-                work_cadence: match self.schema.work_cadence_preference {
-                    WorkCadence::Burst => BusWorkCadence::Burst,
-                    WorkCadence::Steady => BusWorkCadence::Steady,
-                    WorkCadence::LongFocus => BusWorkCadence::LongFocus,
-                },
+                verbosity: self.schema.verbosity,
+                warmth: self.schema.warmth,
+                work_cadence: self.schema.work_cadence,
             };
 
             let _ = bus
@@ -138,13 +167,15 @@ impl SoulActor {
         tracing::debug!(
             ?causal_id,
             description_len = description.len(),
-            ?app_context,
+            app_context_present = app_context.is_some(),
             "SoulActor: WriteRequested received"
         );
 
         let store = self.store.as_mut().ok_or(SoulError::StoreNotInitialized)?;
 
         let row_id = store.write_event(description, app_context, timestamp)?;
+        self.schema.last_active = Some(Utc::now());
+        store.save_schema(&self.schema)?;
 
         tracing::info!(row_id, ?causal_id, "SoulActor: event written to store");
 
@@ -175,10 +206,11 @@ impl SoulActor {
         let store = self.store.as_ref().ok_or(SoulError::StoreNotInitialized)?;
 
         let summary = store.read_summary(max_events, None)?;
+        let content = self.build_summary_content(&summary);
 
         tracing::info!(
             event_count = summary.event_count,
-            content_len = summary.content.len(),
+            content_len = content.len(),
             ?causal_id,
             "SoulActor: summary read from store"
         );
@@ -186,7 +218,7 @@ impl SoulActor {
         if let Some(bus) = &self.bus {
             let _ = bus
                 .broadcast(Event::Soul(SoulEvent::SummaryCompleted {
-                    content: summary.content,
+                    content,
                     event_count: summary.event_count,
                     causal_id,
                 }))
@@ -271,6 +303,7 @@ impl SoulActor {
 
         // Reset actor schema to match wiped store.
         self.schema = SchemaV1::default();
+        self.session_started_at = None;
         self.deletion_pending = false;
 
         tracing::warn!("SoulActor: all Soul data deleted");
@@ -380,7 +413,9 @@ impl SoulActor {
                     tracing::trace!("SoulActor: ignoring self-emitted event");
                 }
             },
-            Event::System(bus::SystemEvent::ShutdownSignal) => {
+            Event::System(bus::SystemEvent::ShutdownSignal)
+            | Event::System(bus::SystemEvent::ShutdownRequested)
+            | Event::System(bus::SystemEvent::ShutdownInitiated) => {
                 tracing::info!("SoulActor: shutdown signal received");
                 return Err(SoulError::NotImplemented(
                     "shutdown signal stop".to_string(),
@@ -408,6 +443,20 @@ impl Actor for SoulActor {
             store
                 .initialize()
                 .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
+
+            let mut schema = store
+                .load_schema()
+                .map_err(|e| ActorError::StartupFailed(e.to_string()))?
+                .unwrap_or_default();
+            let now = Utc::now();
+            schema.session_count = schema.session_count.saturating_add(1);
+            schema.last_active = Some(now);
+            store
+                .save_schema(&schema)
+                .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
+            tracing::info!(session = schema.session_count, "soul loaded");
+            self.session_started_at = Some(now);
+            self.schema = schema;
         } else {
             return Err(ActorError::StartupFailed(
                 "store not configured".to_string(),
@@ -481,6 +530,22 @@ impl Actor for SoulActor {
         tracing::info!("SoulActor: stopping");
 
         if let Some(store) = &mut self.store {
+            if let Some(session_started_at) = self.session_started_at.take() {
+                let now = Utc::now();
+                let elapsed_minutes = now
+                    .signed_duration_since(session_started_at)
+                    .num_minutes()
+                    .max(0) as u64;
+                self.schema.total_interaction_minutes = self
+                    .schema
+                    .total_interaction_minutes
+                    .saturating_add(elapsed_minutes);
+                self.schema.last_active = Some(now);
+                store
+                    .save_schema(&self.schema)
+                    .map_err(|e| ActorError::RuntimeError(e.to_string()))?;
+            }
+
             store
                 .close()
                 .map_err(|e| ActorError::RuntimeError(e.to_string()))?;
@@ -494,6 +559,7 @@ impl Actor for SoulActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::SchemaV1;
     use crate::types::{IdentitySignal, SoulEventRecord, SoulSummary, TemporalPattern};
     use std::time::SystemTime;
 
@@ -501,6 +567,7 @@ mod tests {
     struct TestStore {
         events: Vec<SoulEventRecord>,
         signals: Vec<IdentitySignal>,
+        schema: Option<SchemaV1>,
     }
 
     impl TestStore {
@@ -508,6 +575,7 @@ mod tests {
             Self {
                 events: Vec::new(),
                 signals: Vec::new(),
+                schema: Some(SchemaV1::default()),
             }
         }
     }
@@ -583,6 +651,15 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn load_schema(&self) -> Result<Option<SchemaV1>, SoulError> {
+            Ok(self.schema.clone())
+        }
+
+        fn save_schema(&mut self, schema: &SchemaV1) -> Result<(), SoulError> {
+            self.schema = Some(schema.clone());
+            Ok(())
+        }
+
         fn initialize(&mut self) -> Result<(), SoulError> {
             Ok(())
         }
@@ -610,6 +687,7 @@ mod tests {
         let bus = Arc::new(EventBus::new());
 
         actor.start(Arc::clone(&bus)).await.expect("start failed");
+        assert_eq!(actor.schema.session_count, 1);
         actor.stop().await.expect("stop failed");
     }
 

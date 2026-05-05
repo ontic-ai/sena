@@ -1,4 +1,4 @@
-//! Supervision loop — monitors actor liveness, handles readiness gate, emits BootComplete.
+//! Supervision loop â€” monitors actor liveness, handles readiness gate, emits BootComplete.
 
 use crate::analytics::TokenTuner;
 use crate::boot::BootResult;
@@ -50,7 +50,7 @@ pub async fn supervision_loop(mut boot_result: BootResult) -> Result<(), Runtime
                 "SUPERVISOR: readiness gate timeout, {} actors did not report ready within 30s",
                 missing_actors.len()
             );
-            // Do NOT mark actors as failed — they remain in Starting state and can
+            // Do NOT mark actors as failed â€” they remain in Starting state and can
             // become healthy later if they emit ActorReady after the timeout.
             // The boot gate's only job is deciding WHEN BootComplete fires.
             // Health tracking continues for the process lifetime.
@@ -125,11 +125,11 @@ async fn await_readiness_gate(
         loop {
             match rx.recv().await {
                 Ok(Event::System(SystemEvent::ActorReady { actor_name })) => {
-                    if expected_actors.contains(actor_name) {
+                    if expected_actors.contains(actor_name.as_str()) {
                         info!(actor = actor_name, "SUPERVISOR: ActorReady received");
-                        ready_actors.insert(actor_name);
+                        ready_actors.insert(actor_name.clone());
                         // Update actor registry immediately as ready events arrive
-                        actor_registry.mark_running(actor_name);
+                        actor_registry.mark_running(&actor_name);
 
                         if ready_actors.len() == expected_actors.len() {
                             info!("SUPERVISOR: all actors ready");
@@ -146,8 +146,11 @@ async fn await_readiness_gate(
         }
 
         // Timeout or channel error: return missing actors
-        let missing: Vec<&'static str> =
-            expected_actors.difference(&ready_actors).copied().collect();
+        let missing: Vec<&'static str> = expected_actors
+            .iter()
+            .filter(|a| !ready_actors.contains(**a))
+            .copied()
+            .collect::<Vec<_>>();
         Err(missing)
     };
 
@@ -183,9 +186,9 @@ async fn await_shutdown_or_health_checks(
 
     loop {
         tokio::select! {
-            // Ctrl+C — broadcast ShutdownSignal and exit cleanly.
+            // Ctrl+C â€” broadcast ShutdownSignal and exit cleanly.
             _ = tokio::signal::ctrl_c() => {
-                info!("SUPERVISOR: Ctrl+C received — broadcasting ShutdownSignal");
+                info!("SUPERVISOR: Ctrl+C received â€” broadcasting ShutdownSignal");
                 let _ = boot_result
                     .bus
                     .broadcast(Event::System(SystemEvent::ShutdownSignal))
@@ -204,10 +207,10 @@ async fn await_shutdown_or_health_checks(
                 }
                 Ok(Event::System(SystemEvent::ActorReady { actor_name })) => {
                     info!(actor = actor_name, "SUPERVISOR: ActorReady received (post-boot)");
-                    // Update health unconditionally — ActorReady can arrive at any time,
+                    // Update health unconditionally â€” ActorReady can arrive at any time,
                     // even after the boot window expires. This allows late-starting actors
                     // to transition from Starting to Running.
-                    actor_registry.mark_running(actor_name);
+                    actor_registry.mark_running(&actor_name);
                 }
                 Ok(Event::System(SystemEvent::ActorFailed { actor, reason })) => {
                     warn!(actor = %actor, reason = %reason, "SUPERVISOR: actor failed");
@@ -280,7 +283,7 @@ async fn handle_health_check_request(boot_result: &BootResult, actor_registry: &
 
 /// Shutdown actors in reverse boot order with per-actor timeout.
 ///
-/// Order: tts → stt → prompt → ctp → platform → memory → inference → soul
+/// Order: tts â†’ stt â†’ prompt â†’ ctp â†’ platform â†’ memory â†’ inference â†’ soul
 /// Each actor gets 5 seconds to complete. On timeout: abort and continue.
 async fn shutdown_actors(
     actor_handles: Vec<(&'static str, JoinHandle<()>)>,
@@ -404,7 +407,7 @@ mod tests {
             instance_guard,
         };
 
-        // Don't send ActorReady — should timeout (but we use a short timeout for testing)
+        // Don't send ActorReady â€” should timeout (but we use a short timeout for testing)
         // NOTE: This test would need a way to configure the timeout, so we'll just
         // test the happy path for now and trust the timeout logic.
         // In a real test, we'd inject the timeout duration.

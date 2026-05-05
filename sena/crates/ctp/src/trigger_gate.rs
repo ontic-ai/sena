@@ -1,6 +1,6 @@
-//! Trigger gate — decides when CTP should emit a ThoughtEvent.
+//! Trigger gate — decides when CTP should emit a ThoughtEvent from raw context.
 
-use bus::events::ctp::{ContextSnapshot, SignalPattern, SignalPatternType};
+use bus::events::ctp::ContextSnapshot;
 use std::time::{Duration, Instant};
 
 /// Default minimum interval between consecutive thought events.
@@ -41,11 +41,7 @@ impl TriggerGate {
     /// The first call never fires. It establishes a baseline snapshot so later
     /// evaluations can reason about context changes instead of immediately
     /// triggering during startup.
-    pub fn should_trigger(
-        &mut self,
-        snapshot: &ContextSnapshot,
-        patterns: &[SignalPattern],
-    ) -> bool {
+    pub fn should_trigger(&mut self, snapshot: &ContextSnapshot) -> bool {
         let now = Instant::now();
 
         let time_since_last = match self.last_trigger {
@@ -58,33 +54,12 @@ impl TriggerGate {
         };
 
         let periodic_trigger = time_since_last >= self.min_interval;
-        let periodic_bonus = ((time_since_last.as_secs_f32() / (30.0 * 60.0)) * 0.05).min(0.15);
-
         let base_score = self
             .last_snapshot
             .as_ref()
             .map(|previous| context_diff_score(previous, snapshot))
             .unwrap_or(0.0);
-
-        let mut significance_bonus = 0.0;
-
-        for pattern in patterns {
-            match pattern.pattern_type {
-                SignalPatternType::Frustration => significance_bonus += 0.20,
-                SignalPatternType::Anomaly => significance_bonus += 0.15,
-                SignalPatternType::Repetition => significance_bonus += 0.10,
-                SignalPatternType::FlowState => significance_bonus += 0.05,
-            }
-        }
-
-        if let Some(user_state) = &snapshot.user_state
-            && user_state.context_switch_cost >= 60
-        {
-            significance_bonus += 0.10;
-        }
-
-        let total_score = (base_score + significance_bonus + periodic_bonus).min(1.0);
-        let significance_trigger = total_score >= diff_threshold(self.sensitivity);
+        let significance_trigger = base_score >= diff_threshold(self.sensitivity);
 
         self.last_snapshot = Some(snapshot.clone());
 
@@ -134,19 +109,7 @@ fn context_diff_score(previous: &ContextSnapshot, current: &ContextSnapshot) -> 
         score += 0.10;
     }
 
-    if inferred_task_changed(previous, current) {
-        score += 0.30;
-    }
-
     score.min(1.0)
-}
-
-fn inferred_task_changed(previous: &ContextSnapshot, current: &ContextSnapshot) -> bool {
-    match (&previous.inferred_task, &current.inferred_task) {
-        (Some(previous_task), Some(current_task)) => previous_task != current_task,
-        (None, None) => false,
-        _ => true,
-    }
 }
 
 impl Default for TriggerGate {
@@ -158,7 +121,6 @@ impl Default for TriggerGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus::events::ctp::{EnrichedInferredTask, UserState};
     use platform::{KeystrokeCadence, WindowContext};
     use std::thread::sleep;
 
@@ -191,78 +153,62 @@ mod tests {
     #[test]
     fn first_check_does_not_trigger_warm_up_guard() {
         let mut gate = TriggerGate::new(Duration::from_secs(5));
-        assert!(!gate.should_trigger(&snapshot("Code"), &[]));
+        assert!(!gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
     fn check_after_interval_triggers() {
         let mut gate = TriggerGate::new(Duration::from_millis(100));
 
-        assert!(!gate.should_trigger(&snapshot("Code"), &[]));
+        assert!(!gate.should_trigger(&snapshot("Code")));
 
         sleep(Duration::from_millis(150));
 
-        assert!(gate.should_trigger(&snapshot("Code"), &[]));
+        assert!(gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
     fn reset_allows_immediate_trigger() {
         let mut gate = TriggerGate::new(Duration::from_secs(10));
 
-        assert!(!gate.should_trigger(&snapshot("Code"), &[]));
-        assert!(!gate.should_trigger(&snapshot("Code"), &[]));
+        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(!gate.should_trigger(&snapshot("Code")));
 
         gate.reset();
 
-        assert!(gate.should_trigger(&snapshot("Code"), &[]));
+        assert!(gate.should_trigger(&snapshot("Code")));
     }
 
     #[test]
     fn context_switch_triggers_without_waiting_interval() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999));
 
-        assert!(!gate.should_trigger(&snapshot("Code"), &[]));
-        assert!(gate.should_trigger(&snapshot("Browser"), &[]));
+        assert!(!gate.should_trigger(&snapshot("Code")));
+        assert!(gate.should_trigger(&snapshot("Browser")));
     }
 
     #[test]
-    fn task_change_contributes_to_diff_score() {
+    fn window_title_change_contributes_to_diff_score() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999)).with_sensitivity(1.0);
-        let mut first = snapshot("Code");
-        first.inferred_task = Some(EnrichedInferredTask {
-            category: "coding".to_string(),
-            semantic_description: "Writing code".to_string(),
-            confidence: 0.8,
-        });
+        let first = snapshot("Code");
 
         let mut second = snapshot("Code");
-        second.inferred_task = Some(EnrichedInferredTask {
-            category: "research".to_string(),
-            semantic_description: "Reading documentation".to_string(),
-            confidence: 0.7,
-        });
+        second.active_app.window_title = Some("README.md".to_string());
 
-        assert!(!gate.should_trigger(&first, &[]));
-        assert!(gate.should_trigger(&second, &[]));
+        assert!(!gate.should_trigger(&first));
+        assert!(!gate.should_trigger(&second));
     }
 
     #[test]
-    fn context_switch_cost_bonus_contributes_to_trigger() {
+    fn keystroke_shift_can_trigger_without_waiting_interval() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999)).with_sensitivity(1.0);
         let first = snapshot("Code");
         let mut second = snapshot("Code");
-        second.user_state = Some(UserState {
-            frustration_level: 0,
-            flow_detected: false,
-            context_switch_cost: 80,
-        });
-        let anomaly_pattern = SignalPattern {
-            pattern_type: SignalPatternType::Anomaly,
-            confidence: 0.60,
-            description: "Cadence spike".to_string(),
-        };
+        second.keystroke_cadence.burst_detected = true;
+        second.keystroke_cadence.idle_duration = Duration::from_secs(45);
+        second.keystroke_cadence.events_per_minute = 180.0;
 
-        assert!(!gate.should_trigger(&first, &[]));
-        assert!(gate.should_trigger(&second, &[anomaly_pattern]));
+        assert!(!gate.should_trigger(&first));
+        assert!(gate.should_trigger(&second));
     }
 }

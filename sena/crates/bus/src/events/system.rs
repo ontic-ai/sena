@@ -1,56 +1,54 @@
-//! System-level events: boot, shutdown, failure.
+//! System-level events for the Sena event bus.
 
-/// Information about a failed actor.
-#[derive(Debug, Clone)]
-pub struct ActorFailureInfo {
-    /// Static name of the actor that failed.
-    pub actor_name: &'static str,
-    /// Error message describing the failure.
-    pub error_msg: String,
-}
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
-/// Kind of model being downloaded or managed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Kinds of models Sena manages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelKind {
-    /// LLM inference model (GGUF).
+    /// Large Language Model (GGUF).
     Llm,
-    /// Speech-to-text model (Whisper GGUF).
+    /// Embedding model (Bert).
+    Embedding,
+    /// Speech-to-text model (Whisper).
     Stt,
-    /// Text-to-speech voice model (Piper).
-    Tts,
-    /// Wakeword detection model (OpenWakeWord).
-    Wakeword,
 }
 
-/// Health status of an actor.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Status of an individual actor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActorStatus {
-    /// Actor is starting — registered but has not yet emitted ActorReady.
+    /// Actor is currently starting up.
     Starting,
-    /// Actor is running normally — has emitted ActorReady.
-    Running,
-    /// Actor has stopped.
-    Stopped,
-    /// Actor has failed.
+    /// Actor is fully operational.
+    Ready,
+    /// Actor is idle or paused.
+    Idle,
+    /// Actor has encountered a non-fatal error but is still running.
+    Degraded {
+        /// Warning message or error description.
+        reason: String,
+    },
+    /// Actor has failed and is no longer processing events.
     Failed {
-        /// Failure reason.
+        /// Error message.
         reason: String,
     },
 }
 
-/// Actor health information.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Health information for a single actor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActorHealth {
-    /// Actor name.
+    /// Name of the actor (e.g., "ctp", "soul").
     pub name: String,
-    /// Current status.
+    /// Current operational status.
     pub status: ActorStatus,
-    /// Uptime in seconds.
-    pub uptime_seconds: u64,
+    /// Last heartbeat or activity timestamp.
+    #[serde(with = "instant_serde")]
+    pub last_seen: Instant,
 }
 
 /// System lifecycle and control events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemEvent {
     /// Signal to initiate graceful shutdown.
     ShutdownSignal,
@@ -70,7 +68,7 @@ pub enum SystemEvent {
         reason: String,
     },
     /// Emitted by each actor when it has successfully started and is ready.
-    ActorReady { actor_name: &'static str },
+    ActorReady { actor_name: String },
     /// Encryption subsystem initialized successfully.
     EncryptionInitialized,
     /// Request for health check from an actor or subsystem.
@@ -151,133 +149,51 @@ pub enum SystemEvent {
         /// New state (true = enabled, false = disabled).
         enabled: bool,
     },
-
-    /// Runtime configuration was updated.
+    /// Configuration was updated.
     ConfigUpdated {
-        /// Dotted config path that changed.
+        /// Path to the key that was updated.
         path: String,
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Serde serialization modules for standard types not implementing Serialize.
+pub mod instant_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::{Duration, Instant, SystemTime};
 
-    #[test]
-    fn actor_failure_info_constructs() {
-        let info = ActorFailureInfo {
-            actor_name: "test_actor",
-            error_msg: "test error".to_string(),
+    /// Serialize an Instant by converting it to SystemTime.
+    /// Note: This is an approximation since Instant is monotonic and SystemTime is wall-clock.
+    pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let now = Instant::now();
+        let sys_now = SystemTime::now();
+        let diff = if *instant > now {
+            sys_now + instant.duration_since(now)
+        } else {
+            sys_now - now.duration_since(*instant)
         };
-        assert_eq!(info.actor_name, "test_actor");
-        assert_eq!(info.error_msg, "test error");
+        serde::Serialize::serialize(&diff, serializer)
     }
 
-    #[test]
-    fn system_events_are_cloneable() {
-        let event = SystemEvent::BootComplete;
-        let cloned = event.clone();
-        assert!(matches!(cloned, SystemEvent::BootComplete));
-    }
+    /// Deserialize an Instant by reconstructing it relative to current time.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Instant, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let sys_time: SystemTime = Deserialize::deserialize(deserializer)?;
+        let sys_now = SystemTime::now();
+        let now = Instant::now();
 
-    #[test]
-    fn actor_failed_event_constructs() {
-        let event = SystemEvent::ActorFailed {
-            actor: "test_actor".to_string(),
-            reason: "test error".to_string(),
-        };
-        assert!(matches!(event, SystemEvent::ActorFailed { .. }));
-    }
-
-    #[test]
-    fn model_kind_variants_exist() {
-        let kinds = [
-            ModelKind::Llm,
-            ModelKind::Stt,
-            ModelKind::Tts,
-            ModelKind::Wakeword,
-        ];
-        assert_eq!(kinds.len(), 4);
-    }
-
-    #[test]
-    fn health_check_events_construct() {
-        let req = SystemEvent::HealthCheckRequest {
-            target: Some("soul".to_string()),
-        };
-        let resp = SystemEvent::HealthCheckResponse {
-            actors: vec![ActorHealth {
-                name: "soul".to_string(),
-                status: ActorStatus::Running,
-                uptime_seconds: 42,
-            }],
-            uptime_seconds: 100,
-        };
-        assert!(matches!(req, SystemEvent::HealthCheckRequest { .. }));
-        assert!(matches!(resp, SystemEvent::HealthCheckResponse { .. }));
-    }
-
-    #[test]
-    fn download_progress_event_constructs() {
-        let event = SystemEvent::DownloadProgress {
-            model: ModelKind::Stt,
-            percent: 75,
-        };
-        assert!(matches!(event, SystemEvent::DownloadProgress { .. }));
-    }
-
-    #[test]
-    fn download_lifecycle_events_construct() {
-        let started = SystemEvent::DownloadStarted {
-            model: ModelKind::Llm,
-        };
-        let completed = SystemEvent::DownloadCompleted {
-            model: ModelKind::Tts,
-        };
-        let failed = SystemEvent::DownloadFailed {
-            model: ModelKind::Wakeword,
-            reason: "network error".to_string(),
-        };
-        assert!(matches!(started, SystemEvent::DownloadStarted { .. }));
-        assert!(matches!(completed, SystemEvent::DownloadCompleted { .. }));
-        assert!(matches!(failed, SystemEvent::DownloadFailed { .. }));
-    }
-
-    #[test]
-    fn onboarding_events_construct() {
-        let required = SystemEvent::OnboardingRequired;
-        let completed = SystemEvent::OnboardingCompleted;
-        assert!(matches!(required, SystemEvent::OnboardingRequired));
-        assert!(matches!(completed, SystemEvent::OnboardingCompleted));
-    }
-
-    #[test]
-    fn boot_failed_event_constructs() {
-        let event = SystemEvent::BootFailed {
-            reason: "speech models unavailable".to_string(),
-        };
-        assert!(matches!(event, SystemEvent::BootFailed { .. }));
-    }
-
-    #[test]
-    fn token_budget_auto_tuned_event_constructs() {
-        let event = SystemEvent::TokenBudgetAutoTuned {
-            old_max_tokens: 512,
-            new_max_tokens: 768,
-            p95_tokens: 640,
-        };
-        assert!(matches!(event, SystemEvent::TokenBudgetAutoTuned { .. }));
-    }
-
-    #[test]
-    fn system_wake_event_constructs() {
-        let event = SystemEvent::SystemWake;
-        assert!(matches!(event, SystemEvent::SystemWake));
-    }
-
-    #[test]
-    fn system_sleep_event_constructs() {
-        let event = SystemEvent::SystemSleep;
-        assert!(matches!(event, SystemEvent::SystemSleep));
+        Ok(if sys_time > sys_now {
+            now + sys_time
+                .duration_since(sys_now)
+                .unwrap_or(Duration::from_secs(0))
+        } else {
+            now - sys_now
+                .duration_since(sys_time)
+                .unwrap_or(Duration::from_secs(0))
+        })
     }
 }

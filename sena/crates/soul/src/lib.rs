@@ -16,8 +16,9 @@ pub mod store;
 pub mod types;
 
 pub use actor::SoulActor;
+pub use bus::events::soul::{Verbosity, Warmth, WorkCadence};
 pub use error::SoulError;
 pub use redb_store::RedbSoulStore;
-pub use schema::{SCHEMA_VERSION, SchemaV1, WindowHistoryEntry, WorkCadence};
+pub use schema::{SCHEMA_VERSION, SchemaV1, WindowEntry};
 pub use store::SoulStore;
 pub use types::{IdentitySignal, SoulEventRecord, SoulSummary, TemporalPattern};

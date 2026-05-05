@@ -7,6 +7,7 @@
 use std::time::SystemTime;
 
 use crate::error::SoulError;
+use crate::schema::SchemaV1;
 use crate::types::{IdentitySignal, SoulEventRecord, SoulSummary, TemporalPattern};
 
 /// Encrypted storage abstraction for Soul subsystem.
@@ -66,6 +67,12 @@ pub trait SoulStore: Send + Sync {
 
     /// Read all temporal patterns.
     fn read_temporal_patterns(&self) -> Result<Vec<TemporalPattern>, SoulError>;
+
+    /// Load the current Soul schema from persistent storage.
+    fn load_schema(&self) -> Result<Option<SchemaV1>, SoulError>;
+
+    /// Persist the current Soul schema.
+    fn save_schema(&mut self, schema: &SchemaV1) -> Result<(), SoulError>;
 
     /// Initialize or open the store with encryption.
     fn initialize(&mut self) -> Result<(), SoulError>;
@@ -137,6 +144,14 @@ mod tests {
 
         fn read_temporal_patterns(&self) -> Result<Vec<TemporalPattern>, SoulError> {
             Ok(Vec::new())
+        }
+
+        fn load_schema(&self) -> Result<Option<SchemaV1>, SoulError> {
+            Ok(Some(SchemaV1::default()))
+        }
+
+        fn save_schema(&mut self, _schema: &SchemaV1) -> Result<(), SoulError> {
+            Ok(())
         }
 
         fn initialize(&mut self) -> Result<(), SoulError> {

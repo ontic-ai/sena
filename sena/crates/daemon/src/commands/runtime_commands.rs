@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -25,6 +26,14 @@ impl RuntimeState {
     pub fn mark_ready(&self) {
         self.is_ready.store(true, Ordering::SeqCst);
     }
+}
+
+fn onboarding_marker_path() -> Result<PathBuf, IpcError> {
+    Ok(runtime::config::config_path()
+        .map_err(|e| IpcError::CommandFailed(format!("failed to resolve config path: {}", e)))?
+        .parent()
+        .ok_or_else(|| IpcError::CommandFailed("no parent directory for config".to_string()))?
+        .join("onboarding_complete"))
 }
 
 /// Handler for "runtime.ping" command.
@@ -148,6 +157,39 @@ impl ShutdownHandler {
         bus: std::sync::Arc<bus::EventBus>,
     ) -> Self {
         Self { shutdown_tx, bus }
+    }
+}
+
+/// Handler for "runtime.onboarding_status" command.
+pub struct OnboardingStatusHandler;
+
+impl OnboardingStatusHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl CommandHandler for OnboardingStatusHandler {
+    fn name(&self) -> &'static str {
+        "runtime.onboarding_status"
+    }
+
+    fn description(&self) -> &'static str {
+        "Check whether first-boot onboarding is still required"
+    }
+
+    fn requires_boot(&self) -> bool {
+        false
+    }
+
+    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        let marker_path = onboarding_marker_path()?;
+        let onboarding_required = tokio::fs::metadata(&marker_path).await.is_err();
+
+        Ok(json!({
+            "onboarding_required": onboarding_required
+        }))
     }
 }
 
@@ -295,6 +337,18 @@ impl CommandHandler for SubmitOnboardingConfigHandler {
             .map_err(|e| IpcError::CommandFailed(format!("failed to save config: {}", e)))?;
 
         tracing::info!("Onboarding config saved successfully");
+
+        // Create onboarding_complete marker file
+        let marker_path = onboarding_marker_path()?;
+
+        tokio::fs::write(&marker_path, b"")
+            .await
+            .map_err(|e| IpcError::CommandFailed(format!("failed to write marker: {}", e)))?;
+
+        tracing::info!(
+            "Onboarding marker file created at {}",
+            marker_path.display()
+        );
 
         // Emit OnboardingCompleted event
         self.bus

@@ -35,6 +35,7 @@ pub mod pattern_engine;
 pub mod signal;
 pub mod signal_buffer;
 pub mod task_inference;
+pub mod transparency_query;
 pub mod trigger_gate;
 pub mod user_state;
 

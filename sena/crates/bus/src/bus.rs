@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::causal::CausalId;
 use crate::events::{
     CTPEvent, DownloadEvent, InferenceEvent, MemoryEvent, ModelEvent, PlatformEvent, SoulEvent,
-    SpeechEvent, SystemEvent, TelemetryEvent,
+    SpeechEvent, SystemEvent, TelemetryEvent, TransparencyEvent,
 };
 
 /// Unified event type for all bus communication.
@@ -33,6 +33,8 @@ pub enum Event {
     Download(DownloadEvent),
     /// Telemetry and metrics events.
     Telemetry(TelemetryEvent),
+    /// Transparency layer events (user queries for observation, memory, explanation).
+    Transparency(TransparencyEvent),
 }
 
 impl Event {
@@ -141,6 +143,13 @@ impl EventBus {
             }
             Event::Speech(e) => {
                 let s = format!("Speech::{:?}", e);
+                s.split('(')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| s)
+            }
+            Event::Transparency(e) => {
+                let s = format!("Transparency::{:?}", e);
                 s.split('(')
                     .next()
                     .map(|s| s.to_string())

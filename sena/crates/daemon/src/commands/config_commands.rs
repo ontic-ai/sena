@@ -63,7 +63,9 @@ impl CommandHandler for ConfigSetHandler {
         let path = payload
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| IpcError::InvalidPayload("missing or invalid 'path' field".to_string()))?;
+            .ok_or_else(|| {
+                IpcError::InvalidPayload("missing or invalid 'path' field".to_string())
+            })?;
 
         let value = payload
             .get("value")

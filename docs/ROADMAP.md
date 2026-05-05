@@ -672,9 +672,9 @@ Parallel-safe with M7.1, M7.2, M7.3, M7.4.
 - [x] CLI dispatches `SpeechEvent::ListenModeRequested { session_id }`
 - [x] STT actor: enables continuous capture, transcribes after silence threshold, emits `ListenModeTranscription { text, is_final, confidence, session_id }`
 - [x] Listen mode uses independent `SilenceDetector` — wakeword events no longer wipe listen audio (bug fix)
-- [ ] CLI renders: partial results in gray (overwritten), final results in white — currently all renders same style
+- [x] CLI renders: partial results in gray (overwritten), final results in white
 - [x] Ctrl+C → `ListenModeStopRequested` → `ListenModeStopped` → clean exit
-- [ ] `[unclear]` in red for confidence < 0.6 — currently low-confidence results are skipped, not labeled
+- [x] `[unclear]` in red for confidence < 0.6
 - [x] New bus events: `ListenModeRequested`, `ListenModeTranscription`, `ListenModeStopRequested`, `ListenModeStopped`
 - [ ] Integration test: mock STT emits 3 partial + 1 final, CLI renders all 4 correctly
 - [ ] Exit: partial results < 1s, final results < 2s from silence, unclear words flagged

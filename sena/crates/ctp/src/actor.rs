@@ -4,15 +4,15 @@ use bus::{Actor, ActorError, CTPEvent, ContextSnapshot, Event, EventBus};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::context_assembler::ContextAssembler;
 use crate::error::CtpError;
-use crate::pattern_engine::PatternEngine;
 use crate::signal::CtpSignal;
 use crate::signal_buffer::SignalBuffer;
+use crate::transparency_query;
 use crate::trigger_gate::TriggerGate;
-use crate::user_state::UserStateClassifier;
 
 /// CTP actor: continuous thought processing via signal ingestion and snapshot assembly.
 pub struct CtpActor {
@@ -28,10 +28,6 @@ pub struct CtpActor {
     context_assembler: ContextAssembler,
     /// Trigger gate for deciding when to emit thought events.
     trigger_gate: TriggerGate,
-    /// Pattern engine for detecting behavioral signals.
-    pattern_engine: PatternEngine,
-    /// User state classifier.
-    user_state_classifier: UserStateClassifier,
     /// Session start time for calculating session duration.
     session_start: Instant,
     /// Last assembled snapshot (for context preservation).
@@ -40,6 +36,10 @@ pub struct CtpActor {
     cached_identity_signal: Option<bus::events::soul::DistilledIdentitySignal>,
     /// Loop enabled state (controlled by IPC).
     loop_enabled: bool,
+    /// Periodic processing interval.
+    poll_interval: Duration,
+    /// True after boot is complete so proactive thoughts can fire safely.
+    boot_complete: bool,
 }
 
 impl CtpActor {
@@ -58,29 +58,31 @@ impl CtpActor {
             context_assembler: ContextAssembler::new(),
             trigger_gate: TriggerGate::new(Duration::from_secs(600)) // 10-minute default interval
                 .with_sensitivity(0.5),
-            pattern_engine: PatternEngine::new(),
-            user_state_classifier: UserStateClassifier::new(),
             session_start: Instant::now(),
             last_snapshot: None,
             cached_identity_signal: None,
             loop_enabled: true,
+            poll_interval: Duration::from_secs(1),
+            boot_complete: false,
         };
 
         (actor, signal_tx)
     }
 
-    /// Process a single signal: ingest into buffer, assemble snapshot, check trigger.
+    /// Process a single signal by ingesting it into the rolling buffer.
     async fn process_signal(&mut self, signal: CtpSignal) -> Result<(), CtpError> {
-        // Skip processing if loop is disabled
-        if !self.loop_enabled {
-            debug!("CTP loop disabled, skipping signal processing");
-            return Ok(());
-        }
-
-        debug!("CTP processing signal: {:?}", signal.signal_type());
-
+        debug!("CTP ingesting signal: {:?}", signal.signal_type());
         // Ingest signal into buffer
         self.ingest_signal(signal);
+
+        Ok(())
+    }
+
+    async fn run_ctp_cycle(&mut self) -> Result<(), CtpError> {
+        if !self.loop_enabled {
+            debug!("CTP loop disabled, skipping periodic cycle");
+            return Ok(());
+        }
 
         let bus = self
             .bus
@@ -102,28 +104,9 @@ impl CtpActor {
             snapshot.soul_identity_signal = self.cached_identity_signal.clone();
         }
 
-        // Detect patterns from buffer
-        let patterns = self.pattern_engine.detect(&self.signal_buffer, &snapshot);
-
-        // Emit pattern events
-        for pattern in &patterns {
-            bus.broadcast(Event::CTP(Box::new(CTPEvent::SignalPatternDetected(
-                pattern.clone(),
-            ))))
-            .await?;
-        }
-
-        // Compute user state from snapshot and patterns
-        let user_state = self.user_state_classifier.classify(&snapshot, &patterns);
-
-        // Attach user state to snapshot
-        snapshot.user_state = Some(user_state.clone());
-
-        // Emit user state event
-        bus.broadcast(Event::CTP(Box::new(CTPEvent::UserStateComputed(
-            user_state,
-        ))))
-        .await?;
+        // CTP emits raw context only. Interpretation is deferred to the model.
+        snapshot.user_state = None;
+        snapshot.inferred_task = None;
 
         // Emit snapshot ready event
         bus.broadcast(Event::CTP(Box::new(CTPEvent::ContextSnapshotReady(
@@ -131,15 +114,12 @@ impl CtpActor {
         ))))
         .await?;
 
-        // Check if we should trigger a thought event
-        let should_trigger = self.trigger_gate.should_trigger(&snapshot, &patterns);
+        let should_trigger = self.trigger_gate.should_trigger(&snapshot);
 
-        if should_trigger {
+        if self.boot_complete && should_trigger {
             info!(
-                "CTP THOUGHT TRIGGERED: app={}, task={:?}, patterns={}",
-                snapshot.active_app.app_name,
-                snapshot.inferred_task.as_ref().map(|t| &t.category),
-                patterns.len()
+                "CTP THOUGHT TRIGGERED: app={}, window={:?}",
+                snapshot.active_app.app_name, snapshot.active_app.window_title
             );
 
             bus.broadcast(Event::CTP(Box::new(CTPEvent::ThoughtEventTriggered(
@@ -199,6 +179,20 @@ impl CtpActor {
                         .await;
                 }
             }
+            Event::System(bus::SystemEvent::BootComplete) => {
+                info!("CTP boot complete received, proactive triggering enabled");
+                self.boot_complete = true;
+            }
+            Event::Transparency(bus::TransparencyEvent::QueryRequested(
+                bus::TransparencyQuery::CurrentObservation,
+            )) => {
+                let bus_opt = self.bus.clone();
+                if let Some(bus) = bus_opt {
+                    if let Err(e) = self.handle_observation_query(&bus).await {
+                        warn!("CTP failed to handle observation query: {}", e);
+                    }
+                }
+            }
             Event::Platform(platform_event) => {
                 use bus::events::platform::PlatformEvent;
 
@@ -250,6 +244,27 @@ impl CtpActor {
 
         Ok(())
     }
+
+    /// Handle a `CurrentObservation` transparency query and broadcast the response.
+    async fn handle_observation_query(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
+        // Assemble current state snapshot
+        let snapshot = self.context_assembler.assemble_with_previous(
+            &self.signal_buffer,
+            self.session_start,
+            self.last_snapshot.as_ref(),
+        );
+
+        let result = Box::new(bus::TransparencyResult::Observation(
+            transparency_query::handle_current_observation(snapshot),
+        ));
+
+        bus.broadcast(Event::Transparency(bus::TransparencyEvent::QueryResponse {
+            query: bus::TransparencyQuery::CurrentObservation,
+            result,
+        }))
+        .await
+        .map_err(|e| format!("failed to broadcast observation response: {}", e))
+    }
 }
 
 impl Actor for CtpActor {
@@ -274,12 +289,18 @@ impl Actor for CtpActor {
 
     async fn run(&mut self) -> Result<(), ActorError> {
         info!("CtpActor run loop started");
+        let mut ticker = interval(self.poll_interval);
 
         loop {
             tokio::select! {
                 Some(signal) = self.signal_rx.recv() => {
+                    let is_manual_tick = matches!(signal, CtpSignal::ManualTick);
                     if let Err(e) = self.process_signal(signal).await {
                         warn!("CTP signal processing error: {}", e);
+                    } else if is_manual_tick
+                        && let Err(e) = self.run_ctp_cycle().await
+                    {
+                        warn!("CTP periodic cycle error after manual tick: {}", e);
                     }
                 }
                 Some(event) = async {
@@ -290,6 +311,11 @@ impl Actor for CtpActor {
                 } => {
                     if let Err(e) = self.process_bus_event(event).await {
                         warn!("CTP bus event processing error: {}", e);
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(e) = self.run_ctp_cycle().await {
+                        warn!("CTP periodic cycle error: {}", e);
                     }
                 }
                 else => {
@@ -490,6 +516,104 @@ mod tests {
         assert!(
             found_snapshot_with_signal,
             "CTP should include received Soul identity signal in snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_emits_raw_snapshot_without_interpretation_fields() {
+        let (mut actor, _signal_tx) = CtpActor::new();
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.expect("start failed");
+
+        bus.broadcast(Event::Platform(
+            bus::events::platform::PlatformEvent::ActiveWindowChanged(
+                bus::events::platform::WindowContext {
+                    app_name: "Code".to_string(),
+                    window_title: Some("src/main.rs".to_string()),
+                    bundle_id: None,
+                    timestamp: Instant::now(),
+                },
+            ),
+        ))
+        .await
+        .expect("window event should broadcast");
+
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let mut observed_snapshot = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::CTP(boxed))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                if let CTPEvent::ContextSnapshotReady(snapshot) = *boxed {
+                    assert!(snapshot.inferred_task.is_none());
+                    assert!(snapshot.user_state.is_none());
+                    observed_snapshot = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            observed_snapshot,
+            "CTP should emit raw snapshots without interpretive fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_triggers_thought_after_boot_using_raw_snapshot_gate() {
+        let (mut actor, signal_tx) = CtpActor::new();
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.expect("start failed");
+        actor.boot_complete = true;
+        actor.trigger_gate.reset();
+
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        bus.broadcast(Event::Platform(
+            bus::events::platform::PlatformEvent::ActiveWindowChanged(
+                bus::events::platform::WindowContext {
+                    app_name: "Code".to_string(),
+                    window_title: Some("src/main.rs".to_string()),
+                    bundle_id: None,
+                    timestamp: Instant::now(),
+                },
+            ),
+        ))
+        .await
+        .expect("window event should broadcast");
+
+        signal_tx
+            .send(CtpSignal::ManualTick)
+            .expect("manual tick should send");
+
+        let mut observed = false;
+        for _ in 0..30 {
+            if let Ok(Ok(Event::CTP(boxed))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                if let CTPEvent::ThoughtEventTriggered(snapshot) = *boxed {
+                    assert!(snapshot.inferred_task.is_none());
+                    assert!(snapshot.user_state.is_none());
+                    observed = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            observed,
+            "CTP should trigger proactive thought from raw snapshot data after boot"
         );
     }
 }

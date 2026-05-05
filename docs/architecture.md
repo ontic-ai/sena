@@ -19,8 +19,12 @@ If your code contradicts a hard rule, the code is wrong — not the rule.
 
 ## 1. Workspace Layout
 
+**Canonical workspace location:** The nested workspace at `sena/` (repository root contains a donor/legacy workspace). All architectural rules below apply to the canonical nested workspace.
+
+**Edition:** Rust 2024 (canonical nested workspace). The root workspace uses Rust 2021 but is donor/legacy only — it contains `stt-worker` and crates being migrated.
+
 ```
-sena/
+sena/                        ← CANONICAL WORKSPACE (nested, Rust 2024)
 ├── Cargo.toml              ← virtual manifest ONLY. No src/ at root. Ever.
 ├── Cargo.lock
 ├── rust-toolchain.toml     ← pins Rust edition and toolchain version
@@ -53,8 +57,9 @@ sena/
 ```
 
 **Hard rules:**
-- The root `Cargo.toml` is a virtual manifest. It has no `[package]` section and no `src/`.
-- Every crate under `crates/` is named without a `sena-` prefix. Names are functional: `bus`, `runtime`, `soul`.
+- The canonical workspace is the nested workspace at `sena/`. The root workspace is donor/legacy.
+- The `sena/Cargo.toml` is a virtual manifest. It has no `[package]` section and no `src/`.
+- Every crate under `sena/crates/` is named without a `sena-` prefix. Names are functional: `bus`, `runtime`, `soul`.
 - Binary crates: `daemon` (produces `sena` binary) and `cli` (produces `sena-cli` binary). All other crates are `lib`.
 - Crates are published to crates.io only if explicitly decided. Default: workspace-internal.
 - No `Makefile`. No shell scripts in root. All automation lives in `xtask/`.

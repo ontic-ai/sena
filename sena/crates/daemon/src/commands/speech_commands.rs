@@ -39,7 +39,9 @@ impl CommandHandler for SpeechListenStartHandler {
             .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
 
         self.bus
-            .broadcast(Event::Speech(SpeechEvent::ListenModeRequested { causal_id }))
+            .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
+                causal_id,
+            }))
             .await
             .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
 
@@ -74,6 +76,7 @@ impl CommandHandler for SpeechListenStopHandler {
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
         let causal_id = CausalId::new();
+        let mut rx = self.bus.subscribe_broadcast();
 
         self.bus
             .broadcast(Event::Speech(SpeechEvent::ListenModeStopRequested {
@@ -90,10 +93,46 @@ impl CommandHandler for SpeechListenStopHandler {
             .await
             .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
 
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::Speech(SpeechEvent::ListenModeStopped {
+                        causal_id: event_causal_id,
+                        transcript,
+                    })) if event_causal_id == causal_id => {
+                        if let Some(raw_transcript) = transcript {
+                            self.bus
+                                .broadcast(Event::Speech(
+                                    SpeechEvent::ListenModeTranscriptFinalized {
+                                        text: raw_transcript.clone(),
+                                        causal_id,
+                                    },
+                                ))
+                                .await
+                                .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+                            return Ok(Some(raw_transcript));
+                        }
+
+                        return Ok(None);
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(IpcError::CommandFailed(e.to_string())),
+                }
+            }
+        })
+        .await;
+
+        let finalized_text = match wait_result {
+            Ok(result) => result?,
+            Err(_) => None,
+        };
+
         Ok(json!({
             "status": "requested",
             "listening": false,
             "causal_id": causal_id.as_u64(),
+            "finalized_text": finalized_text,
         }))
     }
 }
@@ -120,6 +159,8 @@ impl CommandHandler for SpeechStatusHandler {
             "speech_enabled": status.speech_enabled,
             "stt_enabled": status.stt_enabled,
             "tts_enabled": status.tts_enabled,
+            "wakeword_enabled": status.wakeword_enabled,
+            "wakeword_ready": status.wakeword_ready,
             "stt_backend": status.stt_backend,
             "speech_models_dir": status.speech_models_dir,
             "mode": if status.speech_enabled { "enabled" } else { "disabled" },

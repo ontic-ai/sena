@@ -154,6 +154,16 @@ pub enum SpeechEvent {
     ListenModeStopped {
         /// Causal chain ID.
         causal_id: CausalId,
+        /// Raw transcript accumulated during the listen session, if any.
+        transcript: Option<String>,
+    },
+
+    /// Listen mode transcript finalized for display after cleanup.
+    ListenModeTranscriptFinalized {
+        /// Finalized transcript text.
+        text: String,
+        /// Causal chain ID.
+        causal_id: CausalId,
     },
 
     /// Audio device changed (hot-swap event).
@@ -186,7 +196,8 @@ impl SpeechEvent {
             | Self::ListenModeRequested { causal_id }
             | Self::ListenModeTranscription { causal_id, .. }
             | Self::ListenModeStopRequested { causal_id }
-            | Self::ListenModeStopped { causal_id }
+            | Self::ListenModeStopped { causal_id, .. }
+            | Self::ListenModeTranscriptFinalized { causal_id, .. }
             | Self::AudioDeviceChanged { causal_id, .. } => Some(*causal_id),
             _ => None,
         }

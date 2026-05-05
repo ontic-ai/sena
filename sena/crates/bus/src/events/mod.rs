@@ -14,6 +14,7 @@ pub mod soul;
 pub mod speech;
 pub mod system;
 pub mod telemetry;
+pub mod transparency;
 
 pub use ctp::*;
 pub use download::*;
@@ -25,3 +26,7 @@ pub use soul::*;
 pub use speech::*;
 pub use system::*;
 pub use telemetry::*;
+pub use transparency::{
+    MemoryResponse, ObservationResponse, ReasoningResponse, TransparencyEvent, TransparencyQuery,
+    TransparencyResult,
+};

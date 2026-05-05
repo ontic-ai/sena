@@ -58,9 +58,9 @@ pub fn discover_models(
     inference::discover_models(models_dir)
 }
 
-/// Return the currently auto-detected backend type label.
+/// Return the currently selected backend type label.
 pub fn auto_detect_backend_name() -> String {
-    infer::BackendType::auto_detect().to_string()
+    inference::preferred_llama_backend().to_string()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -68,6 +68,8 @@ pub struct SpeechStatusSnapshot {
     pub speech_enabled: bool,
     pub stt_enabled: bool,
     pub tts_enabled: bool,
+    pub wakeword_enabled: bool,
+    pub wakeword_ready: bool,
     pub stt_backend: String,
     pub speech_models_dir: std::path::PathBuf,
 }
@@ -91,11 +93,18 @@ pub async fn speech_status_snapshot() -> Result<SpeechStatusSnapshot, String> {
         &speech::ModelManifest::parakeet_tokenizer(),
     );
     let parakeet_ready = encoder.exists() && decoder.exists() && tokenizer.exists();
+    let wakeword = speech::ModelCache::cached_path(
+        &speech_models_dir,
+        &speech::ModelManifest::open_wakeword(),
+    );
+    let wakeword_ready = wakeword.exists();
 
     Ok(SpeechStatusSnapshot {
         speech_enabled: config.speech_enabled,
         stt_enabled: config.speech_enabled && parakeet_ready,
         tts_enabled: config.speech_enabled,
+        wakeword_enabled: config.speech_enabled && config.wakeword_enabled && wakeword_ready,
+        wakeword_ready,
         stt_backend: if parakeet_ready {
             "parakeet".to_string()
         } else {
@@ -138,8 +147,55 @@ fn resolve_speech_models_dir() -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[cfg(target_os = "windows")]
+    const TEST_ENV_KEY: &str = "APPDATA";
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    const TEST_ENV_KEY: &str = "HOME";
+
+    pub(crate) fn env_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env test lock should not be poisoned")
+    }
+
+    pub(crate) struct TestEnvGuard {
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvGuard {
+        pub(crate) fn set(path: &Path) -> Self {
+            let previous = std::env::var_os(TEST_ENV_KEY);
+            unsafe {
+                std::env::set_var(TEST_ENV_KEY, path);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = self.previous.as_ref() {
+                    std::env::set_var(TEST_ENV_KEY, previous);
+                } else {
+                    std::env::remove_var(TEST_ENV_KEY);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestEnvGuard, env_test_lock};
     use speech::{ModelCache, ModelManifest};
     use tempfile::tempdir;
     use tokio::fs;
@@ -153,18 +209,9 @@ mod tests {
         // Embed model verification is STRICT: boot fails if the required embed
         // model is missing. This test creates a stub embed model file to satisfy
         // the strict requirement.
+        let _env_lock = env_test_lock();
         let temp_dir = tempdir().expect("create tempdir");
-
-        // Override APPDATA/HOME for this test
-        #[cfg(target_os = "windows")]
-        unsafe {
-            std::env::set_var("APPDATA", temp_dir.path());
-        }
-
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        unsafe {
-            std::env::set_var("HOME", temp_dir.path());
-        }
+        let _env = TestEnvGuard::set(temp_dir.path());
 
         // Create embed models directory and stub embed model file
         let embed_model = ModelManifest::required_embed_model();

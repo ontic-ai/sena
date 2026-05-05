@@ -3,11 +3,12 @@
 //! PRIVACY-CRITICAL: KeystrokeCadence is a compile-time privacy boundary.
 //! It MUST NOT contain any char, String, Vec<char>, or Vec<u8> fields.
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Information about the currently active window.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowContext {
     /// Application name (e.g., "Firefox", "Code").
     pub app_name: String,
@@ -16,22 +17,24 @@ pub struct WindowContext {
     /// Platform-specific bundle identifier.
     pub bundle_id: Option<String>,
     /// When this context was captured.
+    #[serde(with = "crate::events::system::instant_serde")]
     pub timestamp: Instant,
 }
 
 /// Digest of clipboard content — never raw text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardDigest {
     /// SHA-256 digest of clipboard content, if available.
     pub digest: Option<String>,
     /// Character count of clipboard content.
     pub char_count: usize,
     /// When this digest was captured.
+    #[serde(with = "crate::events::system::instant_serde")]
     pub timestamp: Instant,
 }
 
 /// File system event kind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileEventKind {
     /// File was created.
     Created,
@@ -44,13 +47,14 @@ pub enum FileEventKind {
 }
 
 /// File system event detected by platform watcher.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEvent {
     /// Path to the file.
     pub path: PathBuf,
     /// Type of file system event.
     pub event_kind: FileEventKind,
     /// When this event was detected.
+    #[serde(with = "crate::events::system::instant_serde")]
     pub timestamp: Instant,
 }
 
@@ -61,7 +65,7 @@ pub struct FileEvent {
 /// - String
 /// - Vec<char>
 /// - Vec<u8> representing character content
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeystrokeCadence {
     /// Average keystrokes per minute over the observation window.
     pub events_per_minute: f64,
@@ -70,6 +74,7 @@ pub struct KeystrokeCadence {
     /// Duration of idle time since last keystroke.
     pub idle_duration: Duration,
     /// When this cadence was captured.
+    #[serde(with = "crate::events::system::instant_serde")]
     pub timestamp: Instant,
 }
 

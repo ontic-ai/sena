@@ -1,10 +1,11 @@
 //! Memory-layer events: ingest, query, retrieval.
 
 use crate::causal::CausalId;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Kind of memory being stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MemoryKind {
     /// Episodic memory derived from platform observations.
     Episodic,
@@ -17,7 +18,28 @@ pub enum MemoryKind {
 }
 
 /// A chunk of retrieved memory with relevance score and age metadata.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MemoryChunk {
+    /// The text content of the memory chunk.
+    pub content: String,
+    /// Relevance score (higher is more relevant).
+    pub score: f32,
+    /// Age of the memory in seconds since creation.
+    pub age_seconds: u64,
+}
+
+impl std::fmt::Debug for MemoryChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryChunk")
+            .field("content", &format!("[{} chars]", self.content.len()))
+            .field("score", &self.score)
+            .field("age_seconds", &self.age_seconds)
+            .finish()
+    }
+}
+
+/// A chunk of retrieved memory with relevance score and age metadata.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ScoredChunk {
     /// The text content of the memory chunk.
     pub content: String,
@@ -33,6 +55,44 @@ impl std::fmt::Debug for ScoredChunk {
             .field("content", &"[REDACTED]")
             .field("score", &self.score)
             .field("age_seconds", &self.age_seconds)
+            .finish()
+    }
+}
+
+/// Request from CTP to query memories relevant to the current context.
+///
+/// This is distinct from user-initiated queries (`QueryRequested`).
+/// Context queries are automatic/proactive and include aggregate relevance scoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextMemoryQueryRequest {
+    /// Semantic description of current activity (from snapshot or inferred task).
+    pub context_description: String,
+    /// Maximum chunks to return.
+    pub max_chunks: usize,
+    /// Causal chain ID.
+    pub causal_id: CausalId,
+}
+
+/// Response to a context memory query.
+///
+/// Includes both the memory chunks and an aggregate relevance score
+/// to help CTP assess overall memory utility for the current context.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ContextMemoryQueryResponse {
+    /// Retrieved memory chunks with scores and age metadata.
+    pub chunks: Vec<ScoredChunk>,
+    /// Aggregate relevance score (0.0-1.0) — how relevant the retrieved memories are overall.
+    pub relevance_score: f64,
+    /// Causal chain ID.
+    pub causal_id: CausalId,
+}
+
+impl std::fmt::Debug for ContextMemoryQueryResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextMemoryQueryResponse")
+            .field("chunk_count", &self.chunks.len())
+            .field("relevance_score", &self.relevance_score)
+            .field("causal_id", &self.causal_id)
             .finish()
     }
 }
@@ -99,6 +159,19 @@ pub enum MemoryEvent {
 
     /// Memory query failed.
     QueryFailed {
+        /// Causal chain ID.
+        causal_id: CausalId,
+        reason: String,
+    },
+
+    /// Request from CTP to query memories relevant to the current context.
+    ContextQueryRequested(ContextMemoryQueryRequest),
+
+    /// Response to a context memory query with aggregate relevance scoring.
+    ContextQueryCompleted(ContextMemoryQueryResponse),
+
+    /// Context memory query failed.
+    ContextQueryFailed {
         /// Causal chain ID.
         causal_id: CausalId,
         reason: String,
@@ -223,6 +296,26 @@ impl std::fmt::Debug for MemoryEvent {
                 .field("causal_id", causal_id)
                 .field("reason", reason)
                 .finish(),
+            Self::ContextQueryRequested(req) => f
+                .debug_struct("ContextQueryRequested")
+                .field(
+                    "context_description",
+                    &format!("[{} chars]", req.context_description.len()),
+                )
+                .field("max_chunks", &req.max_chunks)
+                .field("causal_id", &req.causal_id)
+                .finish(),
+            Self::ContextQueryCompleted(resp) => f
+                .debug_struct("ContextQueryCompleted")
+                .field("chunk_count", &resp.chunks.len())
+                .field("relevance_score", &resp.relevance_score)
+                .field("causal_id", &resp.causal_id)
+                .finish(),
+            Self::ContextQueryFailed { causal_id, reason } => f
+                .debug_struct("ContextQueryFailed")
+                .field("causal_id", causal_id)
+                .field("reason", reason)
+                .finish(),
             Self::BackupCompleted { path, causal_id } => f
                 .debug_struct("BackupCompleted")
                 .field("path", path)
@@ -258,8 +351,11 @@ impl MemoryEvent {
             | Self::MemoryWriteFailed { causal_id, .. }
             | Self::MemoryQueryRequest { causal_id, .. }
             | Self::MemoryQueryResponse { causal_id, .. }
+            | Self::ContextQueryFailed { causal_id, .. }
             | Self::BackupCompleted { causal_id, .. }
             | Self::BackupFailed { causal_id, .. } => Some(*causal_id),
+            Self::ContextQueryRequested(req) => Some(req.causal_id),
+            Self::ContextQueryCompleted(resp) => Some(resp.causal_id),
             Self::ConsolidationCompleted { .. } => None,
         }
     }
@@ -290,5 +386,98 @@ mod tests {
         let debug_str = format!("{:?}", chunk);
         assert!(debug_str.contains("REDACTED"));
         assert!(!debug_str.contains("sensitive data"));
+    }
+
+    #[test]
+    fn context_memory_query_request_constructs() {
+        let cid = CausalId::new();
+        let req = ContextMemoryQueryRequest {
+            context_description: "coding in Rust".to_string(),
+            max_chunks: 10,
+            causal_id: cid,
+        };
+        assert_eq!(req.context_description, "coding in Rust");
+        assert_eq!(req.max_chunks, 10);
+        assert_eq!(req.causal_id, cid);
+    }
+
+    #[test]
+    fn context_memory_query_response_debug_redacts() {
+        let cid = CausalId::new();
+        let response = ContextMemoryQueryResponse {
+            chunks: vec![
+                ScoredChunk {
+                    content: "secret memory 1".into(),
+                    score: 0.9,
+                    age_seconds: 3600,
+                },
+                ScoredChunk {
+                    content: "secret memory 2".into(),
+                    score: 0.8,
+                    age_seconds: 7200,
+                },
+            ],
+            relevance_score: 0.85,
+            causal_id: cid,
+        };
+        let debug_output = format!("{:?}", response);
+        assert!(debug_output.contains("chunk_count"));
+        assert!(debug_output.contains("2"));
+        assert!(debug_output.contains("0.85"));
+        assert!(!debug_output.contains("secret memory"));
+    }
+
+    #[test]
+    fn context_query_events_extract_causal_id() {
+        let cid = CausalId::new();
+        let req_event = MemoryEvent::ContextQueryRequested(ContextMemoryQueryRequest {
+            context_description: "test context".to_string(),
+            max_chunks: 5,
+            causal_id: cid,
+        });
+        assert_eq!(req_event.causal_id(), Some(cid));
+
+        let resp_event = MemoryEvent::ContextQueryCompleted(ContextMemoryQueryResponse {
+            chunks: vec![],
+            relevance_score: 0.5,
+            causal_id: cid,
+        });
+        assert_eq!(resp_event.causal_id(), Some(cid));
+
+        let fail_event = MemoryEvent::ContextQueryFailed {
+            causal_id: cid,
+            reason: "test error".to_string(),
+        };
+        assert_eq!(fail_event.causal_id(), Some(cid));
+    }
+
+    #[test]
+    fn context_query_request_serializes() {
+        let cid = CausalId::new();
+        let req = ContextMemoryQueryRequest {
+            context_description: "test".to_string(),
+            max_chunks: 3,
+            causal_id: cid,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: ContextMemoryQueryRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.context_description, "test");
+        assert_eq!(deserialized.max_chunks, 3);
+        assert_eq!(deserialized.causal_id, cid);
+    }
+
+    #[test]
+    fn context_query_response_serializes() {
+        let cid = CausalId::new();
+        let resp = ContextMemoryQueryResponse {
+            chunks: vec![],
+            relevance_score: 0.75,
+            causal_id: cid,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: ContextMemoryQueryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.chunks.len(), 0);
+        assert!((deserialized.relevance_score - 0.75).abs() < 1e-6);
+        assert_eq!(deserialized.causal_id, cid);
     }
 }

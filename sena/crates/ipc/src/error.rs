@@ -1,4 +1,4 @@
-use std::io;
+﻿use std::io;
 
 /// Errors that can occur during IPC operations.
 #[derive(Debug, thiserror::Error)]
@@ -31,19 +31,19 @@ pub enum IpcError {
     #[error("daemon not running")]
     DaemonNotRunning,
 
-    /// Platform not supported for IPC.
-    #[error("IPC not supported on this platform (Windows only in Phase 1)")]
-    PlatformNotSupported,
+    /// Request was malformed.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 
-    /// Invalid command payload.
+    /// Operation timed out.
+    #[error("timeout: {0}")]
+    Timeout(String),
+
+    /// Payload was malformed or missing required fields.
     #[error("invalid payload: {0}")]
     InvalidPayload(String),
 
-    /// Command not ready (daemon not fully booted or feature not implemented).
-    #[error("command not ready: {0}")]
-    CommandNotReady(String),
-
-    /// Internal daemon error.
+    /// Internal IPC error.
     #[error("internal error: {0}")]
     Internal(String),
 }

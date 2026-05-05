@@ -9,7 +9,10 @@
 
 mod config_editor;
 mod error;
+mod onboarding;
 mod shell;
+mod theme;
+mod transparency_format;
 
 use error::CliError;
 use ipc::IpcClient;
@@ -41,7 +44,17 @@ async fn main() -> anyhow::Result<()> {
     ensure_daemon_running().await?;
 
     // Connect to daemon
-    let ipc_client = connect_to_daemon().await?;
+    let mut ipc_client = connect_to_daemon().await?;
+
+    let onboarding_required = check_onboarding_status(&mut ipc_client).await?;
+
+    if onboarding_required {
+        info!("Onboarding required — running wizard");
+        if let Err(e) = onboarding::run_wizard(&mut ipc_client).await {
+            error!("Onboarding wizard error: {}", e);
+            return Err(anyhow::anyhow!("Onboarding failed: {}", e));
+        }
+    }
 
     if config_mode {
         let mut ipc_client = ipc_client;
@@ -141,4 +154,16 @@ async fn connect_to_daemon() -> Result<IpcClient, CliError> {
     Err(CliError::IpcConnectionFailed(
         "exhausted retries".to_string(),
     ))
+}
+
+/// Check whether onboarding is required through the daemon-owned runtime state.
+async fn check_onboarding_status(ipc_client: &mut IpcClient) -> Result<bool, CliError> {
+    let response = ipc_client
+        .send("runtime.onboarding_status", serde_json::json!({}))
+        .await?;
+
+    Ok(response
+        .get("onboarding_required")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false))
 }

@@ -19,6 +19,14 @@ pub enum RuntimeError {
     #[error("soul init failed: {0}")]
     SoulInitFailed(#[from] SoulError),
 
+    /// Soul store creation or open failed.
+    #[error("soul store failed: {0}")]
+    SoulStore(String),
+
+    /// Memory store creation or open failed.
+    #[error("memory store failed: {0}")]
+    MemoryStore(String),
+
     /// Bus initialization failed.
     #[error("bus init failed: {0}")]
     BusInitFailed(#[from] BusError),

@@ -9,6 +9,7 @@ mod commands {
     pub mod memory_commands;
     pub mod runtime_commands;
     pub mod speech_commands;
+    pub mod transparency_commands;
 }
 mod error;
 mod tray;
@@ -86,7 +87,7 @@ async fn main() -> Result<(), DaemonError> {
     let supervision_bus = boot_result.bus.clone();
 
     // Spawn supervision loop in background
-    let supervision_handle = tokio::spawn(async move {
+    let mut supervision_handle = tokio::spawn(async move {
         if let Err(e) = runtime::supervision_loop(boot_result).await {
             error!("Supervision loop error: {}", e);
         }
@@ -143,22 +144,30 @@ async fn main() -> Result<(), DaemonError> {
     }
 
     // Wait for shutdown signal or supervision loop exit
-    tokio::select! {
+    let shutdown_requested = tokio::select! {
         _ = shutdown_rx.recv() => {
             info!("Shutdown signal received");
+            true
         }
-        _ = supervision_handle => {
-            info!("Supervision loop exited");
+        result = &mut supervision_handle => {
+            if let Err(e) = result {
+                error!("Supervision loop join error: {}", e);
+            } else {
+                info!("Supervision loop exited");
+            }
+            false
+        }
+    };
+
+    if shutdown_requested {
+        let _ = supervision_bus
+            .broadcast(bus::Event::System(bus::SystemEvent::ShutdownRequested))
+            .await;
+
+        if let Err(e) = supervision_handle.await {
+            error!("Supervision loop join error: {}", e);
         }
     }
-
-    // Broadcast shutdown event
-    let _ = supervision_bus
-        .broadcast(bus::Event::System(bus::SystemEvent::ShutdownInitiated))
-        .await;
-
-    // Wait briefly for actors to shut down gracefully
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // Join tray action handler
     tray_action_handle.join().ok();
@@ -196,9 +205,42 @@ async fn forward_bus_events_to_ipc(
                     "confidence": confidence,
                 }
             })),
-            Event::Speech(bus::SpeechEvent::ListenModeTranscription { text, .. }) => {
+            Event::Speech(bus::SpeechEvent::ListenModeTranscription { text, .. }) => Some(json!({
+                "type": "ListenModeTranscription",
+                "data": {
+                    "text": text,
+                }
+            })),
+            Event::Speech(bus::SpeechEvent::LowConfidenceTranscription {
+                text,
+                confidence,
+                ..
+            }) => Some(json!({
+                "type": "LowConfidenceTranscription",
+                "data": {
+                    "text": text,
+                    "confidence": confidence,
+                }
+            })),
+            Event::Speech(bus::SpeechEvent::WakewordDetected { confidence }) => Some(json!({
+                "type": "WakewordDetected",
+                "data": {
+                    "confidence": confidence,
+                }
+            })),
+            Event::Speech(bus::SpeechEvent::WakewordSuppressed { reason, .. }) => Some(json!({
+                "type": "WakewordSuppressed",
+                "data": {
+                    "reason": reason,
+                }
+            })),
+            Event::Speech(bus::SpeechEvent::WakewordResumed { .. }) => Some(json!({
+                "type": "WakewordResumed",
+                "data": {}
+            })),
+            Event::Speech(bus::SpeechEvent::ListenModeTranscriptFinalized { text, .. }) => {
                 Some(json!({
-                    "type": "ListenModeTranscription",
+                    "type": "ListenModeTranscriptFinalized",
                     "data": {
                         "text": text,
                     }
@@ -222,11 +264,25 @@ async fn forward_bus_events_to_ipc(
                 }))
             }
             Event::Inference(bus::InferenceEvent::InferenceStreamCompleted {
-                token_count, ..
-            }) => Some(json!({
+                token_count,
+                source,
+                ..
+            }) if !matches!(source, bus::InferenceSource::ProactiveCTP) => Some(json!({
                 "type": "InferenceStreamCompleted",
                 "data": {
                     "token_count": token_count,
+                }
+            })),
+            Event::Inference(bus::InferenceEvent::InferenceCompleted {
+                source,
+                token_count,
+                causal_id,
+                ..
+            }) if !matches!(source, bus::InferenceSource::ProactiveCTP) => Some(json!({
+                "type": "InferenceCompleted",
+                "data": {
+                    "token_count": token_count,
+                    "causal_id": causal_id.as_u64(),
                 }
             })),
             Event::Inference(bus::InferenceEvent::ModelLoaded {
@@ -241,9 +297,7 @@ async fn forward_bus_events_to_ipc(
                 }
             })),
             Event::Inference(bus::InferenceEvent::ModelLoadFailed {
-                model_path,
-                reason,
-                ..
+                model_path, reason, ..
             }) => Some(json!({
                 "type": "ModelLoadFailed",
                 "data": {
@@ -293,6 +347,14 @@ async fn forward_bus_events_to_ipc(
                     "total_mb": total_mb,
                     "percent": percent,
                 }
+            })),
+            Event::System(bus::SystemEvent::OnboardingRequired) => Some(json!({
+                "type": "OnboardingRequired",
+                "data": {}
+            })),
+            Event::System(bus::SystemEvent::OnboardingCompleted) => Some(json!({
+                "type": "OnboardingCompleted",
+                "data": {}
             })),
 
             Event::CTP(ctp_event) => match ctp_event.as_ref() {
@@ -450,10 +512,9 @@ fn launch_cli(config_mode: bool) -> Result<(), DaemonError> {
         );
     }
 
-    let cli_path = candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| DaemonError::CliLaunchFailed("CLI binary not found in expected locations".to_string()))?;
+    let cli_path = candidates.into_iter().find(|p| p.exists()).ok_or_else(|| {
+        DaemonError::CliLaunchFailed("CLI binary not found in expected locations".to_string())
+    })?;
 
     // Convert path to string without unwrap — gracefully handle non-UTF8 paths
     let cli_path_str = cli_path.to_str().ok_or_else(|| {

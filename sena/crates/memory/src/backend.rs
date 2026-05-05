@@ -4,6 +4,7 @@ use crate::error::MemoryError;
 use async_trait::async_trait;
 use bus::CausalId;
 use bus::events::{MemoryKind, ScoredChunk};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryStats {
@@ -63,6 +64,9 @@ pub trait MemoryBackend: Send + Sync {
     /// # Errors
     /// Returns `MemoryError` if consolidation fails.
     async fn consolidate(&mut self) -> Result<usize, MemoryError>;
+
+    /// Export the current persistent memory snapshot to a JSON file.
+    async fn export_json(&self, path: PathBuf) -> Result<(), MemoryError>;
 }
 
 /// Stub implementation of MemoryBackend for testing and initial integration.
@@ -117,6 +121,17 @@ impl MemoryBackend for StubBackend {
         tracing::debug!("stub backend: consolidate called");
         // Stub returns 0 nodes affected
         Ok(0)
+    }
+
+    async fn export_json(&self, path: PathBuf) -> Result<(), MemoryError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| MemoryError::BackendError("backup path has no parent".to_string()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| MemoryError::BackendError(format!("failed to create backup dir: {e}")))?;
+        std::fs::write(path, "[]")
+            .map_err(|e| MemoryError::BackendError(format!("failed to write backup file: {e}")))?;
+        Ok(())
     }
 }
 

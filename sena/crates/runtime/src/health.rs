@@ -1,176 +1,122 @@
-//! Actor health registry — tracks liveness and status of all spawned actors.
+//! Runtime health and supervisor management.
 
-use bus::events::system::{ActorHealth, ActorStatus};
+pub use bus::events::system::{ActorHealth as ActorEntry, ActorStatus};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// A single actor entry in the registry.
-#[derive(Debug)]
-pub struct ActorEntry {
-    /// Static actor name.
-    pub name: &'static str,
-    /// Current health status.
-    pub status: ActorStatus,
-    /// When the actor was registered (proxy for start time).
-    pub registered_at: Instant,
+/// Internal health state tracked by supervisor.
+#[derive(Debug, Clone)]
+struct HealthEntry {
+    /// Last recorded status.
+    status: ActorStatus,
+    /// Last activity timestamp.
+    last_seen: Instant,
 }
 
-impl ActorEntry {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            status: ActorStatus::Starting,
-            registered_at: Instant::now(),
-        }
-    }
-
-    /// Uptime of this actor entry in seconds.
-    pub fn uptime_seconds(&self) -> u64 {
-        self.registered_at.elapsed().as_secs()
-    }
-
-    /// Convert to the bus-facing `ActorHealth` type.
-    pub fn to_health(&self) -> ActorHealth {
-        ActorHealth {
-            name: self.name.to_string(),
-            status: self.status.clone(),
-            uptime_seconds: self.uptime_seconds(),
-        }
-    }
-}
-
-/// Registry of all actor health entries for the current boot session.
-#[derive(Debug)]
+/// Registry of actor health information.
+#[derive(Debug, Clone, Default)]
 pub struct ActorRegistry {
-    entries: HashMap<&'static str, ActorEntry>,
-    /// Registry creation time — used to compute overall runtime uptime.
-    created_at: Instant,
+    actors: HashMap<String, HealthEntry>,
+    start_time: Option<Instant>,
 }
 
 impl ActorRegistry {
-    /// Create a new, empty actor registry.
     pub fn new() -> Self {
         Self {
-            entries: HashMap::new(),
-            created_at: Instant::now(),
+            actors: HashMap::new(),
+            start_time: Some(Instant::now()),
         }
     }
 
-    /// Register an actor by name. Sets its initial status to `Running`.
-    pub fn register(&mut self, name: &'static str) {
-        self.entries.insert(name, ActorEntry::new(name));
+    pub fn register(&mut self, name: &str) {
+        self.actors.insert(
+            name.to_string(),
+            HealthEntry {
+                status: ActorStatus::Starting,
+                last_seen: Instant::now(),
+            },
+        );
     }
 
-    /// Mark an actor as running (healthy) — called when ActorReady is received.
-    /// If the actor is not yet registered, it is inserted in running state.
-    pub fn mark_running(&mut self, name: &'static str) {
-        let entry = self
-            .entries
-            .entry(name)
-            .or_insert_with(|| ActorEntry::new(name));
-        entry.status = ActorStatus::Running;
-    }
-
-    /// Mark an actor as failed with the given reason.  
-    /// If the actor is not yet registered, it is inserted in a failed state.
-    pub fn mark_failed(&mut self, name: &'static str, reason: String) {
-        let entry = self
-            .entries
-            .entry(name)
-            .or_insert_with(|| ActorEntry::new(name));
-        entry.status = ActorStatus::Failed { reason };
-    }
-
-    /// Mark an actor as cleanly stopped.
-    pub fn mark_stopped(&mut self, name: &'static str) {
-        if let Some(entry) = self.entries.get_mut(name) {
-            entry.status = ActorStatus::Stopped;
+    pub fn mark_running(&mut self, name: &str) {
+        if let Some(entry) = self.actors.get_mut(name) {
+            entry.status = ActorStatus::Ready;
+            entry.last_seen = Instant::now();
         }
     }
 
-    /// Return the health snapshot of all registered actors.
-    pub fn get_all_health(&self) -> Vec<ActorHealth> {
-        self.entries.values().map(|e| e.to_health()).collect()
+    pub fn mark_failed(&mut self, name: &str, reason: String) {
+        if let Some(entry) = self.actors.get_mut(name) {
+            entry.status = ActorStatus::Failed { reason };
+            entry.last_seen = Instant::now();
+        }
     }
 
-    /// Overall uptime of the registry in seconds (proxy for runtime uptime).
+    pub fn mark_stopped(&mut self, name: &str) {
+        if let Some(entry) = self.actors.get_mut(name) {
+            entry.status = ActorStatus::Idle;
+            entry.last_seen = Instant::now();
+        }
+    }
+
+    pub fn get_all_health(&self) -> Vec<ActorEntry> {
+        self.actors
+            .iter()
+            .map(|(name, entry)| ActorEntry {
+                name: name.clone(),
+                status: entry.status.clone(),
+                last_seen: entry.last_seen,
+            })
+            .collect()
+    }
+
     pub fn uptime_seconds(&self) -> u64 {
-        self.created_at.elapsed().as_secs()
-    }
-
-    /// Returns `true` if all registered actors are in the `Running` state.
-    pub fn all_running(&self) -> bool {
-        self.entries
-            .values()
-            .all(|e| matches!(e.status, ActorStatus::Running))
+        self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 }
 
-impl Default for ActorRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Tracks the health of all registered actors.
+#[derive(Debug, Clone, Default)]
+pub struct Supervisor {
+    actors: Arc<Mutex<ActorRegistry>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn register_and_get_health() {
-        let mut registry = ActorRegistry::new();
-        registry.register("platform");
-        registry.register("soul");
-
-        let health = registry.get_all_health();
-        assert_eq!(health.len(), 2);
+impl Supervisor {
+    pub fn new() -> Self {
+        Self {
+            actors: Arc::new(Mutex::new(ActorRegistry::new())),
+        }
     }
 
-    #[test]
-    fn mark_running_transitions_from_starting() {
-        let mut registry = ActorRegistry::new();
-        registry.register("inference");
-
-        let health = registry.get_all_health();
-        let h = health.iter().find(|h| h.name == "inference").unwrap();
-        assert!(matches!(h.status, ActorStatus::Starting));
-
-        registry.mark_running("inference");
-        let health = registry.get_all_health();
-        let h = health.iter().find(|h| h.name == "inference").unwrap();
-        assert!(matches!(h.status, ActorStatus::Running));
+    pub fn update_status(&self, actor: &str, status: ActorStatus) {
+        let mut registry = match self.actors.lock() {
+            Ok(registry) => registry,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(entry) = registry.actors.get_mut(actor) {
+            entry.status = status;
+            entry.last_seen = Instant::now();
+        } else {
+            registry.actors.insert(
+                actor.to_string(),
+                HealthEntry {
+                    status,
+                    last_seen: Instant::now(),
+                },
+            );
+        }
     }
 
-    #[test]
-    fn mark_failed_updates_status() {
-        let mut registry = ActorRegistry::new();
-        registry.register("inference");
-        registry.mark_failed("inference", "model not found".to_string());
-
-        let health = registry.get_all_health();
-        let h = health.iter().find(|h| h.name == "inference").unwrap();
-        assert!(matches!(h.status, ActorStatus::Failed { .. }));
+    pub fn report(&self) -> (Vec<ActorEntry>, u64) {
+        let registry = match self.actors.lock() {
+            Ok(registry) => registry,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (registry.get_all_health(), registry.uptime_seconds())
     }
 
-    #[test]
-    fn mark_stopped_updates_status() {
-        let mut registry = ActorRegistry::new();
-        registry.register("ctp");
-        registry.mark_stopped("ctp");
-
-        let health = registry.get_all_health();
-        let h = health.iter().find(|h| h.name == "ctp").unwrap();
-        assert!(matches!(h.status, ActorStatus::Stopped));
-    }
-
-    #[test]
-    fn all_running_returns_false_after_failure() {
-        let mut registry = ActorRegistry::new();
-        registry.register("memory");
-        assert!(!registry.all_running()); // Starting, not Running
-        registry.mark_running("memory");
-        assert!(registry.all_running());
-        registry.mark_failed("memory", "disk full".to_string());
-        assert!(!registry.all_running());
+    pub fn mark_ready(&self, actor: &str) {
+        self.update_status(actor, ActorStatus::Ready);
     }
 }

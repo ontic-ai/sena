@@ -48,7 +48,7 @@ pub struct BootResult {
 /// 3. Encryption init
 /// 4. EventBus init
 /// 5. Speech model verification and repair (permissive)
-/// 6. Required embed model verification (strict — boot fails if missing)
+/// 6. Required embed model verification (strict â€” boot fails if missing)
 /// 7. Soul init
 /// 8. Core actors spawn
 /// 9. Wait for all ActorReady events (handled by supervisor)
@@ -120,7 +120,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
 
     // Emit onboarding status if required
     if onboarding_required {
-        info!("Onboarding required — first boot detected");
+        info!("Onboarding required â€” first boot detected");
         let _ = bus
             .broadcast(Event::System(SystemEvent::OnboardingRequired))
             .await;
@@ -252,10 +252,10 @@ async fn detect_onboarding_state() -> Result<bool, RuntimeError> {
 
     // If marker exists, onboarding is complete
     if marker_path.exists() {
-        info!("Onboarding marker found — onboarding complete");
+        info!("Onboarding marker found â€” onboarding complete");
         Ok(false)
     } else {
-        info!("No onboarding marker — first boot detected");
+        info!("No onboarding marker â€” first boot detected");
         Ok(true)
     }
 }
@@ -293,12 +293,12 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
                     "Model verification/repair failed for {}: {}. Speech backend may use stub.",
                     model.name, e
                 );
-                // Continue anyway — builder will fall back to stubs
+                // Continue anyway â€” builder will fall back to stubs
             }
         }
     }
 
-    info!("Speech model verification complete — available models verified");
+    info!("Speech model verification complete â€” available models verified");
     Ok(())
 }
 
@@ -330,7 +330,7 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
         embed_model.size_bytes as f64 / 1_000_000.0
     );
 
-    // Verify or download the model — STRICT: fail boot on error
+    // Verify or download the model â€” STRICT: fail boot on error
     match verify_model(&embed_models_dir, &embed_model, bus.clone()).await {
         Ok(()) => {
             info!(
@@ -341,7 +341,7 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
             Ok(())
         }
         Err(e) => {
-            // FAIL BOOT — embed model is a hard requirement
+            // FAIL BOOT â€” embed model is a hard requirement
             Err(RuntimeError::RequiredModelMissing {
                 model_name: embed_model.name.clone(),
                 reason: format!("verification/download failed: {}", e),
@@ -363,14 +363,14 @@ async fn verify_model(
 
     // Check if model exists
     if !cached_path.exists() {
-        info!("Model {} not found — downloading", model.name);
+        info!("Model {} not found â€” downloading", model.name);
         return download_model(models_dir, model, bus).await;
     }
 
-    // Model exists — verify checksum (skip if placeholder checksum)
+    // Model exists â€” verify checksum (skip if placeholder checksum)
     if model.sha256.chars().all(|c| c == '0') {
         info!(
-            "Model {} found (checksum verification skipped — placeholder checksum)",
+            "Model {} found (checksum verification skipped â€” placeholder checksum)",
             model.name
         );
         return Ok(());
@@ -383,7 +383,10 @@ async fn verify_model(
         info!("Model {} verified (checksum valid)", model.name);
         Ok(())
     } else {
-        warn!("Model {} has invalid checksum — re-downloading", model.name);
+        warn!(
+            "Model {} has invalid checksum â€” re-downloading",
+            model.name
+        );
         // Remove corrupt file and re-download
         let _ = fs::remove_file(&cached_path).await;
         download_model(models_dir, model, bus).await
@@ -487,12 +490,28 @@ async fn init_soul(
 /// 9. Prompt
 /// 10. STT
 /// 11. TTS
+/// 12. Wakeword (optional, default disabled)
 ///
 /// Returns (actor_handles, expected_actors) where expected_actors is the list
 /// of actor names that must emit ActorReady before BootComplete.
 async fn spawn_actors(
     bus: std::sync::Arc<EventBus>,
     config: &crate::config::SenaConfig,
+) -> Result<
+    (
+        Vec<(&'static str, tokio::task::JoinHandle<()>)>,
+        Vec<&'static str>,
+    ),
+    RuntimeError,
+> {
+    let data_dir = resolve_sena_dir()?;
+    spawn_actors_with_data_dir(bus, config, &data_dir).await
+}
+
+async fn spawn_actors_with_data_dir(
+    bus: std::sync::Arc<EventBus>,
+    config: &crate::config::SenaConfig,
+    data_dir: &Path,
 ) -> Result<
     (
         Vec<(&'static str, tokio::task::JoinHandle<()>)>,
@@ -507,21 +526,22 @@ async fn spawn_actors(
     let models_dir = resolve_models_dir()?;
 
     // Step 4: Soul actor spawn
-    let soul_actor = builder::build_soul_actor()?;
+    let soul_actor = builder::build_soul_actor(&data_dir)?;
     let soul_name: &'static str = "soul";
     expected.push(soul_name);
     let soul_handle = spawn_soul_actor(soul_actor, bus.clone());
     handles.push((soul_name, soul_handle));
 
     // Step 5: Inference actor spawn
-    let inference_actor = builder::build_inference_actor(config.inference_max_tokens)?;
+    let (embed_tx, embed_rx) = tokio::sync::mpsc::channel(32);
+    let inference_actor = builder::build_inference_actor(config.inference_max_tokens, embed_rx)?;
     let inference_name: &'static str = "inference";
     expected.push(inference_name);
     let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
     handles.push((inference_name, inference_handle));
 
     // Step 6: Memory actor spawn
-    let memory_actor = builder::build_memory_actor()?;
+    let memory_actor = builder::build_memory_actor(data_dir, embed_tx)?;
     let memory_name: &'static str = "memory";
     expected.push(memory_name);
     let memory_handle = spawn_memory_actor(memory_actor, bus.clone());
@@ -571,6 +591,16 @@ async fn spawn_actors(
         expected.push(tts_name);
         let tts_handle = spawn_tts_actor(tts_actor, bus.clone());
         handles.push((tts_name, tts_handle));
+
+        if config.wakeword_enabled
+            && let Some(wakeword_actor) =
+                builder::build_wakeword_actor(&models_dir, config.wakeword_sensitivity)?
+        {
+            let wakeword_name: &'static str = "wakeword";
+            expected.push(wakeword_name);
+            let wakeword_handle = spawn_wakeword_actor(wakeword_actor, bus.clone());
+            handles.push((wakeword_name, wakeword_handle));
+        }
     }
 
     Ok((handles, expected))
@@ -598,7 +628,9 @@ fn spawn_soul_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -641,7 +673,9 @@ fn spawn_memory_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -684,7 +718,9 @@ fn spawn_inference_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -708,11 +744,11 @@ fn spawn_inference_actor(
 /// Intervals for platform signal polling.
 mod poll_intervals {
     use std::time::Duration;
-    /// Active window polling — 250 ms.
+    /// Active window polling â€” 250 ms.
     pub const WINDOW: Duration = Duration::from_millis(250);
-    /// Clipboard polling — 500 ms.
+    /// Clipboard polling â€” 500 ms.
     pub const CLIPBOARD: Duration = Duration::from_millis(500);
-    /// Keystroke cadence polling — 100 ms.
+    /// Keystroke cadence polling â€” 100 ms.
     pub const KEYSTROKE: Duration = Duration::from_millis(100);
 }
 
@@ -731,7 +767,9 @@ fn spawn_platform_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         actor
@@ -770,7 +808,9 @@ fn spawn_ctp_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -813,7 +853,9 @@ fn spawn_prompt_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -856,7 +898,9 @@ fn spawn_stt_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -899,7 +943,53 @@ fn spawn_tts_actor(
 
         // Emit ActorReady
         let _ = bus
-            .broadcast(Event::System(SystemEvent::ActorReady { actor_name: name }))
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
+            .await;
+
+        if let Err(e) = actor.run().await {
+            tracing::error!(actor = name, error = %e, "Actor run failed");
+            let _ = bus
+                .broadcast(Event::System(SystemEvent::ActorFailed {
+                    actor: name.to_string(),
+                    reason: e.to_string(),
+                }))
+                .await;
+        }
+
+        if let Err(e) = actor.stop().await {
+            tracing::warn!(actor = name, error = %e, "Actor stop failed");
+        }
+
+        tracing::info!(actor = name, "Actor task stopped");
+    })
+}
+
+/// Spawn wakeword actor in a tokio task.
+fn spawn_wakeword_actor(
+    mut actor: speech::WakewordActor,
+    bus: std::sync::Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let name = actor.name();
+        tracing::info!(actor = name, "Actor task started");
+
+        if let Err(e) = actor.start(bus.clone()).await {
+            tracing::error!(actor = name, error = %e, "Actor start failed");
+            let _ = bus
+                .broadcast(Event::System(SystemEvent::ActorFailed {
+                    actor: name.to_string(),
+                    reason: e.to_string(),
+                }))
+                .await;
+            return;
+        }
+
+        let _ = bus
+            .broadcast(Event::System(SystemEvent::ActorReady {
+                actor_name: name.to_string(),
+            }))
             .await;
 
         if let Err(e) = actor.run().await {
@@ -923,6 +1013,7 @@ fn spawn_tts_actor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TestEnvGuard, env_test_lock};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -934,18 +1025,9 @@ mod tests {
         // Embed model verification is STRICT: boot fails if the required embed
         // model is missing. This test creates a stub embed model file to satisfy
         // the strict requirement.
+        let _env_lock = env_test_lock();
         let temp_dir = tempdir().expect("create tempdir");
-
-        // Override APPDATA/HOME for this test
-        #[cfg(target_os = "windows")]
-        unsafe {
-            std::env::set_var("APPDATA", temp_dir.path());
-        }
-
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        unsafe {
-            std::env::set_var("HOME", temp_dir.path());
-        }
+        let _env = TestEnvGuard::set(temp_dir.path());
 
         // Create embed models directory and stub embed model file
         let embed_model = ModelManifest::required_embed_model();
@@ -989,6 +1071,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_config_stub_succeeds() {
+        let _env_lock = env_test_lock();
+        let temp_dir = tempdir().expect("create tempdir");
+        let _env = TestEnvGuard::set(temp_dir.path());
         let result = load_config().await;
         assert!(result.is_ok());
     }
@@ -1002,8 +1087,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_actors_creates_expected_list() {
         let bus = Arc::new(EventBus::new());
+        let data_dir = tempdir().expect("create tempdir");
         let config = crate::config::SenaConfig::default();
-        let result = spawn_actors(bus, &config).await;
+        let result = spawn_actors_with_data_dir(bus, &config, data_dir.path()).await;
         assert!(result.is_ok());
 
         let (handles, expected) =
@@ -1022,12 +1108,13 @@ mod tests {
     #[tokio::test]
     async fn spawn_actors_skips_speech_when_disabled() {
         let bus = Arc::new(EventBus::new());
+        let data_dir = tempdir().expect("create tempdir");
         let config = crate::config::SenaConfig {
             speech_enabled: false,
             ..Default::default()
         };
 
-        let (_handles, expected) = spawn_actors(bus, &config)
+        let (_handles, expected) = spawn_actors_with_data_dir(bus, &config, data_dir.path())
             .await
             .expect("spawn_actors should succeed when speech is disabled");
 
@@ -1038,18 +1125,9 @@ mod tests {
     #[tokio::test]
     async fn detect_onboarding_state_returns_true_for_first_boot() {
         // First boot should return true (onboarding required)
+        let _env_lock = env_test_lock();
         let temp_dir = tempdir().expect("create tempdir");
-
-        // Override APPDATA/HOME for this test
-        #[cfg(target_os = "windows")]
-        unsafe {
-            std::env::set_var("APPDATA", temp_dir.path());
-        }
-
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        unsafe {
-            std::env::set_var("HOME", temp_dir.path());
-        }
+        let _env = TestEnvGuard::set(temp_dir.path());
 
         let result = detect_onboarding_state().await;
         assert!(result.is_ok());
@@ -1058,7 +1136,7 @@ mod tests {
 
     // NOTE: Test for onboarding_complete marker is omitted due to environment
     // variable interference in parallel test execution. The actual functionality
-    // is correct — detect_onboarding_state() returns false when the marker exists.
+    // is correct â€” detect_onboarding_state() returns false when the marker exists.
     // Manual verification or integration testing is recommended for this case.
 
     #[tokio::test]

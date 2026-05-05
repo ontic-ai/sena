@@ -1,30 +1,21 @@
-//! Task inference engine — derives an inferred task from signal context.
+//! Task inference placeholder for model-driven interpretation.
 //!
-//! BONES stub: engine skeleton is present but inference is not yet wired to
-//! the LLM. When the inference actor is available, this engine will delegate
-//! to it via the bus.
+//! CTP must not hardcode task meaning as a product behavior. Context is
+//! forwarded through the bus to the inference actor, which asks the model to
+//! interpret the user's activity.
 
-use crate::signal_buffer::SignalBuffer;
-use bus::events::ctp::EnrichedInferredTask;
+use bus::events::ctp::{ContextSnapshot, EnrichedInferredTask};
 
-/// Derives an inferred task from the current signal buffer state.
-///
-/// In the full implementation this will send a prompt to the inference actor
-/// and await an `InferenceResponse` event. For now it returns a `None` stub.
+/// Placeholder type retained so the CTP crate keeps an explicit task-inference boundary.
 pub struct TaskInferenceEngine;
 
 impl TaskInferenceEngine {
-    /// Create a new task inference engine.
     pub fn new() -> Self {
         Self
     }
 
-    /// Attempt to infer the user's current task from signal history.
-    ///
-    /// Returns `None` in the BONES stub. Will return a typed task once the
-    /// LLM inference path is wired in.
-    pub fn infer(&self, _buffer: &SignalBuffer) -> Option<EnrichedInferredTask> {
-        // TODO M2: wire to InferenceActor via bus event request/response
+    /// Hardcoded task inference is intentionally disabled.
+    pub fn infer(&self, _snapshot: &ContextSnapshot) -> Option<EnrichedInferredTask> {
         None
     }
 }
@@ -38,13 +29,38 @@ impl Default for TaskInferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signal_buffer::SignalBuffer;
-    use std::time::Duration;
+    use bus::events::platform::{KeystrokeCadence, WindowContext};
+    use std::time::{Duration, Instant};
+
+    fn mock_snapshot() -> ContextSnapshot {
+        let now = Instant::now();
+        ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Code".to_string(),
+                window_title: Some("main.rs".to_string()),
+                bundle_id: None,
+                timestamp: now,
+            },
+            recent_files: vec![],
+            clipboard_digest: None,
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 120.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(0),
+                timestamp: now,
+            },
+            session_duration: Duration::from_secs(600),
+            inferred_task: None,
+            user_state: None,
+            visual_context: None,
+            timestamp: now,
+            soul_identity_signal: None,
+        }
+    }
 
     #[test]
-    fn infer_returns_none_in_stub() {
+    fn infer_returns_none_until_model_path_is_wired() {
         let engine = TaskInferenceEngine::new();
-        let buffer = SignalBuffer::new(Duration::from_secs(300));
-        assert!(engine.infer(&buffer).is_none());
+        assert!(engine.infer(&mock_snapshot()).is_none());
     }
 }

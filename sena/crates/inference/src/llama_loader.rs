@@ -67,19 +67,56 @@ impl InferenceBackend for LlamaBackendAdapter {
         Ok(InferenceStream::new(rx))
     }
 
+    fn complete(&self, prompt: &str, params: &InferenceParams) -> Result<String, InferenceError> {
+        let infer_params = infer::InferenceParams {
+            request_id: uuid::Uuid::new_v4(),
+            prompt: prompt.to_string(),
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            ctx_size: 2048,
+        };
+
+        let backend = self
+            .inner
+            .try_lock()
+            .map_err(|_| InferenceError::ExecutionFailed("backend busy".to_string()))?;
+        backend
+            .complete(&infer_params)
+            .map_err(|e| InferenceError::ExecutionFailed(format!("complete failed: {}", e)))
+    }
+
     async fn shutdown(&mut self) -> Result<(), InferenceError> {
         Ok(())
     }
 }
 
+pub fn preferred_llama_backend() -> infer::BackendType {
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "vulkan"))]
+    {
+        return infer::BackendType::Vulkan;
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        return infer::BackendType::Metal;
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "cuda"))]
+    {
+        return infer::BackendType::Cuda;
+    }
+
+    infer::BackendType::auto_detect()
+}
+
 pub fn build_loaded_llama_backend(
     model_path: &Path,
 ) -> Result<Box<dyn InferenceBackend>, InferenceError> {
-    let mut backend = crate::LlamaBackend::new().map_err(|e| {
-        InferenceError::BackendInit(format!("llama backend init failed: {}", e))
-    })?;
+    let mut backend = crate::LlamaBackend::new()
+        .map_err(|e| InferenceError::BackendInit(format!("llama backend init failed: {}", e)))?;
 
-    let backend_type = infer::BackendType::auto_detect();
+    let backend_type = preferred_llama_backend();
     backend.load_model(model_path, backend_type).map_err(|e| {
         InferenceError::BackendFailed(format!(
             "failed to load model from {}: {}",

@@ -7,7 +7,7 @@ use crate::backend::TtsBackend;
 use crate::error::SpeechActorError;
 use crate::types::{AudioStream, PendingSentence};
 use bus::causal::CausalId;
-use bus::events::{InferenceEvent, SoulEvent, SpeechEvent, SystemEvent};
+use bus::events::{InferenceEvent, SoulEvent, SpeechEvent, SystemEvent, Verbosity, Warmth};
 use bus::{Actor, ActorError, Event, EventBus};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +44,10 @@ pub struct TtsActor {
     pub(crate) next_playback_index: u32,
     /// Audio output stream for speaker playback (lazily initialized).
     audio_output: Option<AudioOutputStream>,
+    /// Current speaking rate derived from Soul personality.
+    speaking_rate: f32,
+    /// Current pitch scale derived from Soul personality.
+    pitch_scale: f32,
 }
 
 impl TtsActor {
@@ -60,7 +64,35 @@ impl TtsActor {
             shutdown_requested: false,
             next_playback_index: 0,
             audio_output: None,
+            speaking_rate: 1.0,
+            pitch_scale: 1.0,
         }
+    }
+
+    fn update_prosody_from_personality(&mut self, verbosity: Verbosity, warmth: Warmth) {
+        self.speaking_rate = match verbosity {
+            Verbosity::Terse => 1.15,
+            Verbosity::Balanced => 1.0,
+            Verbosity::Verbose => 0.92,
+        };
+
+        self.pitch_scale = match warmth {
+            Warmth::Professional => 0.97,
+            Warmth::Friendly => 1.0,
+            Warmth::Casual => 1.03,
+        };
+
+        self.backend
+            .set_prosody(self.speaking_rate, self.pitch_scale);
+    }
+
+    fn synthesize_with_current_prosody(
+        &mut self,
+        text: &str,
+    ) -> Result<AudioStream, crate::error::TtsError> {
+        self.backend
+            .set_prosody(self.speaking_rate, self.pitch_scale);
+        self.backend.synthesize(text)
     }
 
     /// Set maximum queue depth.
@@ -115,23 +147,12 @@ impl TtsActor {
         })?;
 
         let buffer = Self::to_audio_buffer(&audio);
-        let duration_ms = audio.duration_ms();
-
-        // Queue the buffer for playback
         audio_output
-            .play(buffer)
+            .play_and_wait(buffer)
+            .await
             .map_err(|e| SpeechActorError::AudioDevice(format!("playback failed: {}", e)))?;
 
-        // Wait for playback to complete using spawn_blocking to avoid blocking async runtime
-        let wait_duration = std::time::Duration::from_millis(duration_ms + 100);
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(wait_duration);
-        })
-        .await
-        .map_err(|e| SpeechActorError::AudioDevice(format!("playback wait failed: {}", e)))?;
-
         debug!(
-            duration_ms = %duration_ms,
             causal_id = ?causal_id,
             "Audio playback completed"
         );
@@ -142,7 +163,9 @@ impl TtsActor {
     /// Handle bus events.
     async fn handle_bus_event(&mut self, event: Event) -> Result<(), SpeechActorError> {
         match event {
-            Event::System(SystemEvent::ShutdownRequested) => {
+            Event::System(SystemEvent::ShutdownSignal)
+            | Event::System(SystemEvent::ShutdownRequested)
+            | Event::System(SystemEvent::ShutdownInitiated) => {
                 info!("Shutdown requested, stopping TTS actor");
                 self.shutdown_requested = true;
             }
@@ -162,8 +185,14 @@ impl TtsActor {
                 self.interrupt_all().await?;
             }
             Event::Soul(SoulEvent::PersonalityUpdated { .. }) => {
-                debug!("Personality updated — prosody parameters would be updated here");
-                // In a real implementation, update prosody parameters on the backend
+                if let Event::Soul(SoulEvent::PersonalityUpdated { metadata, .. }) = event {
+                    self.update_prosody_from_personality(metadata.verbosity, metadata.warmth);
+                    debug!(
+                        speaking_rate = self.speaking_rate,
+                        pitch_scale = self.pitch_scale,
+                        "Personality updated — TTS prosody refreshed"
+                    );
+                }
             }
             _ => {}
         }
@@ -198,7 +227,7 @@ impl TtsActor {
         }
 
         // Synthesize audio
-        let audio = match self.backend.synthesize(&text) {
+        let audio = match self.synthesize_with_current_prosody(&text) {
             Ok(audio) => {
                 debug!(
                     sentence_index = %sentence_index,
@@ -258,7 +287,7 @@ impl TtsActor {
         self.is_speaking = true;
 
         // Synthesize speech
-        match self.backend.synthesize(&text) {
+        match self.synthesize_with_current_prosody(&text) {
             Ok(audio) => {
                 debug!(
                     samples = audio.samples.len(),
@@ -387,6 +416,11 @@ impl TtsActor {
 
         // Flush audio buffer
         self.backend.flush_buffer();
+        if let Some(audio_output) = &self.audio_output {
+            if let Err(e) = audio_output.clear() {
+                warn!(error = %e, "failed to clear audio output buffer");
+            }
+        }
 
         // Cancel active tasks
         for handle in self.active_tasks.drain(..) {
@@ -428,10 +462,17 @@ impl Actor for TtsActor {
         info!("TTS actor starting");
         self.bus = Some(bus.clone());
         self.broadcast_rx = Some(bus.subscribe_broadcast());
+        self.backend
+            .set_prosody(self.speaking_rate, self.pitch_scale);
+
+        #[cfg(not(test))]
+        if let Err(e) = self.ensure_audio_output() {
+            warn!(error = %e, "audio output pre-initialization failed; will retry on first playback");
+        }
 
         // Emit ActorReady event
         bus.broadcast(Event::System(SystemEvent::ActorReady {
-            actor_name: self.name(),
+            actor_name: self.name().to_string(),
         }))
         .await
         .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
@@ -517,6 +558,17 @@ impl TtsBackend for StubTtsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tts_actor_updates_prosody_from_personality() {
+        let backend = Box::new(StubTtsBackend::new(16000));
+        let mut actor = TtsActor::new(backend);
+
+        actor.update_prosody_from_personality(Verbosity::Terse, Warmth::Casual);
+
+        assert_eq!(actor.speaking_rate, 1.15);
+        assert_eq!(actor.pitch_scale, 1.03);
+    }
 
     #[test]
     fn stub_backend_synthesizes_proportional_audio() {

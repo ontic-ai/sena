@@ -20,7 +20,7 @@ pub mod working_memory;
 
 pub use actor::{BackupConfig, MemoryActor};
 pub use backend::{MemoryBackend, MemoryStats, StubBackend};
-pub use echo0_backend::Echo0Backend;
+pub use echo0_backend::{Echo0Backend, PersistentMemoryStore};
 pub use embedder::{EMBEDDING_DIMENSIONS, SenaEmbedder};
 pub use error::MemoryError;
 pub use extractor::SenaExtractor;

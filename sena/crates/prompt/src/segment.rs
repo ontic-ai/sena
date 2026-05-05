@@ -1,157 +1,305 @@
-//! Prompt segment types.
+//! Prompt segment types — typed data carriers for prompt composition.
+//!
+//! All prompt content flows through typed `PromptSegment` variants.
+//! No static strings are ever passed to the composer.
 
-use crate::types::{PromptContext, Provenance};
+use bus::{
+    ContextSnapshot, SoulSummary, events::memory::ScoredChunk, events::soul::RichSoulSummary,
+};
 
-/// A typed segment of a prompt.
+/// Reflection control mode for prompt-driven reasoning.
+#[derive(Debug, Clone)]
+pub enum ReflectionMode {
+    /// One-pass response generation.
+    SingleShot,
+    /// Multi-round memory interleave mode.
+    Iterative {
+        current_round: usize,
+        max_rounds: usize,
+    },
+}
+
+/// Directive for proactive CTP responses that may be spoken, observed, or discarded.
+#[derive(Debug, Clone, Copy)]
+pub enum ProactiveDirective {
+    /// Model must choose one of speak, observe, or nothing.
+    ThreePathResponse,
+}
+
+/// A typed segment of prompt content.
 ///
-/// Each variant represents a specific kind of content that can be included
-/// in a composed prompt. Segments are assembled by the composer based on
-/// the provided context.
+/// Each variant carries live, typed data — never a raw string literal.
 #[derive(Debug, Clone)]
 pub enum PromptSegment {
-    /// System persona from Soul.
-    ///
-    /// Contains identity signals, temporal patterns, and learned preferences
-    /// that define Sena's personality and interaction style.
-    SystemPersona,
+    /// Persona and recent event context from the Soul subsystem.
+    SoulContext(SoulSummary),
 
-    /// Long-term memory context.
-    ///
-    /// Relevant chunks retrieved from the semantic memory store based on
-    /// the current context or user query.
-    MemoryContext,
+    /// Rich structured soul summary with sections and relevance scores.
+    RichSoulContext(RichSoulSummary),
 
-    /// Working memory (ephemeral, in-RAM only).
-    ///
-    /// Recent conversational context or task state that has not been
-    /// consolidated to long-term memory.
-    WorkingMemory,
+    /// Relevant long-term memory chunks retrieved from ech0.
+    LongTermMemory(Vec<ScoredChunk>),
 
-    /// Current context snapshot from CTP.
-    ///
-    /// Platform signals, active window, temporal state, and other
-    /// environmental context from the CTP subsystem.
-    CurrentContext,
+    /// Current computing context assembled by the CTP subsystem.
+    CurrentContext(Box<ContextSnapshot>),
 
-    /// User input or query.
-    ///
-    /// The direct input from the user that triggered this composition.
-    UserInput,
+    /// Structured contract for model-decided proactive output routing.
+    ProactiveResponseDirective(ProactiveDirective),
 
-    /// System instruction or template.
-    ///
-    /// Static or semi-static instruction text that guides the model's
-    /// behavior. This is the only segment type that may contain predefined
-    /// text, and it must be minimal and generic.
-    SystemInstruction(String),
+    /// In-RAM working memory snippets from the current inference cycle.
+    WorkingMemorySnippets(Vec<String>),
+
+    /// Reflection control directive for the inference actor.
+    ReflectionDirective(ReflectionMode),
 }
 
 impl PromptSegment {
-    /// Render this segment to text given the provided context.
-    ///
-    /// Returns (rendered_text, provenance, estimated_token_count).
-    ///
-    /// In this stub implementation, most segments return placeholder text.
-    /// Real implementations will extract content from the context.
-    pub fn render(&self, ctx: &PromptContext) -> (String, Provenance, usize) {
+    /// Render this segment to a text block, or `None` if the segment is empty.
+    pub(crate) fn to_text(&self) -> Option<String> {
         match self {
-            PromptSegment::SystemPersona => {
-                if let Some(ref summary) = ctx.soul_summary {
-                    let text = format!(
-                        "[BONES:SystemPersona events={} signals={}]",
-                        summary.total_events, summary.identity_signal_count
-                    );
-                    let tokens = estimate_tokens(&text);
-                    (text, Provenance::Soul, tokens)
+            PromptSegment::SoulContext(summary) => {
+                if summary.content.is_empty() {
+                    None
                 } else {
-                    (
-                        "[BONES:SystemPersona source=missing]".to_string(),
-                        Provenance::Missing,
-                        0,
-                    )
+                    Some(format!("## Context\n{}", summary.content))
                 }
             }
-            PromptSegment::MemoryContext => {
-                if ctx.memory_chunks.is_empty() {
-                    (
-                        "[BONES:MemoryContext source=missing]".to_string(),
-                        Provenance::Missing,
-                        0,
-                    )
-                } else {
-                    let text = format!("[BONES:MemoryContext chunks={}]", ctx.memory_chunks.len());
-                    let tokens = estimate_tokens(&text);
-                    (text, Provenance::LongTermMemory, tokens)
-                }
-            }
-            PromptSegment::WorkingMemory => {
-                if ctx.working_memory.is_empty() {
-                    (
-                        "[BONES:WorkingMemory source=missing]".to_string(),
-                        Provenance::Missing,
-                        0,
-                    )
-                } else {
-                    let text =
-                        format!("[BONES:WorkingMemory entries={}]", ctx.working_memory.len());
-                    let tokens = estimate_tokens(&text);
-                    (text, Provenance::WorkingMemory, tokens)
-                }
-            }
-            PromptSegment::CurrentContext => {
-                if let Some(ref snapshot) = ctx.snapshot {
-                    let text = format!(
-                        "[BONES:CurrentContext app={} files={} session_secs={}]",
-                        snapshot.active_app.app_name,
-                        snapshot.recent_files.len(),
-                        snapshot.session_duration.as_secs()
-                    );
-                    let tokens = estimate_tokens(&text);
-                    (text, Provenance::ContextSnapshot, tokens)
-                } else {
-                    (
-                        "[BONES:CurrentContext source=missing]".to_string(),
-                        Provenance::Missing,
-                        0,
-                    )
-                }
-            }
-            PromptSegment::UserInput => {
-                if let Some(ref input) = ctx.user_input {
-                    let tokens = estimate_tokens(input);
-                    (input.clone(), Provenance::UserInput, tokens)
-                } else {
-                    (
-                        "[BONES:UserInput source=missing]".to_string(),
-                        Provenance::Missing,
-                        0,
-                    )
-                }
-            }
-            PromptSegment::SystemInstruction(text) => {
-                let tokens = estimate_tokens(text);
-                (text.clone(), Provenance::SystemTemplate, tokens)
-            }
-        }
-    }
 
-    /// Get the canonical name of this segment for tracing.
-    pub fn name(&self) -> &'static str {
-        match self {
-            PromptSegment::SystemPersona => "SystemPersona",
-            PromptSegment::MemoryContext => "MemoryContext",
-            PromptSegment::WorkingMemory => "WorkingMemory",
-            PromptSegment::CurrentContext => "CurrentContext",
-            PromptSegment::UserInput => "UserInput",
-            PromptSegment::SystemInstruction(_) => "SystemInstruction",
+            PromptSegment::RichSoulContext(rich_summary) => {
+                use bus::events::soul::SoulSectionType;
+
+                if rich_summary.sections.is_empty() {
+                    return None;
+                }
+
+                // Sort sections by relevance score descending
+                let mut sorted_sections = rich_summary.sections.clone();
+                sorted_sections.sort_by(|a, b| {
+                    b.relevance_score
+                        .partial_cmp(&a.relevance_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let formatted_sections: Vec<String> = sorted_sections
+                    .iter()
+                    .map(|section| {
+                        let section_name = match section.section_type {
+                            SoulSectionType::RecentEvents => "Recent Activity",
+                            SoulSectionType::IdentitySignals => "Identity",
+                            SoulSectionType::TemporalHabits => "Temporal Patterns",
+                            SoulSectionType::Preferences => "Preferences",
+                        };
+                        format!("## {}\n{}", section_name, section.content)
+                    })
+                    .collect();
+
+                Some(formatted_sections.join("\n\n"))
+            }
+
+            PromptSegment::LongTermMemory(chunks) => {
+                if chunks.is_empty() {
+                    return None;
+                }
+                let lines: Vec<String> = chunks.iter().map(|c| format!("- {}", c.content)).collect();
+                Some(format!("## Relevant Memory\n{}", lines.join("\n")))
+            }
+
+            PromptSegment::CurrentContext(snapshot) => {
+                let mut parts = vec![format!("Active app: {}", snapshot.active_app.app_name)];
+                if let Some(title) = &snapshot.active_app.window_title {
+                    parts.push(format!("Window: {}", title));
+                }
+                if !snapshot.recent_files.is_empty() {
+                    let files: Vec<String> = snapshot
+                        .recent_files
+                        .iter()
+                        .map(|e| e.path.display().to_string())
+                        .collect();
+                    parts.push(format!("Recent files: {}", files.join(", ")));
+                }
+                if let Some(task) = &snapshot.inferred_task {
+                    parts.push(format!(
+                        "Inferred task: {} (confidence: {:.2})",
+                        task.semantic_description, task.confidence
+                    ));
+                }
+                if let Some(state) = &snapshot.user_state {
+                    parts.push(format!(
+                        "User state: frustration={}, flow={}, switch_cost={}",
+                        state.frustration_level, state.flow_detected, state.context_switch_cost
+                    ));
+                }
+                Some(format!("## Current Context\n{}", parts.join("\n")))
+            }
+
+            PromptSegment::ProactiveResponseDirective(ProactiveDirective::ThreePathResponse) => {
+                Some(
+                    "## Proactive Response Contract\nReturn exactly these fields:\naction: speak | observe | nothing\ncontent: one concise sentence when action is speak or observe; leave empty when action is nothing".to_string(),
+                )
+            }
+
+            PromptSegment::WorkingMemorySnippets(snippets) => {
+                if snippets.is_empty() {
+                    return None;
+                }
+                Some(format!("## Working Memory\n{}", snippets.join("\n")))
+            }
+
+            PromptSegment::ReflectionDirective(mode) => match mode {
+                ReflectionMode::SingleShot => Some("## Reflection\nsingle-shot".to_owned()),
+                ReflectionMode::Iterative {
+                    current_round,
+                    max_rounds,
+                } => Some(format!(
+                    "## Reflection\niterative {}/{}",
+                    current_round, max_rounds
+                )),
+            },
         }
     }
 }
 
-/// Estimate token count for a text string.
-///
-/// This is a rough heuristic: 1 token ≈ 4 characters.
-/// Real implementations should use the tokenizer from the active model.
-fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bus::events::ctp::{ContextSnapshot, EnrichedInferredTask, UserState};
+    use bus::events::platform::{KeystrokeCadence, WindowContext};
+    use bus::events::soul::{RichSoulSummary, SoulSection, SoulSectionType};
+    use std::time::{Duration, Instant};
+
+    fn make_snapshot() -> ContextSnapshot {
+        let now = Instant::now();
+        ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Code".to_string(),
+                window_title: Some("main.rs".to_string()),
+                bundle_id: None,
+                timestamp: now,
+            },
+            recent_files: vec![],
+            clipboard_digest: None,
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 120.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(5),
+                timestamp: now,
+            },
+            session_duration: Duration::from_secs(3600),
+            inferred_task: None,
+            user_state: None,
+            visual_context: None,
+            timestamp: now,
+            soul_identity_signal: None,
+        }
+    }
+
+    #[test]
+    fn rich_soul_context_segment_assembles_sections() {
+        let section1 = SoulSection {
+            section_type: SoulSectionType::RecentEvents,
+            content: "Recent event content".to_string(),
+            relevance_score: 0.9,
+        };
+        let section2 = SoulSection {
+            section_type: SoulSectionType::IdentitySignals,
+            content: "Identity content".to_string(),
+            relevance_score: 0.7,
+        };
+        let rich_summary = RichSoulSummary {
+            sections: vec![section1, section2],
+            token_count: 50,
+            request_id: 1,
+        };
+
+        let segment = PromptSegment::RichSoulContext(rich_summary);
+        let result = segment.to_text().expect("should render");
+
+        // Should be sorted by relevance descending (0.9 before 0.7)
+        assert!(result.contains("Recent Activity"));
+        assert!(result.contains("Recent event content"));
+        assert!(result.contains("Identity"));
+        assert!(result.contains("Identity content"));
+        // Recent Activity (0.9) should appear before Identity (0.7)
+        let recent_pos = result.find("Recent Activity").unwrap();
+        let identity_pos = result.find("Identity").unwrap();
+        assert!(recent_pos < identity_pos);
+    }
+
+    #[test]
+    fn rich_soul_context_empty_is_skipped() {
+        let rich_summary = RichSoulSummary {
+            sections: vec![],
+            token_count: 0,
+            request_id: 1,
+        };
+        let segment = PromptSegment::RichSoulContext(rich_summary);
+        assert!(segment.to_text().is_none());
+    }
+
+    #[test]
+    fn proactive_response_directive_renders_contract() {
+        let rendered =
+            PromptSegment::ProactiveResponseDirective(ProactiveDirective::ThreePathResponse)
+                .to_text()
+                .expect("directive should render");
+
+        assert!(rendered.contains("action:"));
+        assert!(rendered.contains("speak | observe | nothing"));
+    }
+
+    #[test]
+    fn current_context_shows_enriched_task() {
+        let mut snapshot = make_snapshot();
+        snapshot.inferred_task = Some(EnrichedInferredTask {
+            category: "coding".to_string(),
+            semantic_description: "Editing Rust code in VSCode".to_string(),
+            confidence: 0.85,
+        });
+
+        let segment = PromptSegment::CurrentContext(Box::new(snapshot));
+        let result = segment.to_text().expect("should render");
+
+        assert!(result.contains("Editing Rust code in VSCode"));
+        assert!(result.contains("0.85"));
+    }
+
+    #[test]
+    fn current_context_shows_user_state() {
+        let mut snapshot = make_snapshot();
+        snapshot.user_state = Some(UserState {
+            frustration_level: 45,
+            flow_detected: true,
+            context_switch_cost: 60,
+        });
+
+        let segment = PromptSegment::CurrentContext(Box::new(snapshot));
+        let result = segment.to_text().expect("should render");
+
+        assert!(result.contains("frustration=45"));
+        assert!(result.contains("flow=true"));
+        assert!(result.contains("switch_cost=60"));
+    }
+
+    #[test]
+    fn soul_context_empty_is_skipped() {
+        let summary = SoulSummary {
+            content: String::new(),
+            event_count: 0,
+            request_id: 0,
+        };
+        let segment = PromptSegment::SoulContext(summary);
+        assert!(segment.to_text().is_none());
+    }
+
+    #[test]
+    fn soul_context_with_content_renders() {
+        let summary = SoulSummary {
+            content: "persona content".to_string(),
+            event_count: 1,
+            request_id: 1,
+        };
+        let segment = PromptSegment::SoulContext(summary);
+        let result = segment.to_text().expect("should render");
+        assert!(result.contains("persona content"));
+    }
 }

@@ -1,220 +1,298 @@
-//! Prompt composer trait and stub implementation.
+//! Prompt assembly from typed segments.
+//!
+//! PromptComposer is stateless and cheap to construct. Callers create one
+//! per inference cycle, assemble segments, and discard it.
 
-use crate::{
-    error::PromptError,
-    segment::PromptSegment,
-    types::{ComposedPrompt, PromptContext, PromptTrace},
-};
-use tracing::{debug, warn};
+use crate::error::PromptError;
+use crate::segment::PromptSegment;
+
+/// Assembles typed prompt segments into a final prompt string.
+///
+/// No static strings are ever injected. All content comes from live, typed
+/// data carried by [`PromptSegment`] variants.
+pub struct PromptComposer;
+
+impl PromptComposer {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Assemble a list of segments into a single prompt string.
+    ///
+    /// Empty segments (empty lists, empty strings) are silently skipped.
+    /// Non-empty segments are joined with `\n\n`.
+    ///
+    /// Returns [`PromptError::NoSegments`] if no segment produces any text.
+    pub fn assemble(&self, segments: &[PromptSegment]) -> Result<String, PromptError> {
+        let parts: Vec<String> = segments.iter().filter_map(|s| s.to_text()).collect();
+
+        if parts.is_empty() {
+            return Err(PromptError::NoSegments);
+        }
+
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Assemble segments within a word-count budget.
+    ///
+    /// Segments are processed in priority order (highest-value first):
+    /// `SoulContext` > `CurrentContext` > `LongTermMemory` > `WorkingMemorySnippets` > `ReflectionDirective`
+    ///
+    /// Lower-priority segments are dropped when adding them would exceed `max_words`.
+    /// Word count is approximated via `split_whitespace().count()`.
+    ///
+    /// Returns [`PromptError::NoSegments`] if no segment fits within the budget.
+    pub fn assemble_with_budget(
+        &self,
+        segments: &[PromptSegment],
+        max_words: usize,
+    ) -> Result<String, PromptError> {
+        // Priority function — lower number = included first.
+        fn priority(seg: &PromptSegment) -> u8 {
+            match seg {
+                PromptSegment::SoulContext(_) => 0,
+                PromptSegment::RichSoulContext(_) => 0,
+                PromptSegment::ProactiveResponseDirective(_) => 1,
+                PromptSegment::CurrentContext(_) => 2,
+                PromptSegment::LongTermMemory(_) => 3,
+                PromptSegment::WorkingMemorySnippets(_) => 4,
+                PromptSegment::ReflectionDirective(_) => 5,
+            }
+        }
+
+        // Collect (priority, text) pairs, skipping empty segments.
+        let mut rendered: Vec<(u8, String)> = segments
+            .iter()
+            .filter_map(|s| s.to_text().map(|t| (priority(s), t)))
+            .collect();
+
+        // Sort ascending by priority so highest-value segments are considered first.
+        rendered.sort_by_key(|(p, _)| *p);
+
+        let mut parts: Vec<String> = Vec::new();
+        let mut word_budget = max_words;
+
+        for (_, text) in rendered {
+            let word_count = text.split_whitespace().count();
+            if word_count <= word_budget {
+                word_budget = word_budget.saturating_sub(word_count);
+                parts.push(text);
+            }
+            // Segment doesn't fit — skip it; lower-priority segments may still fit.
+        }
+
+        if parts.is_empty() {
+            return Err(PromptError::NoSegments);
+        }
+
+        Ok(parts.join("\n\n"))
+    }
+}
+
+impl Default for PromptComposer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Trait for prompt composition strategies.
 ///
 /// Implementors of this trait define how segments are assembled into a
 /// final prompt given a context. Different composers may apply different
 /// strategies (e.g., token budgeting, segment ordering, compression).
-pub trait PromptComposer: Send + Sync {
-    /// Compose a prompt from the given context.
+pub trait PromptComposerTrait: Send + Sync {
+    /// Compose a prompt from the given segments.
     ///
-    /// Returns a `ComposedPrompt` with the assembled text, trace, and token count.
-    fn compose(&self, ctx: &PromptContext) -> Result<ComposedPrompt, PromptError>;
+    /// Returns a String with the assembled text.
+    fn compose(&self, segments: &[PromptSegment]) -> Result<String, PromptError>;
 }
 
-/// Stub prompt composer for BONES implementation.
-///
-/// This composer performs minimal segment-based assembly:
-/// - Renders each segment with its provenance
-/// - Logs each segment using tracing
-/// - Returns a placeholder prompt with a full trace
-/// - Respects token limits if provided
-///
-/// Real implementations will perform sophisticated assembly logic,
-/// including dynamic segment ordering, token budgeting, and compression.
-pub struct StubComposer {
-    /// Ordered list of segments to include in the prompt.
-    segments: Vec<PromptSegment>,
-}
-
-impl StubComposer {
-    /// Create a new stub composer with the given segment order.
-    pub fn new(segments: Vec<PromptSegment>) -> Self {
-        Self { segments }
-    }
-
-    /// Create a default stub composer with standard segment ordering.
-    pub fn default_segments() -> Self {
-        Self::new(vec![
-            PromptSegment::SystemInstruction(
-                "[BONES:SystemInstruction role=assistant]".to_string(),
-            ),
-            PromptSegment::SystemPersona,
-            PromptSegment::MemoryContext,
-            PromptSegment::WorkingMemory,
-            PromptSegment::CurrentContext,
-            PromptSegment::UserInput,
-        ])
-    }
-}
-
-impl Default for StubComposer {
-    fn default() -> Self {
-        Self::default_segments()
-    }
-}
-
-impl PromptComposer for StubComposer {
-    fn compose(&self, ctx: &PromptContext) -> Result<ComposedPrompt, PromptError> {
-        debug!(
-            "StubComposer: starting composition with {} segments",
-            self.segments.len()
-        );
-
-        let mut trace = PromptTrace::new();
-        let mut assembled_parts = Vec::new();
-        let mut total_tokens = 0;
-
-        for segment in &self.segments {
-            let (text, provenance, token_count) = segment.render(ctx);
-
-            debug!(
-                segment = segment.name(),
-                provenance = ?provenance,
-                token_count = token_count,
-                "rendered segment"
-            );
-
-            trace.add_segment(segment.name().to_string(), provenance, token_count);
-            assembled_parts.push(text);
-            total_tokens += token_count;
-
-            // Check token limit if specified
-            if let Some(limit) = ctx.token_limit
-                && total_tokens > limit
-            {
-                warn!(
-                    current = total_tokens,
-                    limit = limit,
-                    "token limit exceeded during composition"
-                );
-                return Err(PromptError::TokenLimitExceeded {
-                    current: total_tokens,
-                    limit,
-                });
-            }
-        }
-
-        let composed_text = assembled_parts.join("\n\n");
-
-        debug!(
-            total_tokens = total_tokens,
-            segment_count = trace.segments.len(),
-            "composition complete"
-        );
-
-        Ok(ComposedPrompt {
-            text: composed_text,
-            trace,
-            token_count: total_tokens,
-        })
+impl PromptComposerTrait for PromptComposer {
+    fn compose(&self, segments: &[PromptSegment]) -> Result<String, PromptError> {
+        self.assemble(segments)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bus::SoulSummary;
+    use bus::events::ctp::ContextSnapshot;
+    use bus::events::memory::ScoredChunk;
+    use bus::events::platform::{KeystrokeCadence, WindowContext};
+    use std::time::{Duration, Instant};
 
-    #[test]
-    fn stub_composer_composes_empty_context() {
-        let composer = StubComposer::default_segments();
-        let ctx = PromptContext::new();
-
-        let result = composer.compose(&ctx);
-        assert!(result.is_ok());
-
-        let prompt = result.unwrap();
-        assert!(prompt.trace.segments.len() > 0);
-        assert_eq!(prompt.trace.total_tokens(), prompt.token_count);
-    }
-
-    #[test]
-    fn stub_composer_includes_user_input() {
-        let composer = StubComposer::default_segments();
-        let ctx = PromptContext::new().with_user_input("Hello, Sena!".to_string());
-
-        let result = composer.compose(&ctx);
-        assert!(result.is_ok());
-
-        let prompt = result.unwrap();
-        assert!(prompt.text.contains("Hello, Sena!"));
-
-        // Check that UserInput segment has UserInput provenance
-        let user_input_trace = prompt
-            .trace
-            .segments
-            .iter()
-            .find(|s| s.segment_name == "UserInput");
-        assert!(user_input_trace.is_some());
-        assert_eq!(
-            user_input_trace.unwrap().provenance,
-            crate::types::Provenance::UserInput
-        );
-    }
-
-    #[test]
-    fn stub_composer_respects_token_limit() {
-        let composer = StubComposer::default_segments();
-        let ctx = PromptContext::new()
-            .with_user_input("x".repeat(1000)) // ~250 tokens
-            .with_token_limit(10); // Very low limit
-
-        let result = composer.compose(&ctx);
-        assert!(result.is_err());
-
-        match result {
-            Err(PromptError::TokenLimitExceeded { current, limit }) => {
-                assert!(current > limit);
-                assert_eq!(limit, 10);
-            }
-            _ => panic!("expected TokenLimitExceeded error"),
+    fn make_snapshot() -> ContextSnapshot {
+        let now = Instant::now();
+        ContextSnapshot {
+            active_app: WindowContext {
+                app_name: "Code".to_string(),
+                window_title: Some("main.rs".to_string()),
+                bundle_id: None,
+                timestamp: now,
+            },
+            recent_files: vec![],
+            clipboard_digest: None,
+            keystroke_cadence: KeystrokeCadence {
+                events_per_minute: 120.0,
+                burst_detected: false,
+                idle_duration: Duration::from_secs(5),
+                timestamp: now,
+            },
+            session_duration: Duration::from_secs(3600),
+            inferred_task: None,
+            user_state: None,
+            visual_context: None,
+            timestamp: now,
+            soul_identity_signal: None,
         }
     }
 
     #[test]
-    fn stub_composer_marks_missing_segments() {
-        let composer = StubComposer::default_segments();
-        let ctx = PromptContext::new(); // No soul summary, memory, etc.
-
-        let result = composer.compose(&ctx);
-        assert!(result.is_ok());
-
-        let prompt = result.unwrap();
-
-        // Check that missing segments have Missing provenance
-        let persona_trace = prompt
-            .trace
-            .segments
-            .iter()
-            .find(|s| s.segment_name == "SystemPersona");
-        assert!(persona_trace.is_some());
-        assert_eq!(
-            persona_trace.unwrap().provenance,
-            crate::types::Provenance::Missing
-        );
+    fn empty_segments_returns_no_segments_error() {
+        let composer = PromptComposer::new();
+        let result = composer.assemble(&[]);
+        assert!(matches!(result, Err(PromptError::NoSegments)));
     }
 
     #[test]
-    fn prompt_trace_total_tokens_matches_sum() {
-        let mut trace = PromptTrace::new();
-        trace.add_segment(
-            "Segment1".to_string(),
-            crate::types::Provenance::SystemTemplate,
-            10,
-        );
-        trace.add_segment(
-            "Segment2".to_string(),
-            crate::types::Provenance::UserInput,
-            25,
-        );
+    fn soul_context_assembles_with_content() {
+        let composer = PromptComposer::new();
+        let summary = SoulSummary {
+            content: "persona content".into(),
+            event_count: 1,
+            request_id: 1,
+        };
+        let result = composer
+            .assemble(&[PromptSegment::SoulContext(summary)])
+            .unwrap();
+        assert!(result.contains("persona content"));
+    }
 
-        assert_eq!(trace.total_tokens(), 35);
+    #[test]
+    fn empty_soul_context_is_skipped() {
+        let composer = PromptComposer::new();
+        let empty_summary = SoulSummary {
+            content: String::new(),
+            event_count: 0,
+            request_id: 0,
+        };
+        let result = composer.assemble(&[PromptSegment::SoulContext(empty_summary)]);
+        assert!(matches!(result, Err(PromptError::NoSegments)));
+    }
+
+    #[test]
+    fn memory_chunks_segment_assembles() {
+        let composer = PromptComposer::new();
+        let chunk = ScoredChunk {
+            content: "relevant memory".into(),
+            score: 0.9,
+            age_seconds: 0,
+        };
+        let result = composer
+            .assemble(&[PromptSegment::LongTermMemory(vec![chunk])])
+            .unwrap();
+        assert!(result.contains("relevant memory"));
+    }
+
+    #[test]
+    fn empty_memory_chunk_list_is_skipped() {
+        let composer = PromptComposer::new();
+        let summary = SoulSummary {
+            content: "soul ctx".into(),
+            event_count: 0,
+            request_id: 0,
+        };
+        let result = composer
+            .assemble(&[
+                PromptSegment::SoulContext(summary),
+                PromptSegment::LongTermMemory(vec![]),
+            ])
+            .unwrap();
+        assert!(result.contains("soul ctx"));
+        assert!(!result.contains("Relevant Memory"));
+    }
+
+    #[test]
+    fn current_context_segment_assembles() {
+        let composer = PromptComposer::new();
+        let result = composer
+            .assemble(&[PromptSegment::CurrentContext(Box::new(make_snapshot()))])
+            .unwrap();
+        assert!(result.contains("Code"));
+        assert!(result.contains("main.rs"));
+    }
+
+    #[test]
+    fn working_memory_snippets_assembles() {
+        let composer = PromptComposer::new();
+        let result = composer
+            .assemble(&[PromptSegment::WorkingMemorySnippets(vec![
+                "snippet1".into(),
+                "snippet2".into(),
+            ])])
+            .unwrap();
+        assert!(result.contains("snippet1") && result.contains("snippet2"));
+    }
+
+    #[test]
+    fn empty_working_memory_is_skipped() {
+        let composer = PromptComposer::new();
+        let result = composer.assemble(&[PromptSegment::WorkingMemorySnippets(vec![])]);
+        assert!(matches!(result, Err(PromptError::NoSegments)));
+    }
+
+    #[test]
+    fn multiple_segments_joined_with_double_newline() {
+        let composer = PromptComposer::new();
+        let summary = SoulSummary {
+            content: "soul".into(),
+            event_count: 0,
+            request_id: 0,
+        };
+        let result = composer
+            .assemble(&[
+                PromptSegment::SoulContext(summary),
+                PromptSegment::WorkingMemorySnippets(vec!["work".into()]),
+            ])
+            .unwrap();
+        assert!(result.contains("\n\n"));
+        assert!(result.contains("soul") && result.contains("work"));
+    }
+
+    #[test]
+    fn budget_includes_rich_soul_context_first() {
+        use bus::events::soul::{RichSoulSummary, SoulSection, SoulSectionType};
+
+        let composer = PromptComposer::new();
+
+        let section = SoulSection {
+            section_type: SoulSectionType::RecentEvents,
+            content: "Recent event content".to_string(),
+            relevance_score: 0.9,
+        };
+        let rich_summary = RichSoulSummary {
+            sections: vec![section],
+            token_count: 10,
+            request_id: 1,
+        };
+
+        let working_memory = vec!["work snippet".to_string()];
+
+        // Budget allows only ~10 words, RichSoulContext should be included due to priority 0
+        let result = composer
+            .assemble_with_budget(
+                &[
+                    PromptSegment::RichSoulContext(rich_summary),
+                    PromptSegment::WorkingMemorySnippets(working_memory),
+                ],
+                10,
+            )
+            .unwrap();
+
+        // RichSoulContext (priority 0) should be included
+        assert!(result.contains("Recent Activity"));
+        // WorkingMemorySnippets (priority 3) should be excluded due to budget
+        assert!(!result.contains("work snippet"));
     }
 }

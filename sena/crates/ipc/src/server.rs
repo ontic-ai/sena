@@ -246,7 +246,10 @@ mod tests {
             .expect("read response from second client");
 
         assert!(response.success);
-        assert_eq!(response.payload, json!({"echo": {"message": "still alive"}}));
+        assert_eq!(
+            response.payload,
+            json!({"echo": {"message": "still alive"}})
+        );
 
         server_task.abort();
     }

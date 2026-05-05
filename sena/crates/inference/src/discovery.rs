@@ -72,8 +72,7 @@ mod tests {
         fs::create_dir_all(&blobs_dir).expect("failed to create blobs dir");
 
         let blob_data = vec![0u8; 1024];
-        fs::write(blobs_dir.join("sha256-testdigest123"), blob_data)
-            .expect("failed to write blob");
+        fs::write(blobs_dir.join("sha256-testdigest123"), blob_data).expect("failed to write blob");
     }
 
     #[test]

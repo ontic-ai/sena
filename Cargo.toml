@@ -6,7 +6,6 @@
 #
 # This workspace is retained for archival purposes only.
 # Legacy source files are archived under ./_legacy_crates/.
-# Historical consolidation notes live under ./sena/docs/_scratch/.
 
 [workspace]
 resolver = "2"

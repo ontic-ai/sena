@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 ipc = { path = "../ipc" }
+bus = { path = "../bus" }
 
 thiserror.workspace = true
 tracing.workspace = true

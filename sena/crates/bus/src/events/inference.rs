@@ -1,6 +1,8 @@
 //! Inference-layer events: model discovery, requests, responses.
 
 use crate::causal::CausalId;
+use crate::events::ctp::{ContextSnapshot, EnrichedInferredTask, SignalPattern};
+use serde::{Deserialize, Serialize};
 
 /// Priority level for inference requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -37,6 +39,17 @@ pub enum InferenceFailureOrigin {
     ExtractionInternal,
     /// Failure during proactive CTP-triggered inference.
     ProactiveCTP,
+}
+
+/// Structured input produced by CTP for model-driven context interpretation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextInterpretationInput {
+    /// Current structural snapshot assembled by CTP.
+    pub snapshot: ContextSnapshot,
+    /// Behavioral patterns detected for the current cycle.
+    pub patterns: Vec<SignalPattern>,
+    /// Cached memory relevance score from the most recent query response.
+    pub memory_relevance: f64,
 }
 
 /// Inference-layer events.
@@ -77,6 +90,7 @@ pub enum InferenceEvent {
     /// Inference response produced.
     InferenceCompleted {
         text: String,
+        source: InferenceSource,
         token_count: usize,
         /// Causal chain ID.
         causal_id: CausalId,
@@ -146,6 +160,21 @@ pub enum InferenceEvent {
 
     /// Fact extraction response produced.
     ExtractionCompleted { facts: Vec<String>, request_id: u64 },
+
+    /// Context interpretation request submitted by CTP.
+    ContextInterpretationRequested {
+        context: ContextInterpretationInput,
+        causal_id: CausalId,
+    },
+
+    /// Context interpretation completed with model-produced task meaning.
+    ContextInterpretationCompleted {
+        task: Option<EnrichedInferredTask>,
+        causal_id: CausalId,
+    },
+
+    /// Context interpretation failed.
+    ContextInterpretationFailed { reason: String, causal_id: CausalId },
 }
 
 impl InferenceEvent {
@@ -161,7 +190,10 @@ impl InferenceEvent {
             | Self::InferenceTokenGenerated { causal_id, .. }
             | Self::InferenceSentenceReady { causal_id, .. }
             | Self::InferenceStreamCompleted { causal_id, .. }
-            | Self::InferenceExplorationCompleted { causal_id, .. } => Some(*causal_id),
+            | Self::InferenceExplorationCompleted { causal_id, .. }
+            | Self::ContextInterpretationRequested { causal_id, .. }
+            | Self::ContextInterpretationCompleted { causal_id, .. }
+            | Self::ContextInterpretationFailed { causal_id, .. } => Some(*causal_id),
             Self::EmbedRequested { .. }
             | Self::EmbedCompleted { .. }
             | Self::EmbedFailed { .. }

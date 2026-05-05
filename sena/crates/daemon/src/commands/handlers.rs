@@ -9,10 +9,11 @@ use crate::commands::{
     loops_commands::{LoopRegistry, LoopsListHandler, LoopsSetHandler},
     memory_commands::{MemoryQueryHandler, MemoryStatsHandler},
     runtime_commands::{
-        PingHandler, RuntimeState, ShutdownHandler, StatusHandler, SubmitOnboardingConfigHandler,
-        SubmitOnboardingNameHandler,
+        OnboardingStatusHandler, PingHandler, RuntimeState, ShutdownHandler, StatusHandler,
+        SubmitOnboardingConfigHandler, SubmitOnboardingNameHandler,
     },
     speech_commands::{SpeechListenStartHandler, SpeechListenStopHandler, SpeechStatusHandler},
+    transparency_commands::TransparencyQueryHandler,
 };
 use ipc::CommandRegistry;
 use runtime::BootResult;
@@ -44,6 +45,7 @@ pub fn register_all(
         state.clone(),
         boot_result.bus.clone(),
     )));
+    registry.register(Arc::new(OnboardingStatusHandler::new()));
     registry.register(Arc::new(ShutdownHandler::new(
         shutdown_tx,
         boot_result.bus.clone(),
@@ -57,13 +59,9 @@ pub fn register_all(
 
     // Inference commands
     registry.register(Arc::new(ListModelsHandler));
-    registry.register(Arc::new(LoadModelHandler::new(
-        boot_result.bus.clone(),
-    )));
+    registry.register(Arc::new(LoadModelHandler::new(boot_result.bus.clone())));
     registry.register(Arc::new(InferenceStatusHandler));
-    registry.register(Arc::new(RunInferenceHandler::new(
-        boot_result.bus.clone(),
-    )));
+    registry.register(Arc::new(RunInferenceHandler::new(boot_result.bus.clone())));
 
     // Speech commands
     registry.register(Arc::new(SpeechListenStartHandler::new(
@@ -75,12 +73,8 @@ pub fn register_all(
     registry.register(Arc::new(SpeechStatusHandler));
 
     // Memory commands
-    registry.register(Arc::new(MemoryStatsHandler::new(
-        boot_result.bus.clone(),
-    )));
-    registry.register(Arc::new(MemoryQueryHandler::new(
-        boot_result.bus.clone(),
-    )));
+    registry.register(Arc::new(MemoryStatsHandler::new(boot_result.bus.clone())));
+    registry.register(Arc::new(MemoryQueryHandler::new(boot_result.bus.clone())));
 
     // Config commands
     registry.register(Arc::new(ConfigGetHandler));
@@ -95,6 +89,11 @@ pub fn register_all(
     registry.register(Arc::new(LoopsListHandler::new(loop_registry.clone())));
     registry.register(Arc::new(LoopsSetHandler::new(
         loop_registry.clone(),
+        boot_result.bus.clone(),
+    )));
+
+    // Transparency commands
+    registry.register(Arc::new(TransparencyQueryHandler::new(
         boot_result.bus.clone(),
     )));
 

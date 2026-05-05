@@ -19,6 +19,18 @@ pub struct SenaConfig {
     #[serde(default = "default_speech_enabled")]
     pub speech_enabled: bool,
 
+    /// Whether wakeword detection is active.
+    ///
+    /// This remains disabled by default because the current placeholder
+    /// detector is not suitable for always-on production use unless the user
+    /// explicitly opts in.
+    #[serde(default = "default_wakeword_enabled")]
+    pub wakeword_enabled: bool,
+
+    /// Wakeword detection sensitivity [0.0, 1.0].
+    #[serde(default = "default_wakeword_sensitivity")]
+    pub wakeword_sensitivity: f32,
+
     /// Maximum number of tokens to generate per inference response.
     #[serde(default = "default_inference_max_tokens")]
     pub inference_max_tokens: usize,
@@ -42,6 +54,8 @@ impl Default for SenaConfig {
             file_watch_paths: Vec::new(),
             clipboard_observation_enabled: default_clipboard_observation_enabled(),
             speech_enabled: default_speech_enabled(),
+            wakeword_enabled: default_wakeword_enabled(),
+            wakeword_sensitivity: default_wakeword_sensitivity(),
             inference_max_tokens: default_inference_max_tokens(),
             auto_tune_tokens: default_auto_tune_tokens(),
             auto_tune_min_tokens: default_auto_tune_min_tokens(),
@@ -56,6 +70,14 @@ fn default_clipboard_observation_enabled() -> bool {
 
 fn default_speech_enabled() -> bool {
     true
+}
+
+fn default_wakeword_enabled() -> bool {
+    false
+}
+
+fn default_wakeword_sensitivity() -> f32 {
+    0.5
 }
 
 fn default_inference_max_tokens() -> usize {
@@ -189,6 +211,20 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
                 .parse::<bool>()
                 .map_err(|_| "expected true or false".to_string())?;
         }
+        "wakeword_enabled" => {
+            config.wakeword_enabled = value
+                .parse::<bool>()
+                .map_err(|_| "expected true or false".to_string())?;
+        }
+        "wakeword_sensitivity" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a decimal between 0.0 and 1.0".to_string())?;
+            if !(0.0..=1.0).contains(&parsed) {
+                return Err("wakeword_sensitivity must be between 0.0 and 1.0".to_string());
+            }
+            config.wakeword_sensitivity = parsed;
+        }
         "inference_max_tokens" => {
             config.inference_max_tokens = value
                 .parse::<usize>()
@@ -211,7 +247,7 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
         }
         _ => {
             return Err(format!(
-                "unknown key '{}'. Supported keys: clipboard_observation_enabled, speech_enabled, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
+                "unknown key '{}'. Supported keys: clipboard_observation_enabled, speech_enabled, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
                 key
             ));
         }
@@ -235,6 +271,8 @@ mod tests {
         assert!(config.file_watch_paths.is_empty());
         assert!(config.clipboard_observation_enabled);
         assert!(config.speech_enabled);
+        assert!(!config.wakeword_enabled);
+        assert_eq!(config.wakeword_sensitivity, 0.5);
         assert_eq!(config.inference_max_tokens, 512);
         assert!(config.auto_tune_tokens);
         assert_eq!(config.auto_tune_min_tokens, 256);
@@ -261,6 +299,8 @@ mod tests {
         let custom_config = SenaConfig {
             clipboard_observation_enabled: false,
             speech_enabled: false,
+            wakeword_enabled: true,
+            wakeword_sensitivity: 0.75,
             inference_max_tokens: 1024,
             auto_tune_tokens: false,
             auto_tune_min_tokens: 300,
@@ -286,6 +326,10 @@ mod tests {
             .expect("file_watch_paths should parse");
         apply_config_value(&mut config, "speech_enabled", "false")
             .expect("speech_enabled should parse");
+        apply_config_value(&mut config, "wakeword_enabled", "true")
+            .expect("wakeword_enabled should parse");
+        apply_config_value(&mut config, "wakeword_sensitivity", "0.7")
+            .expect("wakeword_sensitivity should parse");
         apply_config_value(&mut config, "inference_max_tokens", "768")
             .expect("inference_max_tokens should parse");
         apply_config_value(&mut config, "auto_tune_tokens", "false")
@@ -296,8 +340,17 @@ mod tests {
             vec![PathBuf::from("C:/one"), PathBuf::from("C:/two")]
         );
         assert!(!config.speech_enabled);
+        assert!(config.wakeword_enabled);
+        assert_eq!(config.wakeword_sensitivity, 0.7);
         assert_eq!(config.inference_max_tokens, 768);
         assert!(!config.auto_tune_tokens);
+    }
+
+    #[test]
+    fn apply_config_value_rejects_invalid_wakeword_sensitivity() {
+        let mut config = SenaConfig::default();
+        let result = apply_config_value(&mut config, "wakeword_sensitivity", "1.5");
+        assert!(result.is_err());
     }
 
     #[test]

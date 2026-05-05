@@ -6,22 +6,59 @@ use crate::error::InferenceError;
 use crate::filter::OutputFilter;
 use crate::queue::{InferenceQueue, WorkItem, WorkKind};
 use crate::types::InferenceParams;
+#[cfg(test)]
+use bus::ContextSnapshot;
+use bus::events::MemoryKind;
+use bus::events::ctp::EnrichedInferredTask;
 use bus::{
-    Actor, ActorError, Event, EventBus, InferenceEvent, InferenceFailureOrigin, InferenceSource,
-    Priority,
+    Actor, ActorError, ContextInterpretationInput, Event, EventBus, InferenceEvent,
+    InferenceFailureOrigin, InferenceSource, MemoryEvent, Priority, TransparencyEvent,
+    TransparencyQuery, TransparencyResult,
 };
+use serde::Deserialize;
+use std::collections::{HashMap, VecDeque};
+use std::future::pending;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::process::Command;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use std::process::Command;
 use text::SentenceBoundaryIterator;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 
 /// Default queue capacity.
 const DEFAULT_QUEUE_CAPACITY: usize = 100;
+const REASONING_PREVIEW_CHARS: usize = 160;
+const REASONING_HISTORY_LIMIT: usize = 8;
+
+/// Directed embedding request sent from memory to inference.
+pub struct EmbedRequest {
+    pub text: String,
+    pub response_tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, String>>,
+}
+
+#[derive(Clone, Debug)]
+struct LastReasoningState {
+    causal_id: bus::CausalId,
+    source: InferenceSource,
+    token_count: usize,
+    response_preview: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProactiveAction {
+    Speak,
+    Observe,
+    Nothing,
+}
+
+#[derive(Debug, Clone)]
+struct ProactiveDecision {
+    action: ProactiveAction,
+    content: String,
+}
 
 /// Inference actor.
 pub struct InferenceActor {
@@ -30,8 +67,12 @@ pub struct InferenceActor {
     queue: Arc<Mutex<InferenceQueue>>,
     rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
+    embed_rx: Option<mpsc::Receiver<EmbedRequest>>,
+    embed_tx_guard: Option<mpsc::Sender<EmbedRequest>>,
     work_tx: Option<mpsc::Sender<()>>,
     inference_max_tokens: Arc<AtomicUsize>,
+    pending_reasoning: HashMap<bus::CausalId, InferenceSource>,
+    reasoning_history: VecDeque<LastReasoningState>,
 }
 
 impl InferenceActor {
@@ -47,19 +88,43 @@ impl InferenceActor {
 
     /// Create a new inference actor with the given backend.
     pub fn new(backend: Box<dyn InferenceBackend>) -> Self {
-        Self::with_queue_capacity(backend, DEFAULT_QUEUE_CAPACITY)
+        let (embed_tx, embed_rx) = mpsc::channel(32);
+        Self::with_embed_channel(backend, DEFAULT_QUEUE_CAPACITY, embed_rx, Some(embed_tx))
     }
 
     /// Create a new inference actor with custom queue capacity.
     pub fn with_queue_capacity(backend: Box<dyn InferenceBackend>, queue_capacity: usize) -> Self {
+        let (embed_tx, embed_rx) = mpsc::channel(32);
+        Self::with_embed_channel(backend, queue_capacity, embed_rx, Some(embed_tx))
+    }
+
+    /// Create a new inference actor with an externally provided embedding request channel.
+    pub fn with_embed_requests(
+        backend: Box<dyn InferenceBackend>,
+        queue_capacity: usize,
+        embed_rx: mpsc::Receiver<EmbedRequest>,
+    ) -> Self {
+        Self::with_embed_channel(backend, queue_capacity, embed_rx, None)
+    }
+
+    fn with_embed_channel(
+        backend: Box<dyn InferenceBackend>,
+        queue_capacity: usize,
+        embed_rx: mpsc::Receiver<EmbedRequest>,
+        embed_tx_guard: Option<mpsc::Sender<EmbedRequest>>,
+    ) -> Self {
         Self {
             bus: None,
             backend: Arc::new(Mutex::new(backend)),
             queue: Arc::new(Mutex::new(InferenceQueue::new(queue_capacity))),
             rx: None,
             directed_rx: None,
+            embed_rx: Some(embed_rx),
+            embed_tx_guard,
             work_tx: None,
             inference_max_tokens: Arc::new(AtomicUsize::new(InferenceParams::default().max_tokens)),
+            pending_reasoning: HashMap::new(),
+            reasoning_history: VecDeque::new(),
         }
     }
 
@@ -68,6 +133,84 @@ impl InferenceActor {
         self.inference_max_tokens
             .store(max_tokens, Ordering::Relaxed);
         self
+    }
+
+    fn remember_pending_reasoning(&mut self, source: InferenceSource, causal_id: bus::CausalId) {
+        self.pending_reasoning.insert(causal_id, source);
+    }
+
+    fn remember_completed_reasoning(
+        &mut self,
+        causal_id: bus::CausalId,
+        text: &str,
+        token_count: usize,
+    ) {
+        let Some(source) = self.pending_reasoning.remove(&causal_id) else {
+            return;
+        };
+
+        self.reasoning_history.push_back(LastReasoningState {
+            causal_id,
+            source,
+            token_count,
+            response_preview: Self::truncate_preview(text, REASONING_PREVIEW_CHARS),
+        });
+
+        while self.reasoning_history.len() > REASONING_HISTORY_LIMIT {
+            self.reasoning_history.pop_front();
+        }
+    }
+
+    fn forget_pending_reasoning(&mut self, causal_id: bus::CausalId) {
+        self.pending_reasoning.remove(&causal_id);
+    }
+
+    fn build_reasoning_response(
+        &self,
+        thought_id: &str,
+    ) -> bus::events::transparency::ReasoningResponse {
+        let matching_state = if thought_id.eq_ignore_ascii_case("latest") {
+            self.reasoning_history.back()
+        } else {
+            self.reasoning_history
+                .iter()
+                .find(|state| thought_id == state.causal_id.as_u64().to_string())
+        };
+
+        match matching_state {
+            Some(state) => bus::events::transparency::ReasoningResponse {
+                causal_id: state.causal_id.as_u64(),
+                source_description: Self::describe_inference_source(state.source).to_string(),
+                token_count: state.token_count,
+                response_preview: state.response_preview.clone(),
+            },
+            None => bus::events::transparency::ReasoningResponse {
+                causal_id: 0,
+                source_description: "No inference cycle completed yet".to_string(),
+                token_count: 0,
+                response_preview: "No reasoning chain is stored for the specified thought_id"
+                    .to_string(),
+            },
+        }
+    }
+
+    fn truncate_preview(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let preview: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{}...", preview)
+        } else {
+            preview
+        }
+    }
+
+    fn describe_inference_source(source: InferenceSource) -> &'static str {
+        match source {
+            InferenceSource::UserVoice => "user voice input",
+            InferenceSource::UserText => "user text input",
+            InferenceSource::ProactiveCTP => "a proactive CTP trigger",
+            InferenceSource::Iterative => "an iterative follow-up",
+        }
     }
 
     /// Handle an inference request event.
@@ -134,7 +277,9 @@ impl InferenceActor {
         let path = std::path::PathBuf::from(&model_path);
         let new_backend = tokio::task::spawn_blocking(move || build_loaded_llama_backend(&path))
             .await
-            .map_err(|e| InferenceError::ExecutionFailed(format!("model load task failed: {}", e)))??;
+            .map_err(|e| {
+                InferenceError::ExecutionFailed(format!("model load task failed: {}", e))
+            })??;
 
         {
             let mut backend = self.backend.lock().await;
@@ -230,6 +375,14 @@ impl InferenceActor {
         Ok(())
     }
 
+    async fn handle_direct_embed_request(&self, request: EmbedRequest) {
+        let result = Self::execute_embed(self.backend.clone(), request.text, bus::CausalId::new())
+            .await
+            .map_err(|error| error.to_string());
+
+        let _ = request.response_tx.send(result);
+    }
+
     /// Handle a fact extraction request event.
     async fn handle_extract_request(
         &self,
@@ -288,6 +441,72 @@ impl InferenceActor {
                 }
                 Err(_) => {
                     // Response channel closed - silent
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn handle_context_interpretation_request(
+        &self,
+        context: ContextInterpretationInput,
+        causal_id: bus::CausalId,
+        bus: Arc<EventBus>,
+    ) -> Result<(), InferenceError> {
+        debug!(?causal_id, "context interpretation request received");
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        let work_item = WorkItem {
+            priority: Priority::Low,
+            kind: WorkKind::InterpretContext {
+                context,
+                causal_id,
+                response_tx,
+            },
+        };
+
+        let mut queue = self.queue.lock().await;
+        if let Err(_rejected) = queue.enqueue(work_item) {
+            warn!(
+                ?causal_id,
+                "inference queue full, context interpretation rejected"
+            );
+            return Err(InferenceError::ExecutionFailed("queue full".to_string()));
+        }
+
+        drop(queue);
+
+        if let Some(tx) = &self.work_tx {
+            let _ = tx.try_send(());
+        }
+
+        tokio::spawn(async move {
+            match response_rx.await {
+                Ok(Ok(task)) => {
+                    let _ = bus
+                        .broadcast(Event::Inference(
+                            InferenceEvent::ContextInterpretationCompleted { task, causal_id },
+                        ))
+                        .await;
+                }
+                Ok(Err(reason)) => {
+                    let _ = bus
+                        .broadcast(Event::Inference(
+                            InferenceEvent::ContextInterpretationFailed { reason, causal_id },
+                        ))
+                        .await;
+                }
+                Err(_) => {
+                    let _ = bus
+                        .broadcast(Event::Inference(
+                            InferenceEvent::ContextInterpretationFailed {
+                                reason: "response channel closed".to_string(),
+                                causal_id,
+                            },
+                        ))
+                        .await;
                 }
             }
         });
@@ -358,6 +577,19 @@ impl InferenceActor {
                         response_tx,
                     } => {
                         let result = Self::execute_extract(backend.clone(), text, causal_id).await;
+                        let _ = response_tx.send(result.map_err(|e| e.to_string()));
+                    }
+                    WorkKind::InterpretContext {
+                        context,
+                        causal_id,
+                        response_tx,
+                    } => {
+                        let result = Self::execute_context_interpretation(
+                            backend.clone(),
+                            context,
+                            causal_id,
+                        )
+                        .await;
                         let _ = response_tx.send(result.map_err(|e| e.to_string()));
                     }
                 }
@@ -514,6 +746,7 @@ impl InferenceActor {
         );
         bus.broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
             text: full_text.clone(),
+            source,
             token_count: token_count as usize,
             causal_id,
         }))
@@ -537,36 +770,12 @@ impl InferenceActor {
 
         let token_count = full_text.len() / 4;
 
-        // Emit filtered sentences as InferenceSentenceReady (for TTS).
-        // The original unfiltered full_text is preserved in InferenceStreamCompleted.
-        let mut sentence_iter = SentenceBoundaryIterator::new();
-        sentence_iter.push(&full_text);
-        let mut sentence_index: u32 = 0;
-        for sentence in sentence_iter.by_ref() {
-            let tts_text = OutputFilter::apply(&sentence);
-            if !tts_text.trim().is_empty() {
-                bus.broadcast(Event::Inference(InferenceEvent::InferenceSentenceReady {
-                    text: tts_text,
-                    sentence_index,
-                    causal_id,
-                }))
-                .await?;
-                sentence_index += 1;
-            }
+        if source == InferenceSource::ProactiveCTP {
+            return Self::route_proactive_batch_output(bus, full_text, causal_id, token_count)
+                .await;
         }
-        if let Some(remaining) = sentence_iter.flush()
-            && !remaining.trim().is_empty()
-        {
-            let tts_text = OutputFilter::apply(&remaining);
-            if !tts_text.trim().is_empty() {
-                bus.broadcast(Event::Inference(InferenceEvent::InferenceSentenceReady {
-                    text: tts_text,
-                    sentence_index,
-                    causal_id,
-                }))
-                .await?;
-            }
-        }
+
+        Self::emit_sentence_events(&bus, &full_text, causal_id).await?;
 
         bus.broadcast(Event::Inference(InferenceEvent::InferenceStreamCompleted {
             full_text: full_text.clone(),
@@ -584,12 +793,171 @@ impl InferenceActor {
         );
         bus.broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
             text: full_text.clone(),
+            source,
             token_count,
             causal_id,
         }))
         .await?;
 
         Ok(full_text)
+    }
+
+    async fn emit_sentence_events(
+        bus: &Arc<EventBus>,
+        text: &str,
+        causal_id: bus::CausalId,
+    ) -> Result<(), InferenceError> {
+        let mut sentence_iter = SentenceBoundaryIterator::new();
+        sentence_iter.push(text);
+        let mut sentence_index: u32 = 0;
+
+        for sentence in sentence_iter.by_ref() {
+            let tts_text = OutputFilter::apply(&sentence);
+            if !tts_text.trim().is_empty() {
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceSentenceReady {
+                    text: tts_text,
+                    sentence_index,
+                    causal_id,
+                }))
+                .await?;
+                sentence_index += 1;
+            }
+        }
+
+        if let Some(remaining) = sentence_iter.flush()
+            && !remaining.trim().is_empty()
+        {
+            let tts_text = OutputFilter::apply(&remaining);
+            if !tts_text.trim().is_empty() {
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceSentenceReady {
+                    text: tts_text,
+                    sentence_index,
+                    causal_id,
+                }))
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn route_proactive_batch_output(
+        bus: Arc<EventBus>,
+        full_text: String,
+        causal_id: bus::CausalId,
+        token_count: usize,
+    ) -> Result<String, InferenceError> {
+        let decision = match Self::parse_proactive_decision(&full_text) {
+            Some(decision) => decision,
+            None => {
+                warn!("proactive inference returned an unparsable contract; discarding output");
+                return Ok(String::new());
+            }
+        };
+
+        match decision.action {
+            ProactiveAction::Speak => {
+                if decision.content.trim().is_empty() {
+                    return Ok(String::new());
+                }
+
+                Self::emit_sentence_events(&bus, &decision.content, causal_id).await?;
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceStreamCompleted {
+                    full_text: decision.content.clone(),
+                    source: InferenceSource::ProactiveCTP,
+                    token_count,
+                    confidence: Some(1.0),
+                    causal_id,
+                }))
+                .await?;
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
+                    text: decision.content.clone(),
+                    source: InferenceSource::ProactiveCTP,
+                    token_count,
+                    causal_id,
+                }))
+                .await?;
+                Ok(decision.content)
+            }
+            ProactiveAction::Observe => {
+                if !decision.content.trim().is_empty() {
+                    bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
+                        text: decision.content.clone(),
+                        kind: MemoryKind::Semantic,
+                        causal_id,
+                    }))
+                    .await?;
+                }
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
+                    text: decision.content.clone(),
+                    source: InferenceSource::ProactiveCTP,
+                    token_count,
+                    causal_id,
+                }))
+                .await?;
+                Ok(decision.content)
+            }
+            ProactiveAction::Nothing => {
+                bus.broadcast(Event::Inference(InferenceEvent::InferenceCompleted {
+                    text: String::new(),
+                    source: InferenceSource::ProactiveCTP,
+                    token_count,
+                    causal_id,
+                }))
+                .await?;
+                Ok(String::new())
+            }
+        }
+    }
+
+    fn parse_proactive_decision(raw: &str) -> Option<ProactiveDecision> {
+        let mut action = None;
+        let mut content_lines = Vec::new();
+        let mut reading_content = false;
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() && !reading_content {
+                continue;
+            }
+
+            if let Some(value) = Self::parse_named_field(trimmed, "action") {
+                action = match value.to_ascii_lowercase().as_str() {
+                    "speak" => Some(ProactiveAction::Speak),
+                    "observe" => Some(ProactiveAction::Observe),
+                    "nothing" => Some(ProactiveAction::Nothing),
+                    _ => None,
+                };
+                reading_content = false;
+                continue;
+            }
+
+            if let Some(value) = Self::parse_named_field(trimmed, "content") {
+                reading_content = true;
+                if !value.is_empty() {
+                    content_lines.push(value.to_string());
+                }
+                continue;
+            }
+
+            if reading_content {
+                content_lines.push(trimmed.to_string());
+            }
+        }
+
+        Some(ProactiveDecision {
+            action: action?,
+            content: content_lines.join("\n").trim().to_string(),
+        })
+    }
+
+    fn parse_named_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        let (field, value) = line.split_once(':')?;
+        if field.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
     }
 
     /// Execute an embedding request.
@@ -622,6 +990,122 @@ impl InferenceActor {
 
         let extracted = backend_guard.extract(text).await?;
         Ok(extracted)
+    }
+
+    async fn execute_context_interpretation(
+        backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
+        context: ContextInterpretationInput,
+        _causal_id: bus::CausalId,
+    ) -> Result<Option<EnrichedInferredTask>, InferenceError> {
+        #[derive(Deserialize)]
+        struct InterpretationResponse {
+            category: String,
+            semantic_description: String,
+            confidence: f32,
+        }
+
+        let backend_guard = backend.lock().await;
+
+        if !backend_guard.is_loaded() {
+            return Err(InferenceError::ModelNotLoaded);
+        }
+
+        let ContextInterpretationInput {
+            snapshot,
+            patterns,
+            memory_relevance,
+        } = context;
+
+        let recent_files: Vec<_> = snapshot
+            .recent_files
+            .iter()
+            .rev()
+            .filter_map(|event| {
+                event.path.file_name().and_then(|name| {
+                    name.to_str().map(|file_name| {
+                        serde_json::json!({
+                            "file_name": file_name,
+                            "event_kind": format!("{:?}", event.event_kind),
+                        })
+                    })
+                })
+            })
+            .take(3)
+            .collect();
+
+        let patterns_json: Vec<_> = patterns
+            .iter()
+            .map(|pattern| {
+                serde_json::json!({
+                    "pattern_type": format!("{:?}", pattern.pattern_type),
+                    "confidence": pattern.confidence,
+                    "description": pattern.description,
+                })
+            })
+            .collect();
+
+        let snapshot_json = serde_json::to_string_pretty(&serde_json::json!({
+            "active_app": snapshot.active_app.app_name,
+            "window_title": snapshot.active_app.window_title,
+            "bundle_id": snapshot.active_app.bundle_id,
+            "recent_file_count": snapshot.recent_files.len(),
+            "recent_files": recent_files,
+            "clipboard_present": snapshot.clipboard_digest.is_some(),
+            "memory_relevance": memory_relevance,
+            "patterns": patterns_json,
+            "keystroke": {
+                "events_per_minute": snapshot.keystroke_cadence.events_per_minute,
+                "burst_detected": snapshot.keystroke_cadence.burst_detected,
+                "idle_duration_seconds": snapshot.keystroke_cadence.idle_duration.as_secs(),
+            },
+            "session_duration_seconds": snapshot.session_duration.as_secs(),
+            "user_state": snapshot.user_state.as_ref().map(|user_state| serde_json::json!({
+                "frustration_level": user_state.frustration_level,
+                "flow_detected": user_state.flow_detected,
+                "context_switch_cost": user_state.context_switch_cost,
+            })),
+            "visual_context": snapshot.visual_context.as_ref().map(|visual_context| serde_json::json!({
+                "resolution": visual_context.resolution,
+                "age_seconds": visual_context.age.as_secs(),
+            })),
+            "identity_signal": snapshot.soul_identity_signal.as_ref().map(|signal| serde_json::json!({
+                "signal_key": signal.signal_key,
+                "confidence": signal.confidence,
+            })),
+        }))
+        .map_err(|e| InferenceError::ExecutionFailed(format!("snapshot serialization failed: {}", e)))?;
+
+        let prompt = format!(
+            "Interpret the user's current task from this structured context. Do not assume the task domain. If the signal is too weak, return null. If it is strong enough, return only JSON with keys category, semantic_description, confidence.\n\nContext:\n{}\n\nResult:",
+            snapshot_json
+        );
+
+        let raw = backend_guard.complete(
+            &prompt,
+            &InferenceParams {
+                temperature: 0.2,
+                top_p: 0.9,
+                top_k: 40,
+                max_tokens: 180,
+                stop_sequences: vec!["\n\n".to_string()],
+                repeat_penalty: 1.05,
+            },
+        )?;
+
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("null") {
+            return Ok(None);
+        }
+
+        let parsed: InterpretationResponse = serde_json::from_str(trimmed).map_err(|e| {
+            InferenceError::ExecutionFailed(format!("interpretation parse failed: {}", e))
+        })?;
+
+        Ok(Some(EnrichedInferredTask {
+            category: parsed.category,
+            semantic_description: parsed.semantic_description,
+            confidence: parsed.confidence.clamp(0.0, 1.0),
+        }))
     }
 
     /// VRAM monitoring loop: poll backend VRAM usage every 2 seconds when model loaded.
@@ -678,7 +1162,9 @@ impl InferenceActor {
                 }
                 event = shutdown_rx.recv() => {
                     match event {
-                        Ok(Event::System(bus::SystemEvent::ShutdownSignal)) => {
+                        Ok(Event::System(bus::SystemEvent::ShutdownSignal))
+                        | Ok(Event::System(bus::SystemEvent::ShutdownRequested))
+                        | Ok(Event::System(bus::SystemEvent::ShutdownInitiated)) => {
                             debug!("vram monitoring loop: shutdown signal received");
                             break;
                         }
@@ -820,6 +1306,9 @@ impl Actor for InferenceActor {
         let mut directed_rx = self.directed_rx.take().ok_or_else(|| {
             ActorError::RuntimeError("directed receiver not initialized".to_string())
         })?;
+        let mut embed_rx = Some(self.embed_rx.take().ok_or_else(|| {
+            ActorError::RuntimeError("embed receiver not initialized".to_string())
+        })?);
 
         let bus = self
             .bus
@@ -831,7 +1320,9 @@ impl Actor for InferenceActor {
                 // Handle broadcast events (user-facing inference, shutdown)
                 event = rx.recv() => {
                     match event {
-                        Ok(Event::System(bus::SystemEvent::ShutdownSignal)) => {
+                        Ok(Event::System(bus::SystemEvent::ShutdownSignal))
+                        | Ok(Event::System(bus::SystemEvent::ShutdownRequested))
+                        | Ok(Event::System(bus::SystemEvent::ShutdownInitiated)) => {
                             info!("inference actor received shutdown signal");
                             break;
                         }
@@ -849,12 +1340,42 @@ impl Actor for InferenceActor {
                             source,
                             causal_id,
                         })) => {
+                            self.remember_pending_reasoning(source, causal_id);
                             if let Err(e) = self
                                 .handle_inference_request(prompt, source, priority, causal_id)
                                 .await
                             {
                                 warn!(error = ?e, "inference request handling failed");
                             }
+                        }
+                        Ok(Event::Inference(InferenceEvent::InferenceCompleted {
+                            text,
+                            token_count,
+                            causal_id,
+                            ..
+                        })) => {
+                            self.remember_completed_reasoning(causal_id, &text, token_count);
+                        }
+                        Ok(Event::Inference(InferenceEvent::InferenceStreamCompleted {
+                            full_text,
+                            source,
+                            causal_id,
+                            ..
+                        })) => {
+                            if matches!(source, InferenceSource::UserVoice | InferenceSource::UserText) {
+                                let _ = bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
+                                    text: full_text,
+                                    kind: MemoryKind::Episodic,
+                                    causal_id,
+                                })).await;
+                            }
+                        }
+                        Ok(Event::Inference(InferenceEvent::InferenceFailed { causal_id, .. }))
+                        | Ok(Event::Inference(InferenceEvent::InferenceFailedWithOrigin {
+                            causal_id,
+                            ..
+                        })) => {
+                            self.forget_pending_reasoning(causal_id);
                         }
                         Ok(Event::Inference(InferenceEvent::ModelLoadRequested {
                             model_path,
@@ -869,6 +1390,34 @@ impl Actor for InferenceActor {
                                         causal_id,
                                     })).await;
                                 }
+                            }
+                        }
+                        Ok(Event::Transparency(TransparencyEvent::QueryRequested(
+                            TransparencyQuery::ReasoningChain { thought_id },
+                        ))) => {
+                            let response = self.build_reasoning_response(&thought_id);
+                            let _ = bus.broadcast(Event::Transparency(
+                                TransparencyEvent::QueryResponse {
+                                    query: TransparencyQuery::ReasoningChain { thought_id },
+                                    result: Box::new(TransparencyResult::Reasoning(response)),
+                                },
+                            )).await;
+                        }
+                        Ok(Event::Inference(InferenceEvent::ContextInterpretationRequested {
+                            context,
+                            causal_id,
+                        })) => {
+                            if let Err(e) = self
+                                .handle_context_interpretation_request(context, causal_id, bus.clone())
+                                .await
+                            {
+                                warn!(error = ?e, ?causal_id, "context interpretation handling failed");
+                                let _ = bus.broadcast(Event::Inference(
+                                    InferenceEvent::ContextInterpretationFailed {
+                                        reason: e.to_string(),
+                                        causal_id,
+                                    },
+                                )).await;
                             }
                         }
                         Ok(_) => {
@@ -911,6 +1460,22 @@ impl Actor for InferenceActor {
                         }
                     }
                 }
+                request = async {
+                    match &mut embed_rx {
+                        Some(rx) => rx.recv().await,
+                        None => pending().await,
+                    }
+                } => {
+                    match request {
+                        Some(request) => {
+                            self.handle_direct_embed_request(request).await;
+                        }
+                        None => {
+                            debug!("embed request channel closed");
+                            embed_rx = None;
+                        }
+                    }
+                }
             }
         }
 
@@ -922,6 +1487,7 @@ impl Actor for InferenceActor {
 
         // Drop work_tx to close the channel and signal worker to exit
         drop(self.work_tx.take());
+        drop(self.embed_tx_guard.take());
 
         // Shutdown backend
         let mut backend = self.backend.lock().await;
@@ -938,6 +1504,62 @@ impl Actor for InferenceActor {
 mod tests {
     use super::*;
     use crate::mock::{MockBackend, MockConfig};
+    use crate::stream::InferenceStream;
+    use crate::types::BackendType;
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+
+    struct PromptCaptureBackend {
+        response: String,
+        last_prompt: Arc<StdMutex<Option<String>>>,
+    }
+
+    impl PromptCaptureBackend {
+        fn new(response: impl Into<String>, last_prompt: Arc<StdMutex<Option<String>>>) -> Self {
+            Self {
+                response: response.into(),
+                last_prompt,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl InferenceBackend for PromptCaptureBackend {
+        fn backend_type(&self) -> BackendType {
+            BackendType::Mock
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        async fn infer(
+            &self,
+            _prompt: String,
+            _params: InferenceParams,
+        ) -> Result<InferenceStream, InferenceError> {
+            Err(InferenceError::ExecutionFailed(
+                "streaming not used in prompt capture test".to_string(),
+            ))
+        }
+
+        fn complete(
+            &self,
+            prompt: &str,
+            _params: &InferenceParams,
+        ) -> Result<String, InferenceError> {
+            let mut last_prompt = self
+                .last_prompt
+                .lock()
+                .expect("prompt capture mutex should not be poisoned");
+            *last_prompt = Some(prompt.to_string());
+            Ok(self.response.clone())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), InferenceError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn actor_allows_configured_token_budget() {
@@ -1065,6 +1687,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proactive_ctp_speak_emits_sentences_from_contract_content() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::with_response(
+            "action: speak\ncontent: Speak this aloud.",
+        ));
+        let mut actor = InferenceActor::new(backend);
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "test proactive prompt".to_string(),
+            priority: bus::Priority::Low,
+            source: bus::InferenceSource::ProactiveCTP,
+            causal_id,
+        }))
+        .await
+        .unwrap();
+
+        let mut saw_sentence = false;
+        let mut saw_completed = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Inference(event))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                match event {
+                    InferenceEvent::InferenceSentenceReady { text, .. } => {
+                        assert_eq!(text, "Speak this aloud.");
+                        saw_sentence = true;
+                    }
+                    InferenceEvent::InferenceCompleted { text, source, .. } => {
+                        assert_eq!(source, InferenceSource::ProactiveCTP);
+                        assert_eq!(text, "Speak this aloud.");
+                        saw_completed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            saw_sentence,
+            "speak action should emit sentence-ready events"
+        );
+        assert!(
+            saw_completed,
+            "speak action should complete the inference cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_ctp_observe_writes_memory_without_speaking() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::with_response(
+            "action: observe\ncontent: The user is focused on Rust code.",
+        ));
+        let mut actor = InferenceActor::new(backend);
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "test proactive prompt".to_string(),
+            priority: bus::Priority::Low,
+            source: bus::InferenceSource::ProactiveCTP,
+            causal_id,
+        }))
+        .await
+        .unwrap();
+
+        let mut saw_memory_write = false;
+        let mut saw_sentence = false;
+        let mut saw_completed = false;
+        for _ in 0..20 {
+            if let Ok(Ok(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                match event {
+                    Event::Memory(MemoryEvent::MemoryWriteRequest { text, kind, .. }) => {
+                        assert_eq!(kind, MemoryKind::Semantic);
+                        assert_eq!(text, "The user is focused on Rust code.");
+                        saw_memory_write = true;
+                    }
+                    Event::Inference(InferenceEvent::InferenceSentenceReady { .. }) => {
+                        saw_sentence = true;
+                    }
+                    Event::Inference(InferenceEvent::InferenceCompleted {
+                        source, text, ..
+                    }) => {
+                        assert_eq!(source, InferenceSource::ProactiveCTP);
+                        assert_eq!(text, "The user is focused on Rust code.");
+                        saw_completed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(saw_memory_write, "observe action should write memory");
+        assert!(
+            !saw_sentence,
+            "observe action should not emit spoken sentences"
+        );
+        assert!(
+            saw_completed,
+            "observe action should still complete the inference cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_ctp_nothing_completes_without_side_effects() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::with_response("action: nothing\ncontent:"));
+        let mut actor = InferenceActor::new(backend);
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "test proactive prompt".to_string(),
+            priority: bus::Priority::Low,
+            source: bus::InferenceSource::ProactiveCTP,
+            causal_id,
+        }))
+        .await
+        .unwrap();
+
+        let mut saw_memory_write = false;
+        let mut saw_sentence = false;
+        let mut saw_completed = false;
+        for _ in 0..20 {
+            if let Ok(Ok(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                match event {
+                    Event::Memory(MemoryEvent::MemoryWriteRequest { .. }) => {
+                        saw_memory_write = true;
+                    }
+                    Event::Inference(InferenceEvent::InferenceSentenceReady { .. }) => {
+                        saw_sentence = true;
+                    }
+                    Event::Inference(InferenceEvent::InferenceCompleted {
+                        source, text, ..
+                    }) => {
+                        assert_eq!(source, InferenceSource::ProactiveCTP);
+                        assert!(text.is_empty());
+                        saw_completed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(!saw_memory_write, "nothing action should not write memory");
+        assert!(
+            !saw_sentence,
+            "nothing action should not emit spoken sentences"
+        );
+        assert!(
+            saw_completed,
+            "nothing action should still complete the inference cycle"
+        );
+    }
+
+    #[tokio::test]
     async fn actor_queue_respects_priority() {
         let bus = Arc::new(EventBus::new());
         let backend = Box::new(MockBackend::with_config(MockConfig {
@@ -1125,5 +1927,194 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         assert_eq!(shared_budget.load(Ordering::Relaxed), 896);
+    }
+
+    #[tokio::test]
+    async fn actor_responds_to_reasoning_chain_query_with_latest_summary() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::with_config(MockConfig {
+            loaded: true,
+            response: "Hello world. How are you?".to_string(),
+            token_count: 6,
+            ..Default::default()
+        }));
+        let mut actor = InferenceActor::new(backend);
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.expect("start failed");
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "test".to_string(),
+            priority: bus::Priority::Normal,
+            source: bus::InferenceSource::UserText,
+            causal_id,
+        }))
+        .await
+        .expect("inference request broadcast should succeed");
+
+        let mut completed = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { .. }))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "inference should complete before transparency query"
+        );
+
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            TransparencyQuery::ReasoningChain {
+                thought_id: "latest".to_string(),
+            },
+        )))
+        .await
+        .expect("reasoning transparency query should broadcast");
+
+        let mut responded = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Transparency(TransparencyEvent::QueryResponse {
+                query: TransparencyQuery::ReasoningChain { .. },
+                result,
+            }))) = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                match &*result {
+                    TransparencyResult::Reasoning(reasoning) => {
+                        assert_eq!(reasoning.causal_id, causal_id.as_u64());
+                        assert!(reasoning.source_description.contains("user text input"));
+                        assert!(reasoning.token_count > 0);
+                        responded = true;
+                        break;
+                    }
+                    other => panic!("unexpected transparency result: {other:?}"),
+                }
+            }
+        }
+
+        assert!(
+            responded,
+            "inference actor should answer reasoning transparency queries"
+        );
+
+        bus.broadcast(Event::Transparency(TransparencyEvent::QueryRequested(
+            TransparencyQuery::ReasoningChain {
+                thought_id: causal_id.as_u64().to_string(),
+            },
+        )))
+        .await
+        .expect("explicit-id transparency query should broadcast");
+
+        let mut explicit_id_responded = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Transparency(TransparencyEvent::QueryResponse {
+                query: TransparencyQuery::ReasoningChain { .. },
+                result,
+            }))) = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                match &*result {
+                    TransparencyResult::Reasoning(reasoning) => {
+                        assert_eq!(reasoning.causal_id, causal_id.as_u64());
+                        explicit_id_responded = true;
+                        break;
+                    }
+                    other => panic!("unexpected transparency result: {other:?}"),
+                }
+            }
+        }
+
+        assert!(
+            explicit_id_responded,
+            "inference actor should answer reasoning queries by explicit id"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_interpretation_prompt_includes_structural_context_details() {
+        let now = std::time::Instant::now();
+        let last_prompt = Arc::new(StdMutex::new(None));
+        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
+            Arc::new(Mutex::new(Box::new(PromptCaptureBackend::new(
+                r#"{"category":"coding","semantic_description":"Editing code","confidence":0.8}"#,
+                last_prompt.clone(),
+            ))));
+
+        let context = ContextInterpretationInput {
+            snapshot: ContextSnapshot {
+                active_app: bus::events::platform::WindowContext {
+                    app_name: "Code".to_string(),
+                    window_title: Some("src/main.rs".to_string()),
+                    bundle_id: Some("com.microsoft.VSCode".to_string()),
+                    timestamp: now,
+                },
+                recent_files: vec![bus::events::platform::FileEvent {
+                    path: std::path::PathBuf::from("src/main.rs"),
+                    event_kind: bus::events::platform::FileEventKind::Modified,
+                    timestamp: now,
+                }],
+                clipboard_digest: Some("abc123".to_string()),
+                keystroke_cadence: bus::events::platform::KeystrokeCadence {
+                    events_per_minute: 144.0,
+                    burst_detected: true,
+                    idle_duration: std::time::Duration::from_secs(12),
+                    timestamp: now,
+                },
+                session_duration: std::time::Duration::from_secs(900),
+                inferred_task: None,
+                user_state: Some(bus::events::ctp::UserState {
+                    frustration_level: 15,
+                    flow_detected: true,
+                    context_switch_cost: 72,
+                }),
+                visual_context: Some(bus::events::ctp::VisualContext {
+                    resolution: (1920, 1080),
+                    age: std::time::Duration::from_secs(3),
+                }),
+                timestamp: now,
+                soul_identity_signal: Some(bus::events::soul::DistilledIdentitySignal {
+                    signal_key: "work::editor".to_string(),
+                    signal_value: "vscode".to_string(),
+                    confidence: 0.9,
+                }),
+            },
+            patterns: vec![bus::events::ctp::SignalPattern {
+                pattern_type: bus::events::ctp::SignalPatternType::Frustration,
+                confidence: 0.7,
+                description: "Frustration detected after rapid typing burst".to_string(),
+            }],
+            memory_relevance: 0.82,
+        };
+
+        let interpreted =
+            InferenceActor::execute_context_interpretation(backend, context, bus::CausalId::new())
+                .await
+                .expect("context interpretation should succeed");
+
+        assert!(
+            interpreted.is_some(),
+            "capture backend should yield a parsed task"
+        );
+
+        let captured_prompt = last_prompt
+            .lock()
+            .expect("prompt capture mutex should not be poisoned")
+            .clone()
+            .expect("prompt should be captured");
+
+        assert!(captured_prompt.contains("recent_files"));
+        assert!(captured_prompt.contains("main.rs"));
+        assert!(captured_prompt.contains("user_state"));
+        assert!(captured_prompt.contains("context_switch_cost"));
+        assert!(captured_prompt.contains("visual_context"));
+        assert!(captured_prompt.contains("identity_signal"));
+        assert!(captured_prompt.contains("memory_relevance"));
+        assert!(captured_prompt.contains("patterns"));
+        assert!(captured_prompt.contains("Frustration"));
     }
 }

@@ -1,9 +1,10 @@
 //! LlamaBackend construction helper for runtime.
 //!
-//! Provides `build_llama_backend` which attempts to construct a real
-//! `infer::LlamaBackend` wrapped in an adapter that implements Sena's
-//! `inference::InferenceBackend` trait. Falls back gracefully if no model
-//! is available.
+//! Provides strict Llama backend construction for runtime boot.
+//!
+//! Runtime boot must either load a real GGUF model or fail. This module
+//! constructs a real `infer::LlamaBackend` wrapped in an adapter that
+//! implements Sena's `inference::InferenceBackend` trait.
 
 use crate::error::RuntimeError;
 use async_trait::async_trait;
@@ -82,6 +83,25 @@ impl inference::InferenceBackend for LlamaBackendAdapter {
         Ok(InferenceStream::new(rx))
     }
 
+    fn complete(&self, prompt: &str, params: &InferenceParams) -> Result<String, InferenceError> {
+        let infer_params = infer::InferenceParams {
+            request_id: uuid::Uuid::new_v4(),
+            prompt: prompt.to_string(),
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            ctx_size: 2048,
+        };
+
+        let backend = self
+            .inner
+            .try_lock()
+            .map_err(|_| InferenceError::ExecutionFailed("backend busy".to_string()))?;
+        backend
+            .complete(&infer_params)
+            .map_err(|e| InferenceError::ExecutionFailed(format!("complete failed: {}", e)))
+    }
+
     async fn shutdown(&mut self) -> Result<(), InferenceError> {
         // LlamaBackend doesn't have an explicit shutdown method; drop handles cleanup
         Ok(())
@@ -107,9 +127,8 @@ pub fn build_llama_backend(
     let mut backend = inference::LlamaBackend::new()
         .map_err(|e| RuntimeError::ModelLoadFailed(format!("backend init failed: {}", e)))?;
 
-    // Auto-detect the best backend type (Metal on macOS, CUDA if available, CPU otherwise)
-    let backend_type = infer::BackendType::auto_detect();
-    info!(backend_type = ?backend_type, "detected compute backend");
+    let backend_type = inference::preferred_llama_backend();
+    info!(backend_type = ?backend_type, "selected compute backend");
 
     // Load the model
     backend.load_model(model_path, backend_type).map_err(|e| {
@@ -126,34 +145,25 @@ pub fn build_llama_backend(
     Ok(Box::new(LlamaBackendAdapter::new(backend)))
 }
 
-/// Discover a usable model and construct a backend, or return None if unavailable.
+/// Discover a usable model and construct a backend.
 ///
 /// Uses `inference::discover_models()` to scan the default models directory for
-/// GGUF files and attempts to load the first one found. Returns None (with a warning)
-/// if no models are discovered.
-///
-/// Graceful fallback: boot remains non-fatal if no models are available.
-pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend>> {
-    // Resolve the default Ollama models directory.
-    let models_dir = infer::ollama_models_dir().ok()?;
+/// GGUF files and attempts to load the first one found. Runtime boot is strict:
+/// if no usable model is available, it returns an error instead of falling back.
+pub fn build_default_backend() -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    let models_dir = infer::ollama_models_dir()
+        .map_err(|e| RuntimeError::DirectoryResolutionFailed(e.to_string()))?;
 
     if !models_dir.exists() {
-        warn!(
-            path = ?models_dir,
-            "default models directory does not exist — no backend available"
-        );
-        return None;
+        return Err(RuntimeError::RequiredModelMissing {
+            model_name: "gguf model".to_string(),
+            reason: format!("models directory does not exist: {}", models_dir.display()),
+        });
     }
 
-    // Use inference crate's discovery system
     info!(path = ?models_dir, "scanning for GGUF models");
-    let registry = match inference::discover_models(&models_dir) {
-        Ok(registry) => registry,
-        Err(e) => {
-            warn!(path = ?models_dir, error = %e, "model discovery failed");
-            return None;
-        }
-    };
+    let registry = inference::discover_models(&models_dir)
+        .map_err(|e| RuntimeError::ModelLoadFailed(format!("model discovery failed: {}", e)))?;
 
     info!(
         count = registry.len(),
@@ -161,7 +171,15 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
         registry.len()
     );
 
-    // Attempt to load models in order until one succeeds
+    if registry.models.is_empty() {
+        return Err(RuntimeError::RequiredModelMissing {
+            model_name: "gguf model".to_string(),
+            reason: format!("no GGUF models found in {}", models_dir.display()),
+        });
+    }
+
+    let mut last_error = None;
+
     for model in &registry.models {
         info!(
             name = %model.name,
@@ -173,7 +191,7 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
         match build_llama_backend(&model.path) {
             Ok(backend) => {
                 info!(name = %model.name, "model loaded successfully");
-                return Some(backend);
+                return Ok(backend);
             }
             Err(e) => {
                 warn!(
@@ -182,24 +200,24 @@ pub fn try_build_default_backend() -> Option<Box<dyn inference::InferenceBackend
                     error = %e,
                     "failed to load model — trying next"
                 );
+                last_error = Some(e.to_string());
                 continue;
             }
         }
     }
 
-    warn!("no usable GGUF models could be loaded — all models failed");
-    None
+    Err(RuntimeError::ModelLoadFailed(format!(
+        "no usable GGUF models could be loaded from {}: {}",
+        models_dir.display(),
+        last_error.unwrap_or_else(|| "all discovered models failed".to_string())
+    )))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn test_try_build_default_backend_returns_none_when_no_models() {
-        // This test will return None because the models directory likely doesn't exist
-        // in test environment. Just verify it doesn't panic.
-        let result = try_build_default_backend();
-        assert!(result.is_none());
+    fn preferred_backend_type_is_selectable() {
+        let backend = inference::preferred_llama_backend();
+        assert!(!backend.to_string().is_empty());
     }
 }

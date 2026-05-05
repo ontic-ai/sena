@@ -43,6 +43,9 @@ pub trait TtsBackend: Send {
     /// Returns an audio stream ready for playback.
     fn synthesize(&mut self, text: &str) -> Result<AudioStream, TtsError>;
 
+    /// Update prosody parameters used for subsequent synthesis calls.
+    fn set_prosody(&mut self, _speaking_rate: f32, _pitch_scale: f32) {}
+
     /// Cancel any ongoing synthesis.
     fn cancel(&mut self);
 

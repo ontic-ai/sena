@@ -4,13 +4,13 @@
 //! focused on playing f32 PCM buffers from TTS backends with format adaptation.
 
 use crate::error::TtsError;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, StreamConfig};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tokio::sync::mpsc;
-
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, StreamConfig};
+use tokio::sync::{mpsc, oneshot};
 
 /// Audio buffer to be played.
 #[derive(Debug, Clone)]
@@ -50,9 +50,44 @@ impl Default for AudioOutputConfig {
 pub struct AudioOutputStream {
     #[allow(dead_code)]
     config: AudioOutputConfig,
-    play_tx: Option<mpsc::UnboundedSender<AudioBuffer>>,
+    play_tx: Option<mpsc::UnboundedSender<PlaybackCommand>>,
     stop_tx: Option<std::sync::mpsc::Sender<()>>,
     playback_thread: Option<thread::JoinHandle<()>>,
+}
+
+enum PlaybackCommand {
+    Enqueue {
+        buffer: AudioBuffer,
+        completion_tx: oneshot::Sender<Result<(), TtsError>>,
+    },
+    Clear,
+}
+
+struct PendingPlayback {
+    samples: Vec<f32>,
+    cursor: usize,
+    completion_tx: Option<oneshot::Sender<Result<(), TtsError>>>,
+}
+
+impl PendingPlayback {
+    fn new(samples: Vec<f32>, completion_tx: oneshot::Sender<Result<(), TtsError>>) -> Self {
+        Self {
+            samples,
+            cursor: 0,
+            completion_tx: Some(completion_tx),
+        }
+    }
+
+    fn finish(mut self, result: Result<(), TtsError>) {
+        if let Some(completion_tx) = self.completion_tx.take() {
+            let _ = completion_tx.send(result);
+        }
+    }
+}
+
+#[derive(Default)]
+struct PlaybackState {
+    queue: VecDeque<PendingPlayback>,
 }
 
 impl AudioOutputStream {
@@ -96,20 +131,34 @@ impl AudioOutputStream {
         }
     }
 
-    /// Queue an audio buffer for playback.
-    ///
-    /// Buffers are played in FIFO order. If the buffer's sample rate or channel count
-    /// differs from the stream config, format adaptation will be applied.
-    pub fn play(&self, buffer: AudioBuffer) -> Result<(), TtsError> {
-        if let Some(tx) = &self.play_tx {
-            tx.send(buffer)
-                .map_err(|_| TtsError::BackendError("audio playback channel closed".to_string()))?;
-            Ok(())
-        } else {
-            Err(TtsError::BackendError(
-                "audio output stream not active".to_string(),
-            ))
-        }
+    /// Queue an audio buffer for playback and wait until the device callback drains it.
+    pub async fn play_and_wait(&self, buffer: AudioBuffer) -> Result<(), TtsError> {
+        let tx = self
+            .play_tx
+            .as_ref()
+            .ok_or_else(|| TtsError::BackendError("audio output stream not active".to_string()))?;
+
+        let (completion_tx, completion_rx) = oneshot::channel();
+        tx.send(PlaybackCommand::Enqueue {
+            buffer,
+            completion_tx,
+        })
+        .map_err(|_| TtsError::BackendError("audio playback channel closed".to_string()))?;
+
+        completion_rx.await.map_err(|_| {
+            TtsError::BackendError("audio playback completion channel closed".to_string())
+        })?
+    }
+
+    /// Clear any queued or in-flight audio samples.
+    pub fn clear(&self) -> Result<(), TtsError> {
+        let tx = self
+            .play_tx
+            .as_ref()
+            .ok_or_else(|| TtsError::BackendError("audio output stream not active".to_string()))?;
+
+        tx.send(PlaybackCommand::Clear)
+            .map_err(|_| TtsError::BackendError("audio playback channel closed".to_string()))
     }
 
     /// Returns whether the playback thread is active.
@@ -131,7 +180,7 @@ impl Drop for AudioOutputStream {
 
 fn run_playback_loop(
     config: AudioOutputConfig,
-    mut play_rx: mpsc::UnboundedReceiver<AudioBuffer>,
+    mut play_rx: mpsc::UnboundedReceiver<PlaybackCommand>,
     stop_rx: std::sync::mpsc::Receiver<()>,
     ready_tx: std::sync::mpsc::Sender<Result<(), TtsError>>,
 ) {
@@ -163,13 +212,13 @@ fn run_playback_loop(
         buffer_size: cpal::BufferSize::Default,
     };
 
-    let playback_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let playback_state = Arc::new(Mutex::new(PlaybackState::default()));
 
     let stream = match build_output_stream(
         &device,
         &stream_config,
         output_cfg.sample_format(),
-        Arc::clone(&playback_buffer),
+        Arc::clone(&playback_state),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -195,13 +244,22 @@ fn run_playback_loop(
         }
 
         match play_rx.try_recv() {
-            Ok(buffer) => {
+            Ok(PlaybackCommand::Enqueue {
+                buffer,
+                completion_tx,
+            }) => {
                 let adapted = adapt_buffer_format(&buffer, &config);
-                let mut pb = playback_buffer
+                let sample_count = adapted.samples.len();
+                let mut state = playback_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                pb.extend_from_slice(&adapted.samples);
-                tracing::trace!("queued {} samples for playback", adapted.samples.len());
+                state
+                    .queue
+                    .push_back(PendingPlayback::new(adapted.samples, completion_tx));
+                tracing::trace!("queued {} samples for playback", sample_count);
+            }
+            Ok(PlaybackCommand::Clear) => {
+                clear_playback_state(&playback_state, "playback interrupted");
             }
             Err(mpsc::error::TryRecvError::Empty) => {
                 thread::sleep(Duration::from_millis(10));
@@ -213,6 +271,7 @@ fn run_playback_loop(
         }
     }
 
+    clear_playback_state(&playback_state, "audio output stopped");
     drop(stream);
     tracing::debug!("audio playback loop exiting");
 }
@@ -221,7 +280,7 @@ fn build_output_stream(
     device: &cpal::Device,
     config: &StreamConfig,
     format: SampleFormat,
-    playback_buffer: Arc<Mutex<Vec<f32>>>,
+    playback_state: Arc<Mutex<PlaybackState>>,
 ) -> Result<cpal::Stream, TtsError> {
     let channels = config.channels as usize;
 
@@ -233,7 +292,7 @@ fn build_output_stream(
         SampleFormat::F32 => device.build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                write_output_data(data, &playback_buffer, channels);
+                write_output_data(data, &playback_state, channels);
             },
             err_fn,
             None,
@@ -241,15 +300,14 @@ fn build_output_stream(
         SampleFormat::I16 => device.build_output_stream(
             config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer
+                let mut state = playback_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
-                    if buffer.is_empty() {
-                        *sample = 0;
+                    if let Some(source_sample) = next_output_sample(&mut state) {
+                        *sample = (source_sample * i16::MAX as f32) as i16;
                     } else {
-                        let f = buffer.remove(0);
-                        *sample = (f * i16::MAX as f32) as i16;
+                        *sample = 0;
                     }
                 }
             },
@@ -259,15 +317,14 @@ fn build_output_stream(
         SampleFormat::U16 => device.build_output_stream(
             config,
             move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = playback_buffer
+                let mut state = playback_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
-                    if buffer.is_empty() {
-                        *sample = u16::MAX / 2;
+                    if let Some(source_sample) = next_output_sample(&mut state) {
+                        *sample = ((source_sample + 1.0) * 0.5 * u16::MAX as f32) as u16;
                     } else {
-                        let f = buffer.remove(0);
-                        *sample = ((f + 1.0) * 0.5 * u16::MAX as f32) as u16;
+                        *sample = u16::MAX / 2;
                     }
                 }
             },
@@ -285,20 +342,47 @@ fn build_output_stream(
     stream.map_err(|e| TtsError::BackendError(format!("build output stream failed: {}", e)))
 }
 
-fn write_output_data(data: &mut [f32], buffer: &Arc<Mutex<Vec<f32>>>, channels: usize) {
-    let mut buffer = buffer
+fn next_output_sample(state: &mut PlaybackState) -> Option<f32> {
+    loop {
+        let playback = state.queue.front_mut()?;
+        if playback.cursor < playback.samples.len() {
+            let sample = playback.samples[playback.cursor];
+            playback.cursor += 1;
+            let finished = playback.cursor >= playback.samples.len();
+            if finished && let Some(playback) = state.queue.pop_front() {
+                playback.finish(Ok(()));
+            }
+            return Some(sample);
+        }
+
+        if let Some(playback) = state.queue.pop_front() {
+            playback.finish(Ok(()));
+        }
+    }
+}
+
+fn clear_playback_state(state: &Arc<Mutex<PlaybackState>>, reason: &str) -> usize {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cleared = 0;
+
+    while let Some(playback) = state.queue.pop_front() {
+        cleared += 1;
+        playback.finish(Err(TtsError::BackendError(reason.to_string())));
+    }
+
+    cleared
+}
+
+fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, channels: usize) {
+    let mut state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for frame in data.chunks_mut(channels) {
-        if buffer.is_empty() {
-            for sample in frame.iter_mut() {
-                *sample = 0.0;
-            }
-        } else {
-            let source_sample = buffer.remove(0);
-            for sample in frame.iter_mut() {
-                *sample = source_sample;
-            }
+        let source_sample = next_output_sample(&mut state).unwrap_or(0.0);
+        for sample in frame.iter_mut() {
+            *sample = source_sample;
         }
     }
 }
@@ -381,6 +465,7 @@ fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
 
     #[test]
     fn audio_buffer_channel_mono_to_stereo() {
@@ -452,5 +537,48 @@ mod tests {
 
         let adapted = adapt_buffer_format(&source, &config);
         assert_eq!(adapted.samples, source.samples);
+    }
+
+    #[tokio::test]
+    async fn write_output_data_signals_completion_when_buffer_drains() {
+        let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        {
+            let mut guard = state.lock().expect("state mutex should not be poisoned");
+            guard
+                .queue
+                .push_back(PendingPlayback::new(vec![0.1, 0.2], completion_tx));
+        }
+
+        let mut output = vec![0.0; 2];
+        write_output_data(&mut output, &state, 1);
+
+        assert_eq!(output, vec![0.1, 0.2]);
+        completion_rx
+            .await
+            .expect("completion should be sent")
+            .expect("playback should complete successfully");
+        assert!(state.lock().expect("state mutex").queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_playback_state_interrupts_pending_audio() {
+        let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        {
+            let mut guard = state.lock().expect("state mutex should not be poisoned");
+            guard
+                .queue
+                .push_back(PendingPlayback::new(vec![0.1, 0.2], completion_tx));
+        }
+
+        let cleared = clear_playback_state(&state, "interrupted");
+        assert_eq!(cleared, 1);
+        assert!(state.lock().expect("state mutex").queue.is_empty());
+
+        let result = completion_rx.await.expect("clear should notify waiter");
+        assert!(matches!(result, Err(TtsError::BackendError(_))));
     }
 }

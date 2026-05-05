@@ -80,18 +80,24 @@ This section is as important as section 3. These are hard boundaries.
 
 Each subsystem has its own dedicated `docs/subsystems/` document. This section is index-only.
 
+**Note:** The canonical implementation lives in the nested workspace at `sena/` (Rust 2024). The root workspace is donor/legacy.
+
 | Subsystem | Crate | Purpose |
 |---|---|---|
-| **Bus** | `crates/bus` | Typed event bus, actor trait, message channels |
-| **Runtime** | `crates/runtime` | Boot sequence, actor registry, shutdown orchestration |
-| **Platform** | `crates/platform` | OS adapter trait + per-OS signal collection |
-| **CTP** | `crates/ctp` | Continuous Thought Processing — context assembly and thought triggering |
-| **Inference** | `crates/inference` | llama-cpp-rs wrapper, model manager, inference queue |
-| **Memory** | `crates/memory` | ech0 adapter — translates Sena events into ech0 ingestion/retrieval. ech0 owns graph (redb) + vector (hora) storage. |
-| **Prompt** | `crates/prompt` | Dynamic prompt composition — zero static strings |
-| **Soul** | `crates/soul` | SoulBox: identity schema, event log, personalization state |
-| **Speech** | `crates/speech` | Local STT (Whisper) and TTS (Piper/platform) — Sena's primary user-facing interaction surface |
-| **CLI** | `crates/cli` | Thin binary entrypoint — wires runtime, zero business logic |
+| **Bus** | `sena/crates/bus` | Typed event bus, actor trait, message channels |
+| **Crypto** | `sena/crates/crypto` | Encryption primitives, key management, envelope encryption for persistent stores |
+| **Daemon** | `sena/crates/daemon` | Daemon binary — boots runtime, hosts IPC server, runs system tray |
+| **IPC** | `sena/crates/ipc` | Protocol layer for daemon-CLI communication (message types, serialization) |
+| **Runtime** | `sena/crates/runtime` | Boot sequence, actor registry, shutdown orchestration |
+| **Platform** | `sena/crates/platform` | OS adapter trait + per-OS signal collection |
+| **CTP** | `sena/crates/ctp` | Continuous Thought Processing — context assembly and thought triggering |
+| **Inference** | `sena/crates/inference` | llama-cpp-rs wrapper, model manager, inference queue |
+| **Memory** | `sena/crates/memory` | ech0 adapter — translates Sena events into ech0 ingestion/retrieval. ech0 owns graph (redb) + vector (hora) storage. |
+| **Prompt** | `sena/crates/prompt` | Dynamic prompt composition — zero static strings |
+| **Soul** | `sena/crates/soul` | SoulBox: identity schema, event log, personalization state |
+| **Speech** | `sena/crates/speech` | Local STT (Whisper) and TTS (Piper/platform) — Sena's primary user-facing interaction surface |
+| **CLI** | `sena/crates/cli` | CLI binary entrypoint — IPC client, TUI renderer, zero business logic |
+| **Text** | `sena/crates/text` | Text utilities: sentence boundary detection, tokenization helpers |
 | **xtask** | `xtask/` | Build automation, dev tooling, `cargo xtask dump` |
 
 ---

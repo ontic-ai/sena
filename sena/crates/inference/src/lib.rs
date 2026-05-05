@@ -12,12 +12,13 @@ pub mod registry;
 pub mod stream;
 pub mod types;
 
-pub use actor::InferenceActor;
+pub use actor::{EmbedRequest, InferenceActor};
 pub use backend::InferenceBackend;
 pub use discovery::discover_models;
 pub use error::InferenceError;
 pub use filter::OutputFilter;
 pub use llama_loader::build_loaded_llama_backend;
+pub use llama_loader::preferred_llama_backend;
 pub use mock::{MockBackend, MockConfig};
 pub use queue::{InferenceQueue, WorkItem, WorkKind};
 pub use registry::{ModelInfo, ModelRegistry};

@@ -74,15 +74,10 @@ impl CommandRegistry {
             .handlers
             .values()
             .map(|h| (h.name(), h.description(), h.requires_boot()))
-            .collect()
-            ;
+            .collect();
 
         // Built-in meta command.
-        items.push((
-            "list_commands",
-            "List all available IPC commands",
-            false,
-        ));
+        items.push(("list_commands", "List all available IPC commands", false));
 
         items.sort_by(|a, b| a.0.cmp(b.0));
         items
@@ -156,11 +151,15 @@ mod tests {
             .get("commands")
             .and_then(|v| v.as_array())
             .expect("list_commands should return commands array");
-        assert!(commands.iter().any(|cmd| {
-            cmd.get("name").and_then(|v| v.as_str()) == Some("test")
-        }));
-        assert!(commands.iter().any(|cmd| {
-            cmd.get("name").and_then(|v| v.as_str()) == Some("list_commands")
-        }));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| { cmd.get("name").and_then(|v| v.as_str()) == Some("test") })
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| { cmd.get("name").and_then(|v| v.as_str()) == Some("list_commands") })
+        );
     }
 }

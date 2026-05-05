@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Errors that can occur during prompt composition.
 #[derive(Debug, Error)]
 pub enum PromptError {
+    /// Caller passed an empty segment list or all segments were empty.
+    #[error("no non-empty segments provided")]
+    NoSegments,
+
     /// A required segment was missing from the context.
     #[error("missing required segment: {0}")]
     MissingSegment(String),

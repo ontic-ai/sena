@@ -79,8 +79,7 @@ impl PlatformBackend for WindowsBackend {
                         );
                         let _ = windows::Win32::Foundation::CloseHandle(handle);
                         if ok.is_ok() {
-                            let full_path =
-                                String::from_utf16_lossy(&name_buf[..size as usize]);
+                            let full_path = String::from_utf16_lossy(&name_buf[..size as usize]);
                             std::path::Path::new(&full_path)
                                 .file_stem()
                                 .and_then(|s| s.to_str())

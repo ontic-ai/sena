@@ -127,11 +127,13 @@ impl CommandHandler for MemoryQueryHandler {
                     })) if event_causal_id == causal_id => {
                         let chunks_json: Vec<Value> = chunks
                             .into_iter()
-                            .map(|chunk| json!({
-                                "content": chunk.content,
-                                "score": chunk.score,
-                                "age_seconds": chunk.age_seconds,
-                            }))
+                            .map(|chunk| {
+                                json!({
+                                    "content": chunk.content,
+                                    "score": chunk.score,
+                                    "age_seconds": chunk.age_seconds,
+                                })
+                            })
                             .collect();
                         return Ok(json!({ "chunks": chunks_json }));
                     }

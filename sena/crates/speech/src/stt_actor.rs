@@ -3,6 +3,7 @@
 use crate::audio_input::{AudioChunk, AudioInputConfig, AudioInputStream};
 use crate::backend::{AudioDevice, SttBackend};
 use crate::error::{SpeechActorError, SttError};
+use crate::silence_detector::SilenceDetector;
 use crate::types::SttEvent;
 use bus::causal::CausalId;
 use bus::events::{SpeechEvent, SystemEvent};
@@ -16,6 +17,8 @@ use tracing::{error, info, warn};
 
 /// Default minimum confidence threshold for valid transcriptions.
 const DEFAULT_MIN_CONFIDENCE_THRESHOLD: f32 = 0.65;
+const DEFAULT_VAD_ENERGY_THRESHOLD: f32 = 0.02;
+const DEFAULT_VAD_SILENCE_DURATION_SECS: f32 = 0.5;
 
 /// STT actor — processes incoming audio and emits transcription events.
 pub struct SttActor {
@@ -26,10 +29,14 @@ pub struct SttActor {
     shutdown_requested: bool,
     listen_mode_active: bool,
     listen_mode_causal_id: Option<CausalId>,
+    listen_mode_transcript: String,
+    listen_mode_live_partial: String,
     loop_enabled: bool,
     audio_config: AudioInputConfig,
     audio_stream: Option<AudioInputStream>,
     audio_rx: Option<mpsc::UnboundedReceiver<AudioChunk>>,
+    always_listening_vad: SilenceDetector,
+    listen_mode_vad: SilenceDetector,
     /// Test-only: injectable audio source for hardware-independent tests
     #[cfg(test)]
     test_audio_rx: Option<mpsc::UnboundedReceiver<AudioChunk>>,
@@ -40,8 +47,7 @@ impl SttActor {
     pub fn new(backend: Box<dyn SttBackend>) -> Self {
         let preferred_chunk_samples = backend.preferred_chunk_samples().max(1);
         let mut audio_config = AudioInputConfig::default();
-        let preferred_chunk_secs =
-            preferred_chunk_samples as f32 / audio_config.sample_rate as f32;
+        let preferred_chunk_secs = preferred_chunk_samples as f32 / audio_config.sample_rate as f32;
         audio_config.buffer_duration_secs = preferred_chunk_secs.clamp(0.05, 0.25);
 
         Self {
@@ -52,10 +58,20 @@ impl SttActor {
             shutdown_requested: false,
             listen_mode_active: false,
             listen_mode_causal_id: None,
+            listen_mode_transcript: String::new(),
+            listen_mode_live_partial: String::new(),
             loop_enabled: true,
             audio_config,
             audio_stream: None,
             audio_rx: None,
+            always_listening_vad: SilenceDetector::new(
+                DEFAULT_VAD_ENERGY_THRESHOLD,
+                DEFAULT_VAD_SILENCE_DURATION_SECS,
+            ),
+            listen_mode_vad: SilenceDetector::new(
+                DEFAULT_VAD_ENERGY_THRESHOLD,
+                DEFAULT_VAD_SILENCE_DURATION_SECS,
+            ),
             #[cfg(test)]
             test_audio_rx: None,
         }
@@ -73,6 +89,15 @@ impl SttActor {
         self
     }
 
+    /// Override the silence window used to finalize utterances.
+    pub fn with_silence_duration(mut self, silence_duration_secs: f32) -> Self {
+        self.always_listening_vad =
+            SilenceDetector::new(DEFAULT_VAD_ENERGY_THRESHOLD, silence_duration_secs);
+        self.listen_mode_vad =
+            SilenceDetector::new(DEFAULT_VAD_ENERGY_THRESHOLD, silence_duration_secs);
+        self
+    }
+
     /// Test-only: inject a test audio receiver instead of starting real capture.
     #[cfg(test)]
     pub fn with_test_audio_rx(mut self, rx: mpsc::UnboundedReceiver<AudioChunk>) -> Self {
@@ -84,6 +109,9 @@ impl SttActor {
     fn start_audio_capture(&mut self) -> Result<(), SpeechActorError> {
         #[cfg(test)]
         if self.test_audio_rx.is_some() {
+            if self.audio_rx.is_none() {
+                self.audio_rx = self.test_audio_rx.take();
+            }
             info!("using test audio receiver, skipping real capture");
             return Ok(());
         }
@@ -121,7 +149,9 @@ impl SttActor {
     /// Handle bus events.
     async fn handle_bus_event(&mut self, event: Event) -> Result<(), SpeechActorError> {
         match event {
-            Event::System(SystemEvent::ShutdownRequested) => {
+            Event::System(SystemEvent::ShutdownSignal)
+            | Event::System(SystemEvent::ShutdownRequested)
+            | Event::System(SystemEvent::ShutdownInitiated) => {
                 info!("Shutdown requested, stopping STT actor");
                 self.shutdown_requested = true;
             }
@@ -157,20 +187,61 @@ impl SttActor {
                     warn!("Listen mode requested but speech loop is disabled");
                     return Ok(());
                 }
+
+                if self.audio_stream.is_none() {
+                    if let Err(e) = self.start_audio_capture() {
+                        warn!(error = %e, "listen mode requested but audio capture is unavailable");
+                        return Ok(());
+                    }
+                }
+
                 info!("Listen mode requested");
                 self.listen_mode_active = true;
                 self.listen_mode_causal_id = Some(causal_id);
+                self.listen_mode_transcript.clear();
+                self.listen_mode_live_partial.clear();
+                self.always_listening_vad.reset();
+                self.listen_mode_vad.reset();
             }
             Event::Speech(SpeechEvent::ListenModeStopRequested { causal_id }) => {
                 info!("Listen mode stop requested");
                 self.flush_backend_events().await?;
+                let transcript_text = compose_listen_mode_transcript(
+                    &self.listen_mode_transcript,
+                    &self.listen_mode_live_partial,
+                );
+                let transcript = if transcript_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(transcript_text)
+                };
                 self.listen_mode_active = false;
                 self.listen_mode_causal_id = None;
+                self.listen_mode_transcript.clear();
+                self.listen_mode_live_partial.clear();
+                self.listen_mode_vad.reset();
 
                 if let Some(bus) = &self.bus {
-                    bus.broadcast(Event::Speech(SpeechEvent::ListenModeStopped { causal_id }))
-                        .await
-                        .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                    bus.broadcast(Event::Speech(SpeechEvent::ListenModeStopped {
+                        causal_id,
+                        transcript,
+                    }))
+                    .await
+                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                }
+            }
+            Event::Speech(SpeechEvent::WakewordDetected { confidence }) => {
+                if !self.loop_enabled || self.listen_mode_active {
+                    return Ok(());
+                }
+
+                info!(confidence = %confidence, "Wakeword detected");
+                self.always_listening_vad.reset();
+
+                if self.audio_stream.is_none()
+                    && let Err(e) = self.start_audio_capture()
+                {
+                    warn!(error = %e, "failed to start audio capture after wakeword detection");
                 }
             }
             _ => {}
@@ -188,7 +259,7 @@ impl SttActor {
 
     /// Handle backend STT events.
     #[cfg(test)]
-    async fn handle_stt_event(&self, event: SttEvent) -> Result<(), SpeechActorError> {
+    async fn handle_stt_event(&mut self, event: SttEvent) -> Result<(), SpeechActorError> {
         let bus = self
             .bus
             .as_ref()
@@ -204,6 +275,9 @@ impl SttActor {
 
                 // Check confidence threshold
                 if confidence < self.min_confidence_threshold {
+                    if self.listen_mode_active {
+                        self.listen_mode_live_partial.clear();
+                    }
                     warn!(
                         confidence = %confidence,
                         threshold = %self.min_confidence_threshold,
@@ -308,7 +382,7 @@ impl Actor for SttActor {
 
         // Emit ActorReady event
         bus.broadcast(Event::System(SystemEvent::ActorReady {
-            actor_name: self.name(),
+            actor_name: self.name().to_string(),
         }))
         .await
         .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
@@ -395,6 +469,21 @@ impl SttActor {
                 for event in events {
                     self.handle_stt_event_internal(event).await?;
                 }
+
+                if self.listen_mode_active {
+                    if self
+                        .listen_mode_vad
+                        .feed(&chunk.samples, self.audio_config.sample_rate, 1)
+                    {
+                        self.flush_backend_events().await?;
+                    }
+                } else if self.always_listening_vad.feed(
+                    &chunk.samples,
+                    self.audio_config.sample_rate,
+                    1,
+                ) {
+                    self.flush_backend_events().await?;
+                }
             }
             Err(e) => {
                 return Err(SpeechActorError::Stt(e));
@@ -403,7 +492,10 @@ impl SttActor {
 
         let elapsed_ms = start.elapsed().as_millis();
         if elapsed_ms > 250 {
-            warn!(elapsed_ms = elapsed_ms, "STT chunk processing latency is high");
+            warn!(
+                elapsed_ms = elapsed_ms,
+                "STT chunk processing latency is high"
+            );
         }
         Ok(())
     }
@@ -421,9 +513,15 @@ impl SttActor {
                 confidence: _,
             } => {
                 if self.listen_mode_active {
+                    self.listen_mode_live_partial =
+                        merge_partial_transcript_text(&self.listen_mode_live_partial, &text);
+                    let transcript = compose_listen_mode_transcript(
+                        &self.listen_mode_transcript,
+                        &self.listen_mode_live_partial,
+                    );
                     let causal_id = self.listen_mode_causal_id.unwrap_or_else(CausalId::new);
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                        text,
+                        text: transcript,
                         causal_id,
                     }))
                     .await
@@ -455,9 +553,20 @@ impl SttActor {
                     .await
                     .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
                 } else if self.listen_mode_active {
+                    let completed_utterance = if text.trim().is_empty() {
+                        normalize_transcript_text(&self.listen_mode_live_partial)
+                    } else {
+                        normalize_transcript_text(&text)
+                    };
+                    self.listen_mode_transcript = append_transcript_segment(
+                        &self.listen_mode_transcript,
+                        &completed_utterance,
+                    );
+                    self.listen_mode_live_partial.clear();
+                    let transcript = self.listen_mode_transcript.clone();
                     // In listen mode, emit listen mode transcription event
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                        text,
+                        text: transcript,
                         causal_id: self.listen_mode_causal_id.unwrap_or(causal_id),
                     }))
                     .await
@@ -498,6 +607,145 @@ impl SttActor {
         }
         Ok(())
     }
+}
+
+fn merge_partial_transcript_text(current: &str, incoming: &str) -> String {
+    let current = normalize_transcript_text(current);
+    let incoming = normalize_transcript_text(incoming);
+
+    if current.is_empty() {
+        return incoming;
+    }
+    if incoming.is_empty() {
+        return current;
+    }
+    if current == incoming || current.contains(&incoming) {
+        return current;
+    }
+    if incoming.contains(&current) || incoming.starts_with(&current) {
+        return incoming;
+    }
+
+    let max_overlap = current.len().min(incoming.len());
+    for overlap in (1..=max_overlap).rev() {
+        if current[current.len() - overlap..] == incoming[..overlap] {
+            return normalize_transcript_text(&format!("{}{}", current, &incoming[overlap..]));
+        }
+    }
+
+    normalize_transcript_text(&format!("{} {}", current, incoming))
+}
+
+fn append_transcript_segment(current: &str, segment: &str) -> String {
+    let current = normalize_transcript_text(current);
+    let segment = normalize_transcript_text(segment);
+
+    if current.is_empty() {
+        return segment;
+    }
+    if segment.is_empty() {
+        return current;
+    }
+    if current.ends_with(&segment) {
+        return current;
+    }
+
+    normalize_transcript_text(&format!("{} {}", current, segment))
+}
+
+fn compose_listen_mode_transcript(committed: &str, partial: &str) -> String {
+    let committed = normalize_transcript_text(committed);
+    let partial = normalize_transcript_text(partial);
+
+    if committed.is_empty() {
+        return partial;
+    }
+    if partial.is_empty() {
+        return committed;
+    }
+
+    normalize_transcript_text(&format!("{} {}", committed, partial))
+}
+
+#[cfg(test)]
+fn merge_completed_transcript_text(current: &str, incoming: &str) -> String {
+    let current = normalize_transcript_text(current);
+    let incoming = normalize_transcript_text(incoming);
+
+    if current.is_empty() {
+        return incoming;
+    }
+    if incoming.is_empty() {
+        return current;
+    }
+    if current == incoming {
+        return current;
+    }
+    if incoming.contains(&current) {
+        return incoming;
+    }
+    if current.ends_with(&incoming) {
+        let prefix = current[..current.len() - incoming.len()].trim();
+        if transcript_artifact_score(prefix) >= 2 {
+            return incoming;
+        }
+    }
+    if current.contains(&incoming) {
+        return current;
+    }
+
+    let current_words: Vec<&str> = current.split_whitespace().collect();
+    let incoming_words: Vec<&str> = incoming.split_whitespace().collect();
+    let max_overlap = current_words.len().min(incoming_words.len());
+
+    for overlap in (3..=max_overlap).rev() {
+        if current_words[current_words.len() - overlap..] == incoming_words[..overlap] {
+            let prefix = current_words[..current_words.len() - overlap].join(" ");
+            if prefix.is_empty() {
+                return incoming;
+            }
+            return normalize_transcript_text(&format!("{} {}", prefix, incoming));
+        }
+    }
+
+    merge_partial_transcript_text(&current, &incoming)
+}
+
+fn normalize_transcript_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut normalized = String::with_capacity(collapsed.len());
+
+    for ch in collapsed.chars() {
+        if matches!(ch, ',' | '.' | '!' | '?' | ';' | ':') && normalized.ends_with(' ') {
+            normalized.pop();
+        }
+        normalized.push(ch);
+    }
+
+    normalized.trim().to_string()
+}
+
+#[cfg(test)]
+fn transcript_artifact_score(text: &str) -> usize {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    words
+        .windows(2)
+        .filter(|pair| {
+            let left = &pair[0];
+            let right = &pair[1];
+            (left.len() >= 4 && right.len() <= 3) || (left.len() <= 3 && right.len() >= 5)
+        })
+        .count()
 }
 
 /// Stub STT backend for testing.
@@ -575,9 +823,23 @@ mod tests {
 
         let events = backend.feed(&chunk).expect("feed should succeed");
         assert!(events.is_empty());
+    }
 
-        let events = backend.feed(&chunk).expect("feed should succeed");
-        assert!(events.is_empty());
+    #[test]
+    fn merge_completed_transcript_prefers_clean_overlap() {
+        let current = "Well, this is better for geomet ric data. Rotor sandwich R tim es preserves the full algebraic structure Well, this is better for geometric data. Rotor sandwich R times preserves the full algebraic structure";
+        let incoming = "Well, this is better for geometric data. Rotor sandwich R times preserves the full algebraic structure";
+
+        let merged = merge_completed_transcript_text(current, incoming);
+
+        assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn normalize_transcript_removes_space_before_punctuation() {
+        let normalized = normalize_transcript_text("hello , world .  how are you ?");
+
+        assert_eq!(normalized, "hello, world. how are you?");
     }
 
     #[test]
@@ -671,6 +933,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listen_mode_transcription_events_emit_merged_transcript_for_cli() {
+        let backend = Box::new(StubSttBackend::new(1024));
+        let mut actor = SttActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        actor.listen_mode_active = true;
+        actor.listen_mode_causal_id = Some(CausalId::new());
+
+        actor
+            .handle_stt_event_internal(SttEvent::Word {
+                text: "hello".to_string(),
+                confidence: 0.95,
+            })
+            .await
+            .expect("first partial should succeed");
+
+        actor
+            .handle_stt_event_internal(SttEvent::Word {
+                text: "hello world".to_string(),
+                confidence: 0.95,
+            })
+            .await
+            .expect("second partial should succeed");
+
+        actor
+            .handle_stt_event_internal(SttEvent::Completed {
+                text: "hello world from sena".to_string(),
+                confidence: 0.95,
+            })
+            .await
+            .expect("completion should succeed");
+
+        let mut transcripts = Vec::new();
+        for _ in 0..10 {
+            if let Ok(event) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+                && let Ok(Event::Speech(SpeechEvent::ListenModeTranscription { text, .. })) = event
+            {
+                transcripts.push(text);
+                if transcripts.len() == 3 {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            transcripts,
+            vec![
+                "hello".to_string(),
+                "hello world".to_string(),
+                "hello world from sena".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn listen_mode_completed_transcript_does_not_duplicate_live_partial() {
+        let backend = Box::new(StubSttBackend::new(1024));
+        let mut actor = SttActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        actor.listen_mode_active = true;
+        actor.listen_mode_causal_id = Some(CausalId::new());
+
+        actor
+            .handle_stt_event_internal(SttEvent::Word {
+                text: "Hello that's good Yeah, I don't knowhat's going on Let's fix this Stop listening"
+                    .to_string(),
+                confidence: 0.95,
+            })
+            .await
+            .expect("partial should succeed");
+
+        actor
+            .handle_stt_event_internal(SttEvent::Completed {
+                text: "Hello that's good Yeah, I don't know what's going on Let's fix this Stop listening"
+                    .to_string(),
+                confidence: 0.95,
+            })
+            .await
+            .expect("completion should succeed");
+
+        let mut transcripts = Vec::new();
+        for _ in 0..10 {
+            if let Ok(event) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+                && let Ok(Event::Speech(SpeechEvent::ListenModeTranscription { text, .. })) = event
+            {
+                transcripts.push(text);
+                if transcripts.len() == 2 {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            transcripts,
+            vec![
+                "Hello that's good Yeah, I don't knowhat's going on Let's fix this Stop listening"
+                    .to_string(),
+                "Hello that's good Yeah, I don't know what's going on Let's fix this Stop listening"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn stt_actor_listen_mode_enter_and_exit() {
         let backend = Box::new(StubSttBackend::new(1024));
         let mut actor = SttActor::new(backend);
@@ -705,6 +1086,31 @@ mod tests {
 
         assert!(!actor.listen_mode_active);
         assert_eq!(actor.listen_mode_causal_id, None);
+    }
+
+    #[tokio::test]
+    async fn listen_mode_request_starts_audio_capture_when_missing() {
+        let backend = Box::new(StubSttBackend::new(1024));
+        let (_audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let mut actor = SttActor::new(backend).with_test_audio_rx(audio_rx);
+        let bus = Arc::new(EventBus::new());
+        let causal_id = CausalId::new();
+
+        actor.bus = Some(bus);
+
+        assert!(actor.audio_stream.is_none());
+        assert!(actor.audio_rx.is_none());
+
+        actor
+            .handle_bus_event(Event::Speech(SpeechEvent::ListenModeRequested {
+                causal_id,
+            }))
+            .await
+            .expect("listen mode request should succeed");
+
+        assert!(actor.audio_rx.is_some());
+        assert!(actor.listen_mode_active);
+        assert_eq!(actor.listen_mode_causal_id, Some(causal_id));
     }
 
     #[tokio::test]
@@ -794,6 +1200,54 @@ mod tests {
             .await
             .expect("broadcast failed");
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
+    async fn always_listening_flushes_after_silence() {
+        let backend = Box::new(StubSttBackend::new(1600));
+        let mut actor = SttActor::new(backend).with_silence_duration(0.0);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        actor
+            .process_audio_chunk(AudioChunk {
+                samples: vec![0.5; 4_000],
+            })
+            .await
+            .expect("first speech chunk should succeed");
+        actor
+            .process_audio_chunk(AudioChunk {
+                samples: vec![0.5; 4_000],
+            })
+            .await
+            .expect("second speech chunk should succeed");
+        actor
+            .process_audio_chunk(AudioChunk {
+                samples: vec![0.001; 16_000],
+            })
+            .await
+            .expect("silence chunk should succeed");
+
+        let mut saw_completion = false;
+        for _ in 0..10 {
+            if let Ok(event) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+                && let Ok(Event::Speech(SpeechEvent::TranscriptionCompleted { .. })) = event
+            {
+                saw_completion = true;
+                break;
+            }
+        }
+
+        assert!(
+            saw_completion,
+            "silence should flush a completed transcription"
+        );
     }
 
     #[tokio::test]

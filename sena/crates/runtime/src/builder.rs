@@ -1,12 +1,12 @@
 //! Actor builder functions — construct actor instances with their backends.
 
 use crate::error::RuntimeError;
-use inference::InferenceError;
+#[cfg(test)]
+use inference::MockBackend;
 use platform::PlatformError;
-use soul::SoulError;
 use speech::{ModelCache, ModelManifest};
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// Stub platform backend implementation.
 struct StubPlatformBackend;
@@ -54,103 +54,6 @@ impl platform::PlatformBackend for StubPlatformBackend {
     }
 }
 
-/// Stub soul store implementation.
-struct StubSoulStore;
-
-impl soul::SoulStore for StubSoulStore {
-    fn write_event(
-        &mut self,
-        _description: String,
-        _app_context: Option<String>,
-        _timestamp: SystemTime,
-    ) -> Result<u64, SoulError> {
-        Ok(1)
-    }
-
-    fn read_summary(
-        &self,
-        _max_events: usize,
-        _max_chars: Option<usize>,
-    ) -> Result<soul::SoulSummary, SoulError> {
-        Ok(soul::SoulSummary {
-            content: String::new(),
-            event_count: 0,
-        })
-    }
-
-    fn read_event(&self, _row_id: u64) -> Result<Option<soul::SoulEventRecord>, SoulError> {
-        Ok(None)
-    }
-
-    fn write_identity_signal(&mut self, _key: &str, _value: &str) -> Result<(), SoulError> {
-        Ok(())
-    }
-
-    fn read_identity_signal(&self, _key: &str) -> Result<Option<String>, SoulError> {
-        Ok(None)
-    }
-
-    fn read_all_identity_signals(&self) -> Result<Vec<soul::IdentitySignal>, SoulError> {
-        Ok(Vec::new())
-    }
-
-    fn increment_identity_counter(&mut self, _key: &str, _delta: u64) -> Result<(), SoulError> {
-        Ok(())
-    }
-
-    fn write_temporal_pattern(&mut self, _pattern: soul::TemporalPattern) -> Result<(), SoulError> {
-        Ok(())
-    }
-
-    fn read_temporal_patterns(&self) -> Result<Vec<soul::TemporalPattern>, SoulError> {
-        Ok(Vec::new())
-    }
-
-    fn initialize(&mut self) -> Result<(), SoulError> {
-        Ok(())
-    }
-
-    fn close(&mut self) -> Result<(), SoulError> {
-        Ok(())
-    }
-}
-
-/// Stub inference backend implementation.
-struct StubInferenceBackend;
-
-#[async_trait::async_trait]
-impl inference::InferenceBackend for StubInferenceBackend {
-    fn backend_type(&self) -> inference::BackendType {
-        inference::BackendType::Mock
-    }
-
-    fn is_loaded(&self) -> bool {
-        false
-    }
-
-    async fn infer(
-        &self,
-        _prompt: String,
-        _params: inference::InferenceParams,
-    ) -> Result<inference::InferenceStream, InferenceError> {
-        Err(InferenceError::ModelNotLoaded)
-    }
-
-    fn complete(
-        &self,
-        _prompt: &str,
-        _params: &inference::InferenceParams,
-    ) -> Result<String, InferenceError> {
-        Err(InferenceError::ModelNotLoaded)
-    }
-
-    // embed() and extract() use default trait implementations
-
-    async fn shutdown(&mut self) -> Result<(), InferenceError> {
-        Ok(())
-    }
-}
-
 /// Build the platform actor with the native OS backend.
 ///
 /// Falls back to stub backend if native backend construction fails.
@@ -171,46 +74,58 @@ pub fn build_platform_actor() -> Result<platform::PlatformActor, RuntimeError> {
     }
 }
 
-/// Build the soul actor with a stub store.
-pub fn build_soul_actor() -> Result<soul::SoulActor, RuntimeError> {
-    tracing::debug!("building soul actor with stub store");
-    let store = Box::new(StubSoulStore);
-    let actor = soul::SoulActor::new(store);
-    Ok(actor)
+/// Build the soul actor with a persistent redb store.
+pub fn build_soul_actor(data_dir: &Path) -> Result<soul::SoulActor, RuntimeError> {
+    let soul_db_path = data_dir.join("soul.redb");
+    let soul_store = soul::RedbSoulStore::open(&soul_db_path)
+        .map_err(|error| RuntimeError::SoulStore(error.to_string()))?;
+
+    tracing::info!(path = %soul_db_path.display(), "soul actor: using RedbSoulStore");
+    Ok(soul::SoulActor::new(Box::new(soul_store)))
 }
 
 /// Build the memory actor with the in-memory Echo0 backend.
-pub fn build_memory_actor() -> Result<memory::MemoryActor, RuntimeError> {
-    tracing::debug!("building memory actor with Echo0 backend");
-    let backend = Box::new(memory::Echo0Backend::new());
-    let actor = memory::MemoryActor::new(backend);
+pub fn build_memory_actor(
+    data_dir: &Path,
+    embed_tx: tokio::sync::mpsc::Sender<inference::EmbedRequest>,
+) -> Result<memory::MemoryActor, RuntimeError> {
+    let memory_db_path = data_dir.join("memory.redb");
+    tracing::debug!(path = %memory_db_path.display(), "building memory actor with persistent backend");
+    let backend = Box::new(
+        memory::Echo0Backend::open(&memory_db_path, memory::SenaEmbedder::new(embed_tx))
+            .map_err(|error| RuntimeError::MemoryStore(error.to_string()))?,
+    );
+    let actor = memory::MemoryActor::with_backup_config(
+        backend,
+        memory::BackupConfig::with_data_dir(data_dir.to_path_buf()),
+    );
     Ok(actor)
 }
 
-/// Build the inference actor with a real backend if available, stub otherwise.
+/// Build the inference actor with a real backend.
 ///
-/// Attempts to discover and load a GGUF model from the default models directory.
-/// Falls back to stub backend if no model is available (with a warning).
+/// Normal runtime boot is strict: a usable GGUF model must load successfully.
 pub fn build_inference_actor(
     inference_max_tokens: usize,
+    embed_rx: tokio::sync::mpsc::Receiver<inference::EmbedRequest>,
 ) -> Result<inference::InferenceActor, RuntimeError> {
-    use crate::llama_backend::try_build_default_backend;
+    let backend = load_inference_backend()?;
+    tracing::info!("inference actor: using loaded LlamaBackend");
+    Ok(
+        inference::InferenceActor::with_embed_requests(backend, 100, embed_rx)
+            .with_inference_max_tokens(inference_max_tokens),
+    )
+}
 
-    match try_build_default_backend() {
-        Some(backend) => {
-            tracing::info!("inference actor: using real LlamaBackend");
-            Ok(inference::InferenceActor::new(backend)
-                .with_inference_max_tokens(inference_max_tokens))
-        }
-        None => {
-            tracing::warn!(
-                "inference actor: no model available, falling back to StubInferenceBackend"
-            );
-            let backend = Box::new(StubInferenceBackend);
-            Ok(inference::InferenceActor::new(backend)
-                .with_inference_max_tokens(inference_max_tokens))
-        }
-    }
+#[cfg(not(test))]
+fn load_inference_backend() -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    crate::llama_backend::build_default_backend()
+}
+
+#[cfg(test)]
+fn load_inference_backend() -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    tracing::info!("inference actor: using MockBackend in tests");
+    Ok(Box::new(MockBackend::default_loaded()))
 }
 
 /// Build the CTP actor.
@@ -320,11 +235,34 @@ pub fn build_tts_actor(models_dir: &Path) -> Result<speech::TtsActor, RuntimeErr
     Ok(actor)
 }
 
-/// Build the Prompt actor with a stub composer.
+/// Build the wakeword actor when a wakeword model is available.
+pub fn build_wakeword_actor(
+    models_dir: &Path,
+    sensitivity: f32,
+) -> Result<Option<speech::WakewordActor>, RuntimeError> {
+    let model_path = ModelCache::cached_path(models_dir, &ModelManifest::open_wakeword());
+
+    if !model_path.exists() {
+        tracing::debug!(
+            "Wakeword model asset not available at {} — wakeword actor will not spawn",
+            model_path.display()
+        );
+        return Ok(None);
+    }
+
+    let actor = speech::WakewordActor::new(speech::WakewordConfig {
+        sensitivity,
+        model_path: Some(model_path),
+        model_dir: Some(models_dir.to_path_buf()),
+        debounce_secs: 3.0,
+    });
+    Ok(Some(actor))
+}
+
+/// Build the Prompt actor.
 pub fn build_prompt_actor() -> Result<prompt::PromptActor, RuntimeError> {
-    tracing::debug!("building Prompt actor with stub composer");
-    let composer = Box::new(prompt::StubComposer::default_segments());
-    let actor = prompt::PromptActor::new(composer);
+    tracing::debug!("building Prompt actor");
+    let actor = prompt::PromptActor::new();
     Ok(actor)
 }
 
@@ -341,19 +279,23 @@ mod tests {
 
     #[test]
     fn soul_actor_builds() {
-        let result = build_soul_actor();
+        let data_dir = tempdir().expect("failed to create tempdir");
+        let result = build_soul_actor(data_dir.path());
         assert!(result.is_ok());
     }
 
     #[test]
     fn memory_actor_builds() {
-        let result = build_memory_actor();
+        let (embed_tx, _embed_rx) = tokio::sync::mpsc::channel(1);
+        let data_dir = tempdir().expect("failed to create tempdir");
+        let result = build_memory_actor(data_dir.path(), embed_tx);
         assert!(result.is_ok());
     }
 
     #[test]
     fn inference_actor_builds() {
-        let result = build_inference_actor(512);
+        let (_embed_tx, embed_rx) = tokio::sync::mpsc::channel(1);
+        let result = build_inference_actor(512, embed_rx);
         assert!(result.is_ok());
     }
 
@@ -375,6 +317,27 @@ mod tests {
         let models_dir = tempdir().expect("failed to create tempdir");
         let result = build_tts_actor(models_dir.path());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn wakeword_actor_not_built_when_asset_missing() {
+        let models_dir = tempdir().expect("failed to create tempdir");
+        let result =
+            build_wakeword_actor(models_dir.path(), 0.5).expect("wakeword builder should succeed");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn wakeword_actor_built_when_asset_exists() {
+        let models_dir = tempdir().expect("failed to create tempdir");
+        let model = ModelManifest::open_wakeword();
+        let model_path = ModelCache::cached_path(models_dir.path(), &model);
+
+        std::fs::write(&model_path, b"stub wakeword model").expect("write wakeword asset");
+
+        let result =
+            build_wakeword_actor(models_dir.path(), 0.6).expect("wakeword builder should succeed");
+        assert!(result.is_some());
     }
 
     #[test]

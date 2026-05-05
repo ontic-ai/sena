@@ -1,12 +1,13 @@
 //! CTP (Continuous Thought Processing) events and context types.
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use super::platform::{FileEvent, KeystrokeCadence, WindowContext};
 use super::soul::DistilledIdentitySignal;
 
 /// Privacy-safe visual context from screen capture.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualContext {
     /// Resolution of the captured image (width, height).
     pub resolution: (u32, u32),
@@ -15,7 +16,7 @@ pub struct VisualContext {
 }
 
 /// Enriched inferred task with semantic description.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrichedInferredTask {
     /// Task category (e.g., "coding", "writing", "research").
     pub category: String,
@@ -26,7 +27,7 @@ pub struct EnrichedInferredTask {
 }
 
 /// User cognitive state derived from behavioral signals.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserState {
     /// Frustration level (0-100).
     pub frustration_level: u8,
@@ -37,7 +38,7 @@ pub struct UserState {
 }
 
 /// Type of signal pattern detected.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignalPatternType {
     Frustration,
     Repetition,
@@ -46,7 +47,7 @@ pub enum SignalPatternType {
 }
 
 /// Detected signal pattern from multi-modal signal analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalPattern {
     /// Type of pattern detected.
     pub pattern_type: SignalPatternType,
@@ -57,7 +58,7 @@ pub struct SignalPattern {
 }
 
 /// Structured capture of user's computing context at a moment in time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     /// Currently active application context.
     pub active_app: WindowContext,
@@ -76,14 +77,19 @@ pub struct ContextSnapshot {
     /// Visual context from recent screen capture.
     pub visual_context: Option<VisualContext>,
     /// When this snapshot was captured.
+    #[serde(with = "crate::events::system::instant_serde")]
     pub timestamp: Instant,
     /// Cached identity signal from Soul (preserved across snapshots).
     pub soul_identity_signal: Option<DistilledIdentitySignal>,
 }
 
 /// CTP (Continuous Thought Processing) events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CTPEvent {
+    /// The CTP processing loop has started.
+    LoopStarted,
+    /// The CTP processing loop has stopped.
+    LoopStopped,
     /// A thought event was triggered by CTP.
     ThoughtEventTriggered(ContextSnapshot),
 
@@ -99,14 +105,9 @@ pub enum CTPEvent {
     /// Signal received and buffered by CTP.
     SignalReceived {
         signal_type: String,
+        #[serde(with = "crate::events::system::instant_serde")]
         timestamp: Instant,
     },
-
-    /// CTP loop started successfully.
-    LoopStarted,
-
-    /// CTP loop stopped.
-    LoopStopped,
 }
 
 #[cfg(test)]
