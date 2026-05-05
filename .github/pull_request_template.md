@@ -8,14 +8,14 @@
 
 ## Testing
 
-- [ ] `cargo build --workspace`
-- [ ] `cargo test --workspace`
-- [ ] `cargo clippy --workspace -- -D warnings`
-- [ ] `cargo fmt -- --check`
+- [ ] `cd sena && cargo build --workspace`
+- [ ] `cd sena && cargo test --workspace`
+- [ ] `cd sena && cargo clippy --workspace -- -D warnings`
+- [ ] `cd sena && cargo fmt --check`
 
 ## Checklist
 
-- [ ] I read and followed docs/architecture.md and .github/copilot-instructions.md
+- [ ] I read and followed `docs/architecture.md`, `docs/PRD.md`, and `CONTRIBUTING.md`
 - [ ] Behavior is minimal and scoped to the current milestone
 - [ ] No forbidden dependencies or body-modifying `process::exit`
 - [ ] No static prompt strings introduced

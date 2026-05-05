@@ -21,20 +21,24 @@ Sena is an open-source, Rust-based ambient intelligence framework built around t
 
 > ⚠️ Not for production yet. Intended for local development and contribution.
 
+**Build from the canonical nested workspace:**
+
 ```sh
 git clone https://github.com/ontic-ai/sena.git
-cd sena
-rustup override set $(cat rust-toolchain)
+cd sena/sena              # ← Enter the nested workspace directory
+rustup override set $(cat rust-toolchain.toml | grep channel | cut -d' ' -f3 | tr -d '"')
 cargo build --workspace
 cargo test --workspace
 ```
+
+> ⚠️ **Do NOT** run `cargo build` from the root without specifying a package. The root `Cargo.toml` is a deprecated donor workspace. Always use `sena/` (nested workspace, Rust 2024).
 
 ## Useful links
 
 - Architecture: `docs/architecture.md`
 - Roadmap: `docs/ROADMAP.md`
 - Product requirements: `docs/PRD.md`
-- Coding rules: `.github/copilot-instructions.md`
+- Contribution rules: `CONTRIBUTING.md`
 
 ## Contribute
 

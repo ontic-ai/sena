@@ -1,13 +1,13 @@
 # Contributing to Sena
 
-Thanks for helping build Sena! This project follows strict architecture and security rules in `docs/architecture.md` and `.github/copilot-instructions.md`. Please read them before writing code.
+Thanks for helping build Sena! This project follows strict architecture and security rules in `docs/architecture.md`, `docs/PRD.md`, and `docs/ROADMAP.md`. Please read them before writing code.
 
 ## Quick-start (local dev only)
 
 1. Install Rust (stable release matching `rust-toolchain.toml`).
-2. Clone repository and enter:
+2. Clone repository and enter the canonical nested workspace:
    ```sh
-   cd sena
+   cd sena/sena
    ```
 3. Build:
    ```sh
@@ -19,7 +19,7 @@ Thanks for helping build Sena! This project follows strict architecture and secu
    ```
 5. Run:
    ```sh
-   cargo run
+   cargo run -p sena
    ```
 
 > ⚠️ Not for production use yet. Local builds are for contributors only.

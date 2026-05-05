@@ -1,20 +1,16 @@
+# ⚠️ DEPRECATED — This is the root/donor workspace (Rust 2021, legacy)
+# ✓ CANONICAL workspace is at: ./sena/Cargo.toml (Rust 2024, active development)
+#
+# Do NOT use this workspace for new development or builds.
+# All active crates and features live in ./sena/
+#
+# This workspace is retained for archival purposes only.
+# Legacy source files are archived under ./_legacy_crates/.
+# Historical consolidation notes live under ./sena/docs/_scratch/.
+
 [workspace]
 resolver = "2"
-members = [
-    "crates/bus",
-    "crates/crypto",
-    "crates/runtime",
-    "crates/platform",
-    "crates/ctp",
-    "crates/inference",
-    "crates/memory",
-    "crates/prompt",
-    "crates/soul",
-    "crates/speech",
-    "crates/stt-worker",
-    "crates/text",
-    "crates/cli",
-]
+members = []
 
 [workspace.package]
 version = "0.1.0"

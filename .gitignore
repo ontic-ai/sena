@@ -26,5 +26,27 @@ memories
 
 /target
 
-# Local scratch docs that are not part of project governance docs
-docs/_scratch/
+# ── IDE & Tooling ──────────────────────────────────────────
+.serena/
+.vscode/
+.github/copilot-instructions.md
+.github/agents/
+*.agent.md
+
+# ── Build Artifacts ────────────────────────────────────────
+target/
+_legacy_crates/
+
+# ── Runtime Data ───────────────────────────────────────────
+sena/data/
+*.redb
+
+# ── Model Files ────────────────────────────────────────────
+*.gguf
+*.onnx
+*.bin
+!sena/crates/**/testdata/**
+
+# ── Temporary ──────────────────────────────────────────────
+*.tmp
+*.bak
