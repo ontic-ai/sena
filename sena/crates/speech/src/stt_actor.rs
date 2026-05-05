@@ -188,11 +188,11 @@ impl SttActor {
                     return Ok(());
                 }
 
-                if self.audio_stream.is_none() {
-                    if let Err(e) = self.start_audio_capture() {
-                        warn!(error = %e, "listen mode requested but audio capture is unavailable");
-                        return Ok(());
-                    }
+                if self.audio_stream.is_none()
+                    && let Err(e) = self.start_audio_capture()
+                {
+                    warn!(error = %e, "listen mode requested but audio capture is unavailable");
+                    return Ok(());
                 }
 
                 info!("Listen mode requested");
@@ -519,6 +519,9 @@ impl SttActor {
                         &self.listen_mode_transcript,
                         &self.listen_mode_live_partial,
                     );
+                    // allowed: `Default` yields the sentinel `CausalId::none()`, but this path
+                    // needs a fresh causal chain when listen mode was started without one.
+                    #[allow(clippy::unwrap_or_default)]
                     let causal_id = self.listen_mode_causal_id.unwrap_or_else(CausalId::new);
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
                         text: transcript,

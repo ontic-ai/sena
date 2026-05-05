@@ -187,10 +187,10 @@ impl CtpActor {
                 bus::TransparencyQuery::CurrentObservation,
             )) => {
                 let bus_opt = self.bus.clone();
-                if let Some(bus) = bus_opt {
-                    if let Err(e) = self.handle_observation_query(&bus).await {
-                        warn!("CTP failed to handle observation query: {}", e);
-                    }
+                if let Some(bus) = bus_opt
+                    && let Err(e) = self.handle_observation_query(&bus).await
+                {
+                    warn!("CTP failed to handle observation query: {}", e);
                 }
             }
             Event::Platform(platform_event) => {

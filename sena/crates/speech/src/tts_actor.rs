@@ -416,10 +416,10 @@ impl TtsActor {
 
         // Flush audio buffer
         self.backend.flush_buffer();
-        if let Some(audio_output) = &self.audio_output {
-            if let Err(e) = audio_output.clear() {
-                warn!(error = %e, "failed to clear audio output buffer");
-            }
+        if let Some(audio_output) = &self.audio_output
+            && let Err(e) = audio_output.clear()
+        {
+            warn!(error = %e, "failed to clear audio output buffer");
         }
 
         // Cancel active tasks

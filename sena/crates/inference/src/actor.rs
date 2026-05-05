@@ -1143,12 +1143,11 @@ impl InferenceActor {
                                 let (fallback_used, fallback_total) = poll_system_vram_usage();
                                 used_mb = fallback_used;
                                 total_mb = fallback_total;
-                                percent = if fallback_total == 0 {
-                                    0
-                                } else {
-                                    ((fallback_used.saturating_mul(100)) / fallback_total)
-                                        .min(100) as u8
-                                };
+                                percent = fallback_used
+                                    .saturating_mul(100)
+                                    .checked_div(fallback_total)
+                                    .unwrap_or(0)
+                                    .min(100) as u8;
                             }
 
                             let normalized_percent = if total_mb == 0 { 0 } else { percent };
