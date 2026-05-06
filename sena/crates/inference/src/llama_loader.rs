@@ -94,20 +94,36 @@ impl InferenceBackend for LlamaBackendAdapter {
 pub fn preferred_llama_backend() -> infer::BackendType {
     #[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "vulkan"))]
     {
-        return infer::BackendType::Vulkan;
+        infer::BackendType::Vulkan
     }
 
-    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[cfg(all(
+        not(all(any(target_os = "windows", target_os = "linux"), feature = "vulkan")),
+        target_os = "macos",
+        feature = "metal"
+    ))]
     {
-        return infer::BackendType::Metal;
+        infer::BackendType::Metal
     }
 
-    #[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "cuda"))]
+    #[cfg(all(
+        not(all(any(target_os = "windows", target_os = "linux"), feature = "vulkan")),
+        not(all(target_os = "macos", feature = "metal")),
+        any(target_os = "windows", target_os = "linux"),
+        feature = "cuda"
+    ))]
     {
-        return infer::BackendType::Cuda;
+        infer::BackendType::Cuda
     }
 
-    infer::BackendType::auto_detect()
+    #[cfg(not(any(
+        all(any(target_os = "windows", target_os = "linux"), feature = "vulkan"),
+        all(target_os = "macos", feature = "metal"),
+        all(any(target_os = "windows", target_os = "linux"), feature = "cuda")
+    )))]
+    {
+        infer::BackendType::auto_detect()
+    }
 }
 
 pub fn build_loaded_llama_backend(

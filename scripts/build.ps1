@@ -23,8 +23,7 @@ function Write-Info {
 
 function Fail {
     param([string]$Message)
-    Write-Error "[build] $Message"
-    exit 1
+    throw "[build] $Message"
 }
 
 function Find-LatestVulkanSdk {
@@ -48,11 +47,47 @@ function Find-LatestVulkanSdk {
     return $null
 }
 
-function Test-NinjaInstalled {
-    if (Get-Command ninja -ErrorAction SilentlyContinue) {
-        return $true
+function Get-NinjaCandidatePaths {
+    $candidates = @(
+        "$env:VULKAN_SDK\Bin\ninja.exe",
+        'C:\Program Files\CMake\bin\ninja.exe',
+        'C:\Program Files (x86)\CMake\bin\ninja.exe',
+        'C:\Program Files\Ninja\ninja.exe',
+        'C:\Program Files (x86)\Ninja\ninja.exe',
+        'C:\ProgramData\chocolatey\bin\ninja.exe',
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ninja.exe",
+        'C:\msys64\usr\bin\ninja.exe'
+    )
+
+    $visualStudioPatterns = @(
+        'C:\Program Files\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe',
+        'C:\Program Files (x86)\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe'
+    )
+
+    foreach ($pattern in $visualStudioPatterns) {
+        $candidates += Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -ExpandProperty FullName
     }
-    return $false
+
+    return $candidates |
+        Where-Object { $_ } |
+        Select-Object -Unique
+}
+
+function Find-NinjaExecutable {
+    $command = Get-Command ninja -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    foreach ($candidate in Get-NinjaCandidatePaths) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
 }
 
 function Test-GlslcInstalled {
@@ -72,9 +107,18 @@ function Set-VulkanEnvironment {
     $env:VULKAN_SDK = $sdk
     $env:PATH = "$sdk\Bin;$env:PATH"
 
-    if (-not (Test-NinjaInstalled)) {
-        Fail 'Ninja is required for Vulkan builds but was not found on PATH.'
+    $ninjaPath = Find-NinjaExecutable
+    if (-not $ninjaPath) {
+        $searchedPaths = Get-NinjaCandidatePaths
+        Fail "Ninja is required for Vulkan builds but was not found. Searched PATH and common locations: $($searchedPaths -join '; ')"
     }
+
+    $ninjaDir = Split-Path -Parent $ninjaPath
+    $pathEntries = $env:PATH -split ';'
+    if ($pathEntries -notcontains $ninjaDir) {
+        $env:PATH = "$ninjaDir;$env:PATH"
+    }
+    Write-Info "Using Ninja: $ninjaPath"
 
     if (-not (Test-GlslcInstalled)) {
         Fail 'glslc was not found on PATH. Ensure %VULKAN_SDK%\Bin is available or install the Vulkan SDK properly.'
@@ -84,97 +128,124 @@ function Set-VulkanEnvironment {
     Write-Info 'Configured Vulkan build environment (Ninja + glslc).'
 }
 
-function Build-Workspace {
+function Invoke-WorkspaceBuild {
     param(
         [string]$FeatureArg
     )
 
-    $featureFlag = ''
+    $originalTargetDir = $env:CARGO_TARGET_DIR
+    $arguments = @('build', '--workspace')
     if ($FeatureArg) {
-        $featureFlag = "--features $FeatureArg"
+        $arguments += @('--features', $FeatureArg)
     }
 
-    $configFlag = ''
     if ($Configuration -eq 'release') {
-        $configFlag = '--release'
+        $arguments += '--release'
     }
 
-    $verboseFlag = ''
     if ($Verbose -or $FeatureArg -eq 'vulkan') {
-        $verboseFlag = '-v'
+        $arguments += '-v'
     }
 
-    $command = "cargo build --workspace $featureFlag $configFlag $verboseFlag --color always"
+    $arguments += @('--color', 'always')
+
+    $command = "cargo $($arguments -join ' ')"
+    $logPath = Join-Path $WorkspaceRoot 'build_log.txt'
+
+    if (Test-Path $logPath) {
+        Remove-Item $logPath -Force
+    }
+
+    $env:CARGO_TERM_PROGRESS_WHEN = 'never'
+    $env:CARGO_TERM_COLOR = 'always'
+
+    if ($FeatureArg -eq 'vulkan' -and -not $env:CARGO_TARGET_DIR) {
+        $shortTargetDir = Join-Path ([System.IO.Path]::GetPathRoot($WorkspaceRoot)) 'sena-target-vulkan'
+        $env:CARGO_TARGET_DIR = $shortTargetDir
+        Write-Info "Using short target dir for Vulkan build: $shortTargetDir"
+    }
+
     Write-Info "Running: $command"
+    Write-Info "Logging build output to: $logPath"
 
-    $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $processInfo.FileName = 'cargo'
-    $processInfo.Arguments = "build --workspace $featureFlag $configFlag $verboseFlag --color always"
-    $processInfo.WorkingDirectory = $WorkspaceRoot
-    $processInfo.RedirectStandardOutput = $true
-    $processInfo.RedirectStandardError = $true
-    $processInfo.UseShellExecute = $false
-    $processInfo.EnvironmentVariables['VULKAN_SDK'] = $env:VULKAN_SDK
-    $processInfo.EnvironmentVariables['CMAKE_GENERATOR'] = $env:CMAKE_GENERATOR
-        $processInfo.EnvironmentVariables['CARGO_TERM_PROGRESS_WHEN'] = 'never'
-    $processInfo.EnvironmentVariables['CARGO_TERM_COLOR'] = 'always'
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $processInfo
-    $process.Start() | Out-Null
-
-    while (-not $process.HasExited) {
-        $stdout = $process.StandardOutput.ReadLine()
-        if ($null -ne $stdout) { Write-Host $stdout }
+    Push-Location $WorkspaceRoot
+    try {
+        & cargo @arguments 2>&1 |
+            ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $_.ToString()
+                }
+                else {
+                    "$_"
+                }
+            } |
+            Tee-Object -FilePath $logPath
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+        if ($null -eq $originalTargetDir) {
+            Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CARGO_TARGET_DIR = $originalTargetDir
+        }
     }
 
-    $stderr = $process.StandardError.ReadToEnd()
-    if ($stderr) { Write-Host $stderr }
-
-    if ($process.ExitCode -ne 0) {
-        Fail "cargo build failed with exit code $($process.ExitCode)"
+    if ($exitCode -ne 0) {
+        Fail "cargo build failed with exit code $exitCode. See $logPath"
     }
 
     Write-Info 'Build completed successfully.'
 }
 
-# Main execution
-Write-Info "Workspace root: $WorkspaceRoot"
-Set-Location $WorkspaceRoot
+try {
+    Write-Info "Workspace root: $WorkspaceRoot"
+    Set-Location $WorkspaceRoot
 
-$chosenBackend = $Backend
-if ($Backend -eq 'auto') {
-    $vulkanExists = Find-LatestVulkanSdk
-    if ($vulkanExists) {
-        $chosenBackend = 'vulkan'
+    $chosenBackend = $Backend
+    if ($Backend -eq 'auto') {
+        $vulkanExists = Find-LatestVulkanSdk
+        if ($vulkanExists) {
+            $chosenBackend = 'vulkan'
+        }
+        else {
+            Write-Info 'No Vulkan SDK detected; defaulting to no backend features.'
+            $chosenBackend = 'none'
+        }
     }
-    else {
-        Write-Info 'No Vulkan SDK detected; defaulting to no backend features.'
-        $chosenBackend = 'none'
+
+    switch ($chosenBackend) {
+        'vulkan' {
+            Set-VulkanEnvironment
+            Invoke-WorkspaceBuild -FeatureArg 'vulkan'
+        }
+        'cuda' {
+            Invoke-WorkspaceBuild -FeatureArg 'cuda'
+        }
+        'metal' {
+            Invoke-WorkspaceBuild -FeatureArg 'metal'
+        }
+        'llama' {
+            Invoke-WorkspaceBuild -FeatureArg 'llama'
+        }
+        'mock' {
+            Invoke-WorkspaceBuild -FeatureArg ''
+        }
+        'none' {
+            Invoke-WorkspaceBuild -FeatureArg ''
+        }
+        default {
+            Fail "Unknown backend '$Backend'. Valid values are auto, vulkan, cuda, metal, llama, mock, none."
+        }
     }
 }
+catch {
+    $message = $_.Exception.Message
+    if (-not $message) {
+        $message = "$_"
+    }
 
-switch ($chosenBackend) {
-    'vulkan' {
-        Set-VulkanEnvironment
-        Build-Workspace -FeatureArg 'vulkan'
-    }
-    'cuda' {
-        Build-Workspace -FeatureArg 'cuda'
-    }
-    'metal' {
-        Build-Workspace -FeatureArg 'metal'
-    }
-    'llama' {
-        Build-Workspace -FeatureArg 'llama'
-    }
-    'mock' {
-        Build-Workspace -FeatureArg ''
-    }
-    'none' {
-        Build-Workspace -FeatureArg ''
-    }
-    default {
-        Fail "Unknown backend '$Backend'. Valid values are auto, vulkan, cuda, metal, llama, mock, none."
-    }
+    [Console]::Error.WriteLine($message)
+    exit 1
 }
