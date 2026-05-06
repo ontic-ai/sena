@@ -15,8 +15,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tracing::{error, info, warn};
 
-/// Default minimum confidence threshold for valid transcriptions.
-const DEFAULT_MIN_CONFIDENCE_THRESHOLD: f32 = 0.65;
+/// Placeholder energy-based VAD heuristics until Silero VAD is integrated.
 const DEFAULT_VAD_ENERGY_THRESHOLD: f32 = 0.02;
 const DEFAULT_VAD_SILENCE_DURATION_SECS: f32 = 0.5;
 
@@ -25,7 +24,6 @@ pub struct SttActor {
     backend: Box<dyn SttBackend>,
     bus: Option<Arc<EventBus>>,
     broadcast_rx: Option<broadcast::Receiver<Event>>,
-    min_confidence_threshold: f32,
     shutdown_requested: bool,
     listen_mode_active: bool,
     listen_mode_causal_id: Option<CausalId>,
@@ -54,7 +52,6 @@ impl SttActor {
             backend,
             bus: None,
             broadcast_rx: None,
-            min_confidence_threshold: DEFAULT_MIN_CONFIDENCE_THRESHOLD,
             shutdown_requested: false,
             listen_mode_active: false,
             listen_mode_causal_id: None,
@@ -75,12 +72,6 @@ impl SttActor {
             #[cfg(test)]
             test_audio_rx: None,
         }
-    }
-
-    /// Set minimum confidence threshold for transcriptions.
-    pub fn with_min_confidence(mut self, threshold: f32) -> Self {
-        self.min_confidence_threshold = threshold;
-        self
     }
 
     /// Set audio input configuration.
@@ -260,87 +251,7 @@ impl SttActor {
     /// Handle backend STT events.
     #[cfg(test)]
     async fn handle_stt_event(&mut self, event: SttEvent) -> Result<(), SpeechActorError> {
-        let bus = self
-            .bus
-            .as_ref()
-            .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
-
-        match event {
-            SttEvent::Word { text, confidence } => {
-                debug!(text = %text, confidence = %confidence, "Word recognized");
-            }
-            SttEvent::Completed { text, confidence } => {
-                debug!(text = %text, confidence = %confidence, "Transcription completed");
-                let causal_id = CausalId::new();
-
-                // Check confidence threshold
-                if confidence < self.min_confidence_threshold {
-                    if self.listen_mode_active {
-                        self.listen_mode_live_partial.clear();
-                    }
-                    warn!(
-                        confidence = %confidence,
-                        threshold = %self.min_confidence_threshold,
-                        "Low confidence transcription — not routing to inference"
-                    );
-                    bus.broadcast(Event::Speech(SpeechEvent::LowConfidenceTranscription {
-                        text,
-                        confidence,
-                        causal_id,
-                    }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-                } else if self.listen_mode_active {
-                    // In listen mode, emit listen mode transcription event
-                    bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
-                        text,
-                        causal_id: self.listen_mode_causal_id.unwrap_or(causal_id),
-                    }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-                } else {
-                    // Normal transcription
-                    bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
-                        text,
-                        confidence,
-                        causal_id,
-                    }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-                }
-            }
-            SttEvent::Listening => {
-                debug!("Backend listening");
-                let bus = self
-                    .bus
-                    .as_ref()
-                    .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
-                bus.broadcast(Event::Speech(SpeechEvent::SttListening))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-            }
-            SttEvent::Stopped => {
-                debug!("Backend stopped");
-                let bus = self
-                    .bus
-                    .as_ref()
-                    .ok_or_else(|| SpeechActorError::Bus("bus not initialized".to_string()))?;
-                bus.broadcast(Event::Speech(SpeechEvent::SttStopped))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-            }
-            SttEvent::Error { reason } => {
-                warn!(reason = %reason, "Backend reported error");
-                let causal_id = CausalId::new();
-                bus.broadcast(Event::Speech(SpeechEvent::TranscriptionFailed {
-                    reason,
-                    causal_id,
-                }))
-                .await
-                .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-            }
-        }
-        Ok(())
+        self.handle_stt_event_internal(event).await
     }
 }
 
@@ -539,23 +450,7 @@ impl SttActor {
                 #[cfg(test)]
                 debug!("Transcription completed (debug only)");
 
-                let causal_id = CausalId::new();
-
-                // Check confidence threshold
-                if confidence < self.min_confidence_threshold {
-                    warn!(
-                        confidence = %confidence,
-                        threshold = %self.min_confidence_threshold,
-                        "Low confidence transcription — not routing to inference"
-                    );
-                    bus.broadcast(Event::Speech(SpeechEvent::LowConfidenceTranscription {
-                        text,
-                        confidence,
-                        causal_id,
-                    }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-                } else if self.listen_mode_active {
+                let (inference_text, listen_mode_text) = if self.listen_mode_active {
                     let completed_utterance = if text.trim().is_empty() {
                         normalize_transcript_text(&self.listen_mode_live_partial)
                     } else {
@@ -566,20 +461,36 @@ impl SttActor {
                         &completed_utterance,
                     );
                     self.listen_mode_live_partial.clear();
-                    let transcript = self.listen_mode_transcript.clone();
-                    // In listen mode, emit listen mode transcription event
+                    (
+                        completed_utterance,
+                        Some(self.listen_mode_transcript.clone()),
+                    )
+                } else {
+                    (text, None)
+                };
+
+                bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
+                    text: inference_text.clone(),
+                    confidence: 1.0,
+                    causal_id: CausalId::new(),
+                }))
+                .await
+                .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
+                tracing::debug!(
+                    text = %inference_text,
+                    backend_confidence = confidence,
+                    "[STT] TranscriptionCompleted emitted"
+                );
+
+                if let Some(transcript) = listen_mode_text {
+                    // allowed: `Default` yields the sentinel `CausalId::none()`, but this path
+                    // needs a fresh causal chain when listen mode was started without one.
+                    #[allow(clippy::unwrap_or_default)]
+                    let listen_mode_causal_id =
+                        self.listen_mode_causal_id.unwrap_or_else(CausalId::new);
                     bus.broadcast(Event::Speech(SpeechEvent::ListenModeTranscription {
                         text: transcript,
-                        causal_id: self.listen_mode_causal_id.unwrap_or(causal_id),
-                    }))
-                    .await
-                    .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
-                } else {
-                    // Normal transcription
-                    bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
-                        text,
-                        confidence,
-                        causal_id,
+                        causal_id: listen_mode_causal_id,
                     }))
                     .await
                     .map_err(|e| SpeechActorError::Bus(e.to_string()))?;
@@ -888,20 +799,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stt_actor_emits_low_confidence_transcription() {
+    async fn stt_actor_routes_completed_transcriptions_without_confidence_filter() {
         let backend = Box::new(StubSttBackend::new(1024));
-        let mut actor = SttActor::new(backend).with_min_confidence(0.9);
+        let mut actor = SttActor::new(backend);
         let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
 
         actor
             .start(bus.clone())
             .await
             .expect("start should succeed");
 
-        // Simulate backend event with low confidence
         let event = SttEvent::Completed {
             text: "maybe".to_string(),
-            confidence: 0.6,
+            confidence: 0.1,
         };
 
         actor
@@ -909,30 +820,22 @@ mod tests {
             .await
             .expect("handle_stt_event should succeed");
 
-        // We can't easily verify the broadcast without a subscriber, but we verify no panic
-    }
+        for _ in 0..10 {
+            match rx.try_recv() {
+                Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
+                    text,
+                    confidence,
+                    ..
+                })) => {
+                    assert_eq!(text, "maybe");
+                    assert_eq!(confidence, 1.0);
+                    return;
+                }
+                _ => {}
+            }
+        }
 
-    #[tokio::test]
-    async fn stt_actor_emits_transcription_completed_for_high_confidence() {
-        let backend = Box::new(StubSttBackend::new(1024));
-        let mut actor = SttActor::new(backend).with_min_confidence(0.7);
-        let bus = Arc::new(EventBus::new());
-
-        actor
-            .start(bus.clone())
-            .await
-            .expect("start should succeed");
-
-        // Simulate backend event with high confidence
-        let event = SttEvent::Completed {
-            text: "hello world".to_string(),
-            confidence: 0.95,
-        };
-
-        actor
-            .handle_stt_event(event)
-            .await
-            .expect("handle_stt_event should succeed");
+        panic!("expected TranscriptionCompleted broadcast");
     }
 
     #[tokio::test]
@@ -975,15 +878,30 @@ mod tests {
             .expect("completion should succeed");
 
         let mut transcripts = Vec::new();
+        let mut saw_inference_event = false;
         for _ in 0..10 {
             if let Ok(event) =
                 tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
-                && let Ok(Event::Speech(SpeechEvent::ListenModeTranscription { text, .. })) = event
             {
-                transcripts.push(text);
-                if transcripts.len() == 3 {
-                    break;
+                match event {
+                    Ok(Event::Speech(SpeechEvent::ListenModeTranscription { text, .. })) => {
+                        transcripts.push(text);
+                    }
+                    Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
+                        text,
+                        confidence,
+                        ..
+                    })) => {
+                        assert_eq!(text, "hello world from sena");
+                        assert_eq!(confidence, 1.0);
+                        saw_inference_event = true;
+                    }
+                    _ => {}
                 }
+            }
+
+            if transcripts.len() == 3 && saw_inference_event {
+                break;
             }
         }
 
@@ -995,6 +913,69 @@ mod tests {
                 "hello world from sena".to_string(),
             ]
         );
+
+        assert!(
+            saw_inference_event,
+            "listen mode completion should also emit TranscriptionCompleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn listen_mode_completion_emits_both_routing_events() {
+        let backend = Box::new(StubSttBackend::new(1024));
+        let mut actor = SttActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        actor.listen_mode_active = true;
+        actor.listen_mode_causal_id = Some(CausalId::new());
+
+        actor
+            .handle_stt_event_internal(SttEvent::Completed {
+                text: "route this utterance".to_string(),
+                confidence: 0.42,
+            })
+            .await
+            .expect("completion should succeed");
+
+        let mut saw_transcription_completed = false;
+        let mut saw_listen_mode_transcription = false;
+
+        for _ in 0..10 {
+            if let Ok(event) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+                && let Ok(event) = event
+            {
+                match event {
+                    Event::Speech(SpeechEvent::TranscriptionCompleted {
+                        text,
+                        confidence,
+                        ..
+                    }) => {
+                        assert_eq!(text, "route this utterance");
+                        assert_eq!(confidence, 1.0);
+                        saw_transcription_completed = true;
+                    }
+                    Event::Speech(SpeechEvent::ListenModeTranscription { text, .. }) => {
+                        assert_eq!(text, "route this utterance");
+                        saw_listen_mode_transcription = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            if saw_transcription_completed && saw_listen_mode_transcription {
+                break;
+            }
+        }
+
+        assert!(saw_transcription_completed);
+        assert!(saw_listen_mode_transcription);
     }
 
     #[tokio::test]

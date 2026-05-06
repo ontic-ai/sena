@@ -19,6 +19,12 @@ pub struct SenaConfig {
     #[serde(default = "default_speech_enabled")]
     pub speech_enabled: bool,
 
+    /// Whether boot should request daemon listen mode after all actors are ready.
+    ///
+    /// Defaults to enabled so speech-first routing is active at boot.
+    #[serde(default = "default_always_listen")]
+    pub always_listen: bool,
+
     /// Whether wakeword detection is active.
     ///
     /// This remains disabled by default because the current placeholder
@@ -54,6 +60,7 @@ impl Default for SenaConfig {
             file_watch_paths: Vec::new(),
             clipboard_observation_enabled: default_clipboard_observation_enabled(),
             speech_enabled: default_speech_enabled(),
+            always_listen: default_always_listen(),
             wakeword_enabled: default_wakeword_enabled(),
             wakeword_sensitivity: default_wakeword_sensitivity(),
             inference_max_tokens: default_inference_max_tokens(),
@@ -69,6 +76,10 @@ fn default_clipboard_observation_enabled() -> bool {
 }
 
 fn default_speech_enabled() -> bool {
+    true
+}
+
+fn default_always_listen() -> bool {
     true
 }
 
@@ -211,6 +222,11 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
                 .parse::<bool>()
                 .map_err(|_| "expected true or false".to_string())?;
         }
+        "always_listen" => {
+            config.always_listen = value
+                .parse::<bool>()
+                .map_err(|_| "expected true or false".to_string())?;
+        }
         "wakeword_enabled" => {
             config.wakeword_enabled = value
                 .parse::<bool>()
@@ -247,7 +263,7 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
         }
         _ => {
             return Err(format!(
-                "unknown key '{}'. Supported keys: clipboard_observation_enabled, speech_enabled, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
+                "unknown key '{}'. Supported keys: clipboard_observation_enabled, speech_enabled, always_listen, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
                 key
             ));
         }
@@ -271,6 +287,7 @@ mod tests {
         assert!(config.file_watch_paths.is_empty());
         assert!(config.clipboard_observation_enabled);
         assert!(config.speech_enabled);
+        assert!(config.always_listen);
         assert!(!config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.5);
         assert_eq!(config.inference_max_tokens, 512);
@@ -299,6 +316,7 @@ mod tests {
         let custom_config = SenaConfig {
             clipboard_observation_enabled: false,
             speech_enabled: false,
+            always_listen: true,
             wakeword_enabled: true,
             wakeword_sensitivity: 0.75,
             inference_max_tokens: 1024,
@@ -326,6 +344,8 @@ mod tests {
             .expect("file_watch_paths should parse");
         apply_config_value(&mut config, "speech_enabled", "false")
             .expect("speech_enabled should parse");
+        apply_config_value(&mut config, "always_listen", "true")
+            .expect("always_listen should parse");
         apply_config_value(&mut config, "wakeword_enabled", "true")
             .expect("wakeword_enabled should parse");
         apply_config_value(&mut config, "wakeword_sensitivity", "0.7")
@@ -340,6 +360,7 @@ mod tests {
             vec![PathBuf::from("C:/one"), PathBuf::from("C:/two")]
         );
         assert!(!config.speech_enabled);
+        assert!(config.always_listen);
         assert!(config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.7);
         assert_eq!(config.inference_max_tokens, 768);
