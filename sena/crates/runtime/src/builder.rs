@@ -190,10 +190,11 @@ pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeErr
     Ok(actor)
 }
 
-/// Build the TTS actor with real or stub backend.
+/// Build the TTS actor with a real Piper backend.
 ///
-/// Attempts to construct a Piper backend if all required assets are present.
-/// Falls back to stub backend if assets are missing or initialization fails.
+/// Piper assets are required for runtime speech output. Missing assets or
+/// backend initialization failures return an error instead of silently
+/// degrading to silent stub playback.
 ///
 /// # Arguments
 /// * `models_dir` - Path to the speech models directory
@@ -214,25 +215,22 @@ pub fn build_tts_actor(models_dir: &Path) -> Result<speech::TtsActor, RuntimeErr
                 return Ok(actor);
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "PiperTtsBackend initialization failed — falling back to stub"
-                );
+                return Err(RuntimeError::ModelLoadFailed(format!(
+                    "PiperTtsBackend initialization failed: {}",
+                    e
+                )));
             }
         }
-    } else {
-        tracing::debug!(
-            "Piper assets not available (model: {}, config: {}) — using stub backend",
-            model_path.exists(),
-            config_path.exists()
-        );
     }
 
-    // Fall back to stub backend
-    tracing::info!("TTS actor: using StubTtsBackend");
-    let backend = Box::new(speech::StubTtsBackend::new(16000));
-    let actor = speech::TtsActor::new(backend);
-    Ok(actor)
+    Err(RuntimeError::RequiredModelMissing {
+        model_name: "piper tts assets".to_string(),
+        reason: format!(
+            "required Piper assets missing (model: {}, config: {})",
+            model_path.exists(),
+            config_path.exists()
+        ),
+    })
 }
 
 /// Build the wakeword actor when a wakeword model is available.
@@ -313,10 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn tts_actor_builds_with_stub_backend_when_assets_missing() {
+    fn tts_actor_fails_when_assets_missing() {
         let models_dir = tempdir().expect("failed to create tempdir");
         let result = build_tts_actor(models_dir.path());
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(RuntimeError::RequiredModelMissing { .. })));
     }
 
     #[test]

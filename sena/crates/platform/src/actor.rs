@@ -141,7 +141,7 @@ impl PlatformActor {
 
         // Track last-seen window to deduplicate bus broadcasts.
         let mut last_app: Option<String> = None;
-        let mut last_clipboard_count: Option<usize> = None;
+        let mut last_clipboard_signature: Option<(Option<String>, usize)> = None;
 
         // Loop enabled states (controlled by IPC)
         let mut platform_polling_enabled = true;
@@ -234,10 +234,11 @@ impl PlatformActor {
                     }
                     match self.backend.clipboard_content() {
                         Ok(PlatformSignal::Clipboard(digest)) => {
-                            let changed = last_clipboard_count != Some(digest.char_count);
+                            let signature = (digest.digest.clone(), digest.char_count);
+                            let changed = last_clipboard_signature.as_ref() != Some(&signature);
                             if changed {
                                 debug!(chars = digest.char_count, "PlatformActor: clipboard changed");
-                                last_clipboard_count = Some(digest.char_count);
+                                last_clipboard_signature = Some(signature);
                                 let _ = self.clipboard_tx.send(digest.clone());
                                 let _ = bus.broadcast(
                                     Event::Platform(PlatformEvent::ClipboardChanged(digest))

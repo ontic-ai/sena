@@ -4,7 +4,7 @@ use crate::analytics::TokenTuner;
 use crate::boot::BootResult;
 use crate::error::RuntimeError;
 use crate::health::ActorRegistry;
-use bus::{Event, InferenceEvent, SystemEvent};
+use bus::{CausalId, Event, InferenceEvent, SpeechEvent, SystemEvent};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -63,6 +63,16 @@ pub async fn supervision_loop(mut boot_result: BootResult) -> Result<(), Runtime
         .bus
         .broadcast(Event::System(SystemEvent::BootComplete))
         .await;
+
+    if boot_result.config.always_listen {
+        info!("SUPERVISOR: always_listen enabled, requesting listen mode");
+        let _ = boot_result
+            .bus
+            .broadcast(Event::Speech(SpeechEvent::ListenModeRequested {
+                causal_id: CausalId::new(),
+            }))
+            .await;
+    }
 
     let boot_elapsed = start_time.elapsed();
     info!(

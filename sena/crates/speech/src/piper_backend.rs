@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Piper model configuration (from .onnx.json file).
 #[derive(Debug, Deserialize)]
@@ -58,6 +59,7 @@ pub struct PiperTtsBackend {
     eos_id: i64,
     speaking_rate: f32,
     pitch_scale: f32,
+    last_interrupt: Option<Instant>,
 }
 
 impl PiperTtsBackend {
@@ -133,6 +135,7 @@ impl PiperTtsBackend {
             eos_id,
             speaking_rate: 1.0,
             pitch_scale: 1.0,
+            last_interrupt: None,
         })
     }
 
@@ -189,6 +192,8 @@ impl PiperTtsBackend {
 
 impl TtsBackend for PiperTtsBackend {
     fn synthesize(&mut self, text: &str) -> Result<AudioStream, TtsError> {
+        let synth_started_at = Instant::now();
+
         // Validate input
         if text.is_empty() {
             return Err(TtsError::InvalidInput(
@@ -250,6 +255,15 @@ impl TtsBackend for PiperTtsBackend {
             .run(&input_values[..])
             .map_err(|e| TtsError::SynthesisFailed(format!("ONNX inference failed: {}", e)))?;
 
+        if self
+            .last_interrupt
+            .is_some_and(|interrupted_at| interrupted_at >= synth_started_at)
+        {
+            return Err(TtsError::BackendError(
+                "synthesis cancelled before audio could be delivered".to_string(),
+            ));
+        }
+
         // Extract audio samples from output tensor
         let audio_tensor = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
             TtsError::SynthesisFailed(format!("failed to extract audio tensor: {}", e))
@@ -265,13 +279,11 @@ impl TtsBackend for PiperTtsBackend {
     }
 
     fn cancel(&mut self) {
-        // Cancel any ongoing synthesis
-        // For synchronous synthesis, this is a no-op
+        self.last_interrupt = Some(Instant::now());
     }
 
     fn flush_buffer(&mut self) {
-        // Flush any pending audio output
-        // For synchronous synthesis, this is a no-op
+        self.last_interrupt = Some(Instant::now());
     }
 
     fn backend_name(&self) -> &'static str {

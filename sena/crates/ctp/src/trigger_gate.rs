@@ -88,7 +88,7 @@ fn context_diff_score(previous: &ContextSnapshot, current: &ContextSnapshot) -> 
     }
 
     if previous.clipboard_digest != current.clipboard_digest {
-        score += 0.10;
+        score += 0.55;
     }
 
     let file_delta = previous
@@ -96,17 +96,20 @@ fn context_diff_score(previous: &ContextSnapshot, current: &ContextSnapshot) -> 
         .len()
         .abs_diff(current.recent_files.len());
     if file_delta >= 2 {
-        score += 0.10;
-    }
-
-    if current.keystroke_cadence.burst_detected
-        && current.keystroke_cadence.idle_duration >= Duration::from_secs(45)
-    {
         score += 0.20;
     }
 
-    if current.keystroke_cadence.events_per_minute >= 180.0 {
-        score += 0.10;
+    if current.keystroke_cadence.burst_detected
+        && !previous.keystroke_cadence.burst_detected
+        && current.keystroke_cadence.idle_duration >= Duration::from_secs(45)
+    {
+        score += 0.55;
+    }
+
+    if current.keystroke_cadence.events_per_minute >= 180.0
+        && previous.keystroke_cadence.events_per_minute < 180.0
+    {
+        score += 0.20;
     }
 
     score.min(1.0)
@@ -207,6 +210,17 @@ mod tests {
         second.keystroke_cadence.burst_detected = true;
         second.keystroke_cadence.idle_duration = Duration::from_secs(45);
         second.keystroke_cadence.events_per_minute = 180.0;
+
+        assert!(!gate.should_trigger(&first));
+        assert!(gate.should_trigger(&second));
+    }
+
+    #[test]
+    fn clipboard_change_can_trigger_without_waiting_interval() {
+        let mut gate = TriggerGate::new(Duration::from_secs(9999));
+        let first = snapshot("Code");
+        let mut second = snapshot("Code");
+        second.clipboard_digest = Some("digest-2".to_string());
 
         assert!(!gate.should_trigger(&first));
         assert!(gate.should_trigger(&second));
