@@ -23,8 +23,6 @@ pub enum ModelType {
     PiperConfig,
     /// OpenWakeWord model for wakeword detection.
     OpenWakeWord,
-    /// Nomic embedding model for memory vector store.
-    NomicEmbed,
 }
 
 /// Speech model information.
@@ -140,22 +138,7 @@ impl ModelManifest {
         }
     }
 
-    /// Returns the Nomic embed-text v1.5 GGUF model for vector embeddings.
-    ///
-    /// Required for memory subsystem operation. Boot will fail if this model
-    /// is missing and cannot be downloaded.
-    pub fn nomic_embed_text() -> ModelInfo {
-        ModelInfo {
-            name: "nomic-embed-text-v1.5-Q8_0".to_string(),
-            filename: "nomic-embed-text-v1.5.Q8_0.gguf".to_string(),
-            url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf".to_string(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 274_000_000, // ~274MB
-            model_type: ModelType::NomicEmbed,
-        }
-    }
-
-    /// Returns all speech models (does not include required embedding model).
+    /// Returns all speech models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
             Self::whisper_base_en(),
@@ -166,13 +149,6 @@ impl ModelManifest {
             Self::piper_config(),
             Self::open_wakeword(),
         ]
-    }
-
-    /// Returns the required embedding model.
-    ///
-    /// This model is a boot dependency and must be present for Sena to run.
-    pub fn required_embed_model() -> ModelInfo {
-        Self::nomic_embed_text()
     }
 }
 
@@ -301,13 +277,5 @@ mod tests {
         let cached = ModelCache::list_cached(temp_dir.path()).await;
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].filename, whisper.filename);
-    }
-
-    #[test]
-    fn required_embed_model_is_nomic_embed() {
-        let embed_model = ModelManifest::required_embed_model();
-        assert_eq!(embed_model.model_type, ModelType::NomicEmbed);
-        assert_eq!(embed_model.filename, "nomic-embed-text-v1.5.Q8_0.gguf");
-        assert!(embed_model.size_bytes > 0);
     }
 }

@@ -15,6 +15,7 @@ pub mod embedder;
 pub mod encrypted_store;
 pub mod error;
 pub mod extractor;
+pub mod models;
 pub mod types;
 pub mod working_memory;
 
@@ -24,5 +25,6 @@ pub use echo0_backend::{Echo0Backend, PersistentMemoryStore};
 pub use embedder::{EMBEDDING_DIMENSIONS, SenaEmbedder};
 pub use error::MemoryError;
 pub use extractor::SenaExtractor;
+pub use models::{ModelCache, ModelInfo, ModelManifest, ModelType};
 pub use types::{MemoryKind, ScoredChunk};
 pub use working_memory::{WorkingMemory, WorkingMemoryChunk};

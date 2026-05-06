@@ -1,13 +1,14 @@
 //! Boot sequence implementation.
 
 use crate::builder;
-use crate::download_manager::{DownloadClient, ModelCache};
+use crate::download_manager::{DownloadClient, ManagedModel, ModelCache};
 use crate::error::RuntimeError;
 use crate::single_instance::InstanceGuard;
 use bus::{Actor, Event, EventBus, SystemEvent};
 use crypto::EncryptionLayer;
+use memory::ModelManifest as MemoryModelManifest;
 use sha2::Digest;
-use speech::{ModelInfo, ModelManifest};
+use speech::ModelManifest as SpeechModelManifest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -281,17 +282,17 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
     info!("Speech models directory: {}", models_dir.display());
 
     // Get all available speech models
-    let all_models = ModelManifest::all_models();
+    let all_models = SpeechModelManifest::all_models();
 
     for model in all_models {
         match verify_model(&models_dir, &model, bus.clone()).await {
             Ok(()) => {
-                info!("Model verified: {}", model.name);
+                info!("Model verified: {}", model.name());
             }
             Err(e) => {
                 warn!(
                     "Model verification/repair failed for {}: {}. Speech backend may use stub.",
-                    model.name, e
+                    model.name(), e
                 );
                 // Continue anyway â€” builder will fall back to stubs
             }
@@ -323,11 +324,11 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
     info!("Embed models directory: {}", embed_models_dir.display());
 
     // Get the required embed model
-    let embed_model = ModelManifest::required_embed_model();
+    let embed_model = MemoryModelManifest::required_embed_model();
     info!(
         "Verifying required embed model: {} ({:.2} MB)",
-        embed_model.name,
-        embed_model.size_bytes as f64 / 1_000_000.0
+        embed_model.name(),
+        embed_model.size_bytes() as f64 / 1_000_000.0
     );
 
     // Verify or download the model â€” STRICT: fail boot on error
@@ -335,7 +336,7 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
         Ok(()) => {
             info!(
                 "Required embed model verified: {} at {}",
-                embed_model.name,
+                embed_model.name(),
                 ModelCache::cached_path(&embed_models_dir, &embed_model).display()
             );
             Ok(())
@@ -343,7 +344,7 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
         Err(e) => {
             // FAIL BOOT â€” embed model is a hard requirement
             Err(RuntimeError::RequiredModelMissing {
-                model_name: embed_model.name.clone(),
+                model_name: embed_model.name().to_string(),
                 reason: format!("verification/download failed: {}", e),
             })
         }
@@ -356,36 +357,36 @@ async fn verify_required_embed_model(bus: Arc<EventBus>) -> Result<(), RuntimeEr
 /// Returns Err if download fails or checksum is invalid after download.
 async fn verify_model(
     models_dir: &Path,
-    model: &ModelInfo,
+    model: &impl ManagedModel,
     bus: Arc<EventBus>,
 ) -> Result<(), RuntimeError> {
     let cached_path = ModelCache::cached_path(models_dir, model);
 
     // Check if model exists
     if !cached_path.exists() {
-        info!("Model {} not found â€” downloading", model.name);
+        info!("Model {} not found â€” downloading", model.name());
         return download_model(models_dir, model, bus).await;
     }
 
-    // Model exists â€” verify checksum (skip if placeholder checksum)
-    if model.sha256.chars().all(|c| c == '0') {
+    // Model exists â€” verify checksum unless a placeholder or test override skips it.
+    if should_skip_checksum(model.sha256()) {
         info!(
-            "Model {} found (checksum verification skipped â€” placeholder checksum)",
-            model.name
+            "Model {} found (checksum verification skipped)",
+            model.name()
         );
         return Ok(());
     }
 
     // Verify checksum
-    let checksum_valid = verify_checksum(&cached_path, &model.sha256).await?;
+    let checksum_valid = verify_checksum(&cached_path, model.sha256()).await?;
 
     if checksum_valid {
-        info!("Model {} verified (checksum valid)", model.name);
+        info!("Model {} verified (checksum valid)", model.name());
         Ok(())
     } else {
         warn!(
             "Model {} has invalid checksum â€” re-downloading",
-            model.name
+            model.name()
         );
         // Remove corrupt file and re-download
         let _ = fs::remove_file(&cached_path).await;
@@ -396,14 +397,14 @@ async fn verify_model(
 /// Download a model using the DownloadManager.
 async fn download_model(
     models_dir: &Path,
-    model: &ModelInfo,
+    model: &impl ManagedModel,
     bus: Arc<EventBus>,
 ) -> Result<(), RuntimeError> {
     let client = DownloadClient::new()
         .map_err(|e| RuntimeError::ModelVerificationFailed(format!("download client: {}", e)))?;
 
     // Use model name hash as request_id for uniqueness
-    let request_id = hash_string(&model.name);
+    let request_id = hash_string(model.name());
 
     match client
         .download_model(&bus, models_dir, model, request_id)
@@ -412,14 +413,14 @@ async fn download_model(
         Ok(path) => {
             info!(
                 "Model {} downloaded successfully to {}",
-                model.name,
+                model.name(),
                 path.display()
             );
             Ok(())
         }
         Err(e) => Err(RuntimeError::ModelVerificationFailed(format!(
             "download failed for {}: {}",
-            model.name, e
+            model.name(), e
         ))),
     }
 }
@@ -442,6 +443,21 @@ async fn verify_checksum(path: &Path, expected: &str) -> Result<bool, RuntimeErr
     let actual = hex::encode(hasher.finalize());
 
     Ok(actual.eq_ignore_ascii_case(expected))
+}
+
+fn should_skip_checksum(expected: &str) -> bool {
+    if expected.chars().all(|c| c == '0') {
+        return true;
+    }
+
+    #[cfg(test)]
+    {
+        if std::env::var_os("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS").is_some() {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Simple hash function for generating request IDs from model names.
@@ -1014,6 +1030,8 @@ fn spawn_wakeword_actor(
 mod tests {
     use super::*;
     use crate::test_support::{TestEnvGuard, env_test_lock};
+    use memory::ModelManifest as MemoryModelManifest;
+    use speech::ModelManifest as SpeechModelManifest;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1028,9 +1046,13 @@ mod tests {
         let _env_lock = env_test_lock();
         let temp_dir = tempdir().expect("create tempdir");
         let _env = TestEnvGuard::set(temp_dir.path());
+        let previous_skip = std::env::var_os("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS");
+        unsafe {
+            std::env::set_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS", "1");
+        }
 
         // Create embed models directory and stub embed model file
-        let embed_model = ModelManifest::required_embed_model();
+        let embed_model = MemoryModelManifest::required_embed_model();
 
         #[cfg(target_os = "windows")]
         let embed_models_dir = temp_dir.path().join("sena").join("models").join("embed");
@@ -1062,6 +1084,15 @@ mod tests {
             .expect("write stub embed model");
 
         let result = boot().await;
+        if let Some(previous) = previous_skip {
+            unsafe {
+                std::env::set_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS");
+            }
+        }
         assert!(result.is_ok());
 
         let boot_result = result.expect("boot should complete successfully with stub embed model");
@@ -1144,7 +1175,7 @@ mod tests {
         let temp_dir = tempdir().expect("create tempdir");
         let bus = Arc::new(EventBus::new());
 
-        let model = ModelManifest::whisper_base_en();
+        let model = SpeechModelManifest::whisper_base_en();
         let model_path = ModelCache::cached_path(temp_dir.path(), &model);
 
         // Create stub model file

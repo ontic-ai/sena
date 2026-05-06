@@ -6,20 +6,74 @@
 //!
 //! ## Design
 //!
-//! - Uses speech crate's ModelManifest for speech model metadata (no duplication).
+//! - Uses speech and memory manifests for model metadata (no duplication).
 //! - Emits DownloadEvent lifecycle events on the bus.
 //! - Temp-file-then-rename for atomic writes.
 //! - SHA-256 checksum verification after download.
-//! - No hardcoded model metadata in runtime — delegates to speech crate.
+//! - No hardcoded model metadata in runtime — delegates to subsystem crates.
 
 use bus::{DownloadEvent, Event, EventBus};
 use futures_util::StreamExt;
+use memory::ModelInfo as MemoryModelInfo;
 use sha2::{Digest, Sha256};
-use speech::ModelInfo;
+use speech::ModelInfo as SpeechModelInfo;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+
+/// Shared metadata contract for models managed by the runtime download manager.
+pub trait ManagedModel {
+    fn name(&self) -> &str;
+    fn filename(&self) -> &str;
+    fn url(&self) -> &str;
+    fn sha256(&self) -> &str;
+    fn size_bytes(&self) -> u64;
+}
+
+impl ManagedModel for SpeechModelInfo {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+
+impl ManagedModel for MemoryModelInfo {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
 
 /// Download error types.
 #[derive(Debug, thiserror::Error)]
@@ -37,8 +91,8 @@ pub struct ModelCache;
 
 impl ModelCache {
     /// Returns the expected filesystem path for a cached model.
-    pub fn cached_path(model_dir: &Path, model: &ModelInfo) -> PathBuf {
-        model_dir.join(&model.filename)
+    pub fn cached_path<M: ManagedModel>(model_dir: &Path, model: &M) -> PathBuf {
+        model_dir.join(model.filename())
     }
 
     /// Verifies SHA-256 checksum of a file.
@@ -83,7 +137,7 @@ impl DownloadClient {
         &self,
         bus: &Arc<EventBus>,
         model_dir: &Path,
-        model: &ModelInfo,
+        model: &impl ManagedModel,
         request_id: u64,
     ) -> Result<PathBuf, DownloadError> {
         fs::create_dir_all(model_dir)
@@ -95,8 +149,8 @@ impl DownloadClient {
 
         tracing::info!(
             "download_manager: downloading {} from {} → {}",
-            model.name,
-            model.url,
+            model.name(),
+            model.url(),
             path.display()
         );
 
@@ -108,15 +162,15 @@ impl DownloadClient {
         // Emit download started
         let _ = bus
             .broadcast(Event::Download(DownloadEvent::Started {
-                model_name: model.name.clone(),
-                total_bytes: model.size_bytes,
+                model_name: model.name().to_string(),
+                total_bytes: model.size_bytes(),
                 request_id,
             }))
             .await;
 
         let response = self
             .client
-            .get(&model.url)
+            .get(model.url())
             .send()
             .await
             .map_err(|e| DownloadError::DownloadFailed(format!("request failed: {}", e)))?;
@@ -126,7 +180,7 @@ impl DownloadClient {
             let err = format!("HTTP {}", status);
             let _ = bus
                 .broadcast(Event::Download(DownloadEvent::Failed {
-                    model_name: model.name.clone(),
+                    model_name: model.name().to_string(),
                     reason: err.clone(),
                     request_id,
                 }))
@@ -153,15 +207,15 @@ impl DownloadClient {
             // Emit progress every ~5%
             let pct = bytes_downloaded
                 .checked_mul(100)
-                .and_then(|value| value.checked_div(model.size_bytes))
+                .and_then(|value| value.checked_div(model.size_bytes()))
                 .unwrap_or(0);
             if pct >= last_reported_pct + 5 {
                 last_reported_pct = pct;
                 let _ = bus
                     .broadcast(Event::Download(DownloadEvent::Progress {
-                        model_name: model.name.clone(),
+                        model_name: model.name().to_string(),
                         bytes_downloaded,
-                        total_bytes: model.size_bytes,
+                        total_bytes: model.size_bytes(),
                         request_id,
                     }))
                     .await;
@@ -174,13 +228,13 @@ impl DownloadClient {
         drop(file);
 
         // Checksum verification
-        let ok = ModelCache::verify_checksum(&temp_path, &model.sha256).await?;
+        let ok = ModelCache::verify_checksum(&temp_path, model.sha256()).await?;
         if !ok {
             let _ = fs::remove_file(&temp_path).await;
             let err = "SHA-256 checksum mismatch after download".to_string();
             let _ = bus
                 .broadcast(Event::Download(DownloadEvent::Failed {
-                    model_name: model.name.clone(),
+                    model_name: model.name().to_string(),
                     reason: err.clone(),
                     request_id,
                 }))
@@ -195,13 +249,13 @@ impl DownloadClient {
 
         tracing::info!(
             "download_manager: {} downloaded and verified at {}",
-            model.name,
+            model.name(),
             path.display()
         );
 
         let _ = bus
             .broadcast(Event::Download(DownloadEvent::Completed {
-                model_name: model.name.clone(),
+                model_name: model.name().to_string(),
                 cached_path: path.to_string_lossy().into_owned(),
                 request_id,
             }))

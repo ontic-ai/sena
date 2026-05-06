@@ -196,7 +196,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::test_support::{TestEnvGuard, env_test_lock};
-    use speech::{ModelCache, ModelManifest};
+    use memory::ModelManifest as MemoryModelManifest;
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -212,9 +212,13 @@ mod tests {
         let _env_lock = env_test_lock();
         let temp_dir = tempdir().expect("create tempdir");
         let _env = TestEnvGuard::set(temp_dir.path());
+        let previous_skip = std::env::var_os("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS");
+        unsafe {
+            std::env::set_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS", "1");
+        }
 
         // Create embed models directory and stub embed model file
-        let embed_model = ModelManifest::required_embed_model();
+        let embed_model = MemoryModelManifest::required_embed_model();
 
         #[cfg(target_os = "windows")]
         let embed_models_dir = temp_dir.path().join("sena").join("models").join("embed");
@@ -246,6 +250,15 @@ mod tests {
             .expect("write stub embed model");
 
         let result = boot::boot().await;
+        if let Some(previous) = previous_skip {
+            unsafe {
+                std::env::set_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SENA_SKIP_MODEL_CHECKSUM_FOR_TESTS");
+            }
+        }
         assert!(result.is_ok());
 
         let boot_result = result.unwrap();
