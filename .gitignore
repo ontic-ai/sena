@@ -32,6 +32,7 @@ memories
 .github/copilot-instructions.md
 .github/agents/
 *.agent.md
+docs/_scratch/
 
 # ── Build Artifacts ────────────────────────────────────────
 target/
