@@ -4,7 +4,7 @@ use crate::error::RuntimeError;
 #[cfg(test)]
 use inference::MockBackend;
 use platform::PlatformError;
-use speech::{ModelCache, ModelManifest};
+use speech::{AudioInputConfig, ModelCache, ModelManifest};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -105,16 +105,49 @@ pub fn build_memory_actor(
 /// Build the inference actor with a real backend.
 ///
 /// Normal runtime boot is strict: a usable GGUF model must load successfully.
+/// When `embed_model_path` is `Some`, a dedicated embedding backend is also
+/// loaded and injected into the actor.
 pub fn build_inference_actor(
     inference_max_tokens: usize,
     embed_rx: tokio::sync::mpsc::Receiver<inference::EmbedRequest>,
+    embed_model_path: Option<std::path::PathBuf>,
 ) -> Result<inference::InferenceActor, RuntimeError> {
     let backend = load_inference_backend()?;
     tracing::info!("inference actor: using loaded LlamaBackend");
-    Ok(
-        inference::InferenceActor::with_embed_requests(backend, 100, embed_rx)
-            .with_inference_max_tokens(inference_max_tokens),
-    )
+
+    let actor = inference::InferenceActor::with_embed_requests(backend, 100, embed_rx)
+        .with_inference_max_tokens(inference_max_tokens);
+
+    if let Some(path) = embed_model_path {
+        match load_embed_backend(&path) {
+            Ok(embed_backend) => {
+                tracing::info!(path = %path.display(), "inference actor: embed backend loaded");
+                Ok(actor.with_embed_backend(embed_backend))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "inference actor: embed backend failed to load, embeddings will fail");
+                Ok(actor)
+            }
+        }
+    } else {
+        Ok(actor)
+    }
+}
+
+#[cfg(not(test))]
+fn load_embed_backend(
+    path: &std::path::Path,
+) -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    inference::build_loaded_embed_backend(path)
+        .map_err(|e| RuntimeError::ModelLoadFailed(e.to_string()))
+}
+
+#[cfg(test)]
+fn load_embed_backend(
+    _path: &std::path::Path,
+) -> Result<Box<dyn inference::InferenceBackend>, RuntimeError> {
+    tracing::info!("inference actor: using MockBackend for embed in tests");
+    Ok(Box::new(inference::MockBackend::default_loaded()))
 }
 
 #[cfg(not(test))]
@@ -150,9 +183,16 @@ pub fn build_ctp_actor() -> Result<
 ///
 /// # Arguments
 /// * `models_dir` - Path to the speech models directory
+/// * `config` - Runtime configuration containing STT device and VAD settings
 ///
 /// Returns an SttActor with the best available backend.
-pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeError> {
+pub fn build_stt_actor(
+    models_dir: &Path,
+    config: &crate::config::SenaConfig,
+) -> Result<speech::SttActor, RuntimeError> {
+    let stt_audio_config = stt_audio_config(config);
+    let (stt_energy_threshold, stt_silence_duration_secs) = stt_vad_settings(config);
+
     // Check if Parakeet assets are available
     let encoder_path = ModelCache::cached_path(models_dir, &ModelManifest::parakeet_encoder());
     let decoder_path = ModelCache::cached_path(models_dir, &ModelManifest::parakeet_decoder());
@@ -164,7 +204,9 @@ pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeErr
         match speech::ParakeetSttBackend::new(encoder_path, decoder_path, tokenizer_path) {
             Ok(backend) => {
                 tracing::info!("STT actor: using ParakeetSttBackend");
-                let actor = speech::SttActor::new(Box::new(backend));
+                let actor = speech::SttActor::new(Box::new(backend))
+                    .with_audio_config(stt_audio_config.clone())
+                    .with_vad_config(stt_energy_threshold, stt_silence_duration_secs);
                 return Ok(actor);
             }
             Err(e) => {
@@ -186,8 +228,25 @@ pub fn build_stt_actor(models_dir: &Path) -> Result<speech::SttActor, RuntimeErr
     // Fall back to stub backend
     tracing::info!("STT actor: using StubSttBackend");
     let backend = Box::new(speech::StubSttBackend::new(1600));
-    let actor = speech::SttActor::new(backend);
+    let actor = speech::SttActor::new(backend)
+        .with_audio_config(stt_audio_config)
+        .with_vad_config(stt_energy_threshold, stt_silence_duration_secs);
     Ok(actor)
+}
+
+fn stt_audio_config(config: &crate::config::SenaConfig) -> AudioInputConfig {
+    AudioInputConfig {
+        sample_rate: config.stt_sample_rate_hz,
+        buffer_duration_secs: config.stt_buffer_duration_secs,
+        input_device: config.microphone_device.clone(),
+    }
+}
+
+fn stt_vad_settings(config: &crate::config::SenaConfig) -> (f32, f32) {
+    (
+        config.stt_energy_threshold,
+        config.stt_silence_duration_secs,
+    )
 }
 
 /// Build the TTS actor with a real Piper backend.
@@ -293,7 +352,7 @@ mod tests {
     #[test]
     fn inference_actor_builds() {
         let (_embed_tx, embed_rx) = tokio::sync::mpsc::channel(1);
-        let result = build_inference_actor(512, embed_rx);
+        let result = build_inference_actor(512, embed_rx, None);
         assert!(result.is_ok());
     }
 
@@ -306,8 +365,30 @@ mod tests {
     #[test]
     fn stt_actor_builds_with_stub_backend_when_assets_missing() {
         let models_dir = tempdir().expect("failed to create tempdir");
-        let result = build_stt_actor(models_dir.path());
+        let config = crate::config::SenaConfig::default();
+        let result = build_stt_actor(models_dir.path(), &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn stt_audio_config_uses_runtime_settings() {
+        let config = crate::config::SenaConfig {
+            microphone_device: Some("USB Mic".to_string()),
+            stt_sample_rate_hz: 22_050,
+            stt_buffer_duration_secs: 0.2,
+            stt_energy_threshold: 0.03,
+            stt_silence_duration_secs: 0.8,
+            ..Default::default()
+        };
+
+        let audio_config = stt_audio_config(&config);
+        let (energy_threshold, silence_duration_secs) = stt_vad_settings(&config);
+
+        assert_eq!(audio_config.sample_rate, 22_050);
+        assert_eq!(audio_config.buffer_duration_secs, 0.2);
+        assert_eq!(audio_config.input_device.as_deref(), Some("USB Mic"));
+        assert_eq!(energy_threshold, 0.03);
+        assert_eq!(silence_duration_secs, 0.8);
     }
 
     #[test]

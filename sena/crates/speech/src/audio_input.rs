@@ -27,6 +27,8 @@ pub struct AudioInputConfig {
     pub sample_rate: u32,
     /// Buffer duration in seconds before emitting a chunk.
     pub buffer_duration_secs: f32,
+    /// Preferred input device name. When unset, the system default is used.
+    pub input_device: Option<String>,
 }
 
 impl Default for AudioInputConfig {
@@ -35,6 +37,7 @@ impl Default for AudioInputConfig {
             sample_rate: 16_000,
             // 100ms chunks keep streaming responsive while remaining stable on CPU.
             buffer_duration_secs: 0.1,
+            input_device: None,
         }
     }
 }
@@ -118,12 +121,10 @@ fn run_capture_loop(
     ready_tx: std::sync::mpsc::Sender<Result<(), SttError>>,
 ) {
     let host = cpal::default_host();
-    let device = match host.default_input_device() {
-        Some(d) => d,
-        None => {
-            let _ = ready_tx.send(Err(SttError::AudioCaptureFailed(
-                "no default input device".to_string(),
-            )));
+    let device = match resolve_input_device(&host, config.input_device.as_deref()) {
+        Ok(device) => device,
+        Err(error) => {
+            let _ = ready_tx.send(Err(error));
             return;
         }
     };
@@ -174,6 +175,43 @@ fn run_capture_loop(
     }
 
     tracing::debug!("audio capture: stop signal received, exiting");
+}
+
+fn resolve_input_device(
+    host: &cpal::Host,
+    preferred_name: Option<&str>,
+) -> Result<cpal::Device, SttError> {
+    if let Some(preferred_name) = preferred_name {
+        let devices = host.input_devices().map_err(|error| {
+            SttError::AudioCaptureFailed(format!("list input devices failed: {}", error))
+        })?;
+        let mut available_devices = Vec::new();
+
+        for device in devices {
+            let device_name = device
+                .name()
+                .unwrap_or_else(|_| "<unknown input device>".to_string());
+            if device_name.eq_ignore_ascii_case(preferred_name) {
+                return Ok(device);
+            }
+            available_devices.push(device_name);
+        }
+
+        let available = if available_devices.is_empty() {
+            "none".to_string()
+        } else {
+            available_devices.join(", ")
+        };
+
+        return Err(SttError::AudioCaptureFailed(format!(
+            "input device '{}' not found. Available devices: {}",
+            preferred_name, available
+        )));
+    }
+
+    host.default_input_device().ok_or_else(|| {
+        SttError::AudioCaptureFailed("no default input device".to_string())
+    })
 }
 
 fn build_stream_for_format(
@@ -337,6 +375,7 @@ mod tests {
         let config = AudioInputConfig::default();
         assert_eq!(config.sample_rate, 16_000);
         assert_eq!(config.buffer_duration_secs, 0.1);
+        assert!(config.input_device.is_none());
     }
 
     #[test]

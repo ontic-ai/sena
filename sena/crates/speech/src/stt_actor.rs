@@ -80,12 +80,16 @@ impl SttActor {
         self
     }
 
+    /// Override both VAD energy threshold and silence window.
+    pub fn with_vad_config(mut self, energy_threshold: f32, silence_duration_secs: f32) -> Self {
+        self.always_listening_vad = SilenceDetector::new(energy_threshold, silence_duration_secs);
+        self.listen_mode_vad = SilenceDetector::new(energy_threshold, silence_duration_secs);
+        self
+    }
+
     /// Override the silence window used to finalize utterances.
     pub fn with_silence_duration(mut self, silence_duration_secs: f32) -> Self {
-        self.always_listening_vad =
-            SilenceDetector::new(DEFAULT_VAD_ENERGY_THRESHOLD, silence_duration_secs);
-        self.listen_mode_vad =
-            SilenceDetector::new(DEFAULT_VAD_ENERGY_THRESHOLD, silence_duration_secs);
+        self = self.with_vad_config(DEFAULT_VAD_ENERGY_THRESHOLD, silence_duration_secs);
         self
     }
 
@@ -796,6 +800,22 @@ mod tests {
             .expect("list_audio_devices should succeed");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].name, "Stub Audio Device");
+    }
+
+    #[test]
+    fn with_audio_config_overrides_input_settings() {
+        let backend = Box::new(StubSttBackend::new(1600));
+        let config = AudioInputConfig {
+            sample_rate: 22_050,
+            buffer_duration_secs: 0.2,
+            input_device: Some("USB Mic".to_string()),
+        };
+
+        let actor = SttActor::new(backend).with_audio_config(config);
+
+        assert_eq!(actor.audio_config.sample_rate, 22_050);
+        assert_eq!(actor.audio_config.buffer_duration_secs, 0.2);
+        assert_eq!(actor.audio_config.input_device.as_deref(), Some("USB Mic"));
     }
 
     #[tokio::test]

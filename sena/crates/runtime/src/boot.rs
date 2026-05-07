@@ -603,7 +603,7 @@ async fn spawn_actors_with_data_dir(
     let speech_enabled = config.speech_enabled;
     if speech_enabled {
         // Step 10: STT actor spawn
-        let stt_actor = builder::build_stt_actor(&models_dir)?;
+        let stt_actor = builder::build_stt_actor(&models_dir, config)?;
         let stt_name: &'static str = "stt";
         expected.push(stt_name);
         let stt_handle = spawn_stt_actor(stt_actor, bus.clone());

@@ -25,6 +25,28 @@ pub struct SenaConfig {
     #[serde(default = "default_always_listen")]
     pub always_listen: bool,
 
+    /// Preferred microphone input device name for STT capture.
+    ///
+    /// When unset, Sena uses the system default input device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_device: Option<String>,
+
+    /// Audio capture sample rate for STT input.
+    #[serde(default = "default_stt_sample_rate_hz")]
+    pub stt_sample_rate_hz: u32,
+
+    /// Audio capture buffer duration for STT input.
+    #[serde(default = "default_stt_buffer_duration_secs")]
+    pub stt_buffer_duration_secs: f32,
+
+    /// Energy threshold used by the STT silence detector.
+    #[serde(default = "default_stt_energy_threshold")]
+    pub stt_energy_threshold: f32,
+
+    /// Silence duration required before STT finalizes an utterance.
+    #[serde(default = "default_stt_silence_duration_secs")]
+    pub stt_silence_duration_secs: f32,
+
     /// Whether wakeword detection is active.
     ///
     /// This remains disabled by default because the current placeholder
@@ -61,6 +83,11 @@ impl Default for SenaConfig {
             clipboard_observation_enabled: default_clipboard_observation_enabled(),
             speech_enabled: default_speech_enabled(),
             always_listen: default_always_listen(),
+            microphone_device: None,
+            stt_sample_rate_hz: default_stt_sample_rate_hz(),
+            stt_buffer_duration_secs: default_stt_buffer_duration_secs(),
+            stt_energy_threshold: default_stt_energy_threshold(),
+            stt_silence_duration_secs: default_stt_silence_duration_secs(),
             wakeword_enabled: default_wakeword_enabled(),
             wakeword_sensitivity: default_wakeword_sensitivity(),
             inference_max_tokens: default_inference_max_tokens(),
@@ -81,6 +108,22 @@ fn default_speech_enabled() -> bool {
 
 fn default_always_listen() -> bool {
     true
+}
+
+fn default_stt_sample_rate_hz() -> u32 {
+    16_000
+}
+
+fn default_stt_buffer_duration_secs() -> f32 {
+    0.1
+}
+
+fn default_stt_energy_threshold() -> f32 {
+    0.02
+}
+
+fn default_stt_silence_duration_secs() -> f32 {
+    0.5
 }
 
 fn default_wakeword_enabled() -> bool {
@@ -227,6 +270,50 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
                 .parse::<bool>()
                 .map_err(|_| "expected true or false".to_string())?;
         }
+        "microphone_device" => {
+            let trimmed = value.trim();
+            config.microphone_device = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        "stt_sample_rate_hz" => {
+            let parsed = value
+                .parse::<u32>()
+                .map_err(|_| "expected a positive integer".to_string())?;
+            if parsed == 0 {
+                return Err("stt_sample_rate_hz must be greater than 0".to_string());
+            }
+            config.stt_sample_rate_hz = parsed;
+        }
+        "stt_buffer_duration_secs" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a positive decimal".to_string())?;
+            if parsed <= 0.0 {
+                return Err("stt_buffer_duration_secs must be greater than 0".to_string());
+            }
+            config.stt_buffer_duration_secs = parsed;
+        }
+        "stt_energy_threshold" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a non-negative decimal".to_string())?;
+            if parsed < 0.0 {
+                return Err("stt_energy_threshold cannot be negative".to_string());
+            }
+            config.stt_energy_threshold = parsed;
+        }
+        "stt_silence_duration_secs" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a non-negative decimal".to_string())?;
+            if parsed < 0.0 {
+                return Err("stt_silence_duration_secs cannot be negative".to_string());
+            }
+            config.stt_silence_duration_secs = parsed;
+        }
         "wakeword_enabled" => {
             config.wakeword_enabled = value
                 .parse::<bool>()
@@ -263,7 +350,7 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
         }
         _ => {
             return Err(format!(
-                "unknown key '{}'. Supported keys: clipboard_observation_enabled, speech_enabled, always_listen, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
+                "unknown key '{}'. Supported keys: file_watch_paths, clipboard_observation_enabled, speech_enabled, always_listen, microphone_device, stt_sample_rate_hz, stt_buffer_duration_secs, stt_energy_threshold, stt_silence_duration_secs, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
                 key
             ));
         }
@@ -288,6 +375,11 @@ mod tests {
         assert!(config.clipboard_observation_enabled);
         assert!(config.speech_enabled);
         assert!(config.always_listen);
+        assert!(config.microphone_device.is_none());
+        assert_eq!(config.stt_sample_rate_hz, 16_000);
+        assert_eq!(config.stt_buffer_duration_secs, 0.1);
+        assert_eq!(config.stt_energy_threshold, 0.02);
+        assert_eq!(config.stt_silence_duration_secs, 0.5);
         assert!(!config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.5);
         assert_eq!(config.inference_max_tokens, 512);
@@ -317,6 +409,11 @@ mod tests {
             clipboard_observation_enabled: false,
             speech_enabled: false,
             always_listen: true,
+            microphone_device: Some("USB Mic".to_string()),
+            stt_sample_rate_hz: 22_050,
+            stt_buffer_duration_secs: 0.2,
+            stt_energy_threshold: 0.03,
+            stt_silence_duration_secs: 0.8,
             wakeword_enabled: true,
             wakeword_sensitivity: 0.75,
             inference_max_tokens: 1024,
@@ -346,6 +443,16 @@ mod tests {
             .expect("speech_enabled should parse");
         apply_config_value(&mut config, "always_listen", "true")
             .expect("always_listen should parse");
+        apply_config_value(&mut config, "microphone_device", "USB Mic")
+            .expect("microphone_device should parse");
+        apply_config_value(&mut config, "stt_sample_rate_hz", "22050")
+            .expect("stt_sample_rate_hz should parse");
+        apply_config_value(&mut config, "stt_buffer_duration_secs", "0.2")
+            .expect("stt_buffer_duration_secs should parse");
+        apply_config_value(&mut config, "stt_energy_threshold", "0.03")
+            .expect("stt_energy_threshold should parse");
+        apply_config_value(&mut config, "stt_silence_duration_secs", "0.8")
+            .expect("stt_silence_duration_secs should parse");
         apply_config_value(&mut config, "wakeword_enabled", "true")
             .expect("wakeword_enabled should parse");
         apply_config_value(&mut config, "wakeword_sensitivity", "0.7")
@@ -361,6 +468,11 @@ mod tests {
         );
         assert!(!config.speech_enabled);
         assert!(config.always_listen);
+        assert_eq!(config.microphone_device.as_deref(), Some("USB Mic"));
+        assert_eq!(config.stt_sample_rate_hz, 22_050);
+        assert_eq!(config.stt_buffer_duration_secs, 0.2);
+        assert_eq!(config.stt_energy_threshold, 0.03);
+        assert_eq!(config.stt_silence_duration_secs, 0.8);
         assert!(config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.7);
         assert_eq!(config.inference_max_tokens, 768);

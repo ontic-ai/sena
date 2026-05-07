@@ -133,6 +133,7 @@ impl WakewordActor {
         let config = AudioInputConfig {
             sample_rate: 16_000,
             buffer_duration_secs: 0.5,
+            input_device: None,
         };
 
         let (stream, rx) = AudioInputStream::start(config)
