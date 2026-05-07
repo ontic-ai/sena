@@ -44,6 +44,7 @@ impl InferenceBackend for LlamaBackendAdapter {
             top_p: params.top_p,
             max_tokens: params.max_tokens,
             ctx_size: 2048,
+            kv_cache: infer::KvCacheConfig::none(),
         };
 
         let backend_clone = self.inner.clone();
@@ -75,6 +76,7 @@ impl InferenceBackend for LlamaBackendAdapter {
             top_p: params.top_p,
             max_tokens: params.max_tokens,
             ctx_size: 2048,
+            kv_cache: infer::KvCacheConfig::none(),
         };
 
         let backend = self
@@ -142,4 +144,86 @@ pub fn build_loaded_llama_backend(
     })?;
 
     Ok(Box::new(LlamaBackendAdapter::new(backend)))
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated embedding backend — wraps infer::LlamaEmbedBackend
+// ---------------------------------------------------------------------------
+
+/// Adapter that wraps `infer::LlamaEmbedBackend` and implements
+/// `inference::InferenceBackend` (the sena-local async trait).
+struct LlamaEmbedBackendAdapter {
+    inner: Arc<Mutex<infer::LlamaEmbedBackend>>,
+}
+
+impl LlamaEmbedBackendAdapter {
+    fn new(backend: infer::LlamaEmbedBackend) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(backend)),
+        }
+    }
+}
+
+#[async_trait]
+impl InferenceBackend for LlamaEmbedBackendAdapter {
+    fn backend_type(&self) -> BackendType {
+        BackendType::LlamaCpp
+    }
+
+    fn is_loaded(&self) -> bool {
+        true
+    }
+
+    async fn infer(
+        &self,
+        _prompt: String,
+        _params: InferenceParams,
+    ) -> Result<InferenceStream, InferenceError> {
+        Err(InferenceError::ExecutionFailed(
+            "LlamaEmbedBackend is an embedding-only backend".to_string(),
+        ))
+    }
+
+    async fn embed(&self, text: String) -> Result<Vec<f32>, InferenceError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let backend = inner.blocking_lock();
+            backend
+                .embed(&text)
+                .map_err(|e| InferenceError::ExecutionFailed(format!("embed failed: {e}")))
+        })
+        .await
+        .map_err(|e| InferenceError::ExecutionFailed(format!("embed: spawn_blocking: {e}")))?
+    }
+
+    async fn shutdown(&mut self) -> Result<(), InferenceError> {
+        Ok(())
+    }
+}
+
+/// Build a dedicated embedding backend loaded with the given GGUF model path.
+///
+/// Uses [`infer::LlamaEmbedBackend`] which shares the process-global llama.cpp
+/// runtime with the generation backend.  Mean pooling is used, matching the
+/// nomic-embed-text-v1.5 model card (`nomic-bert.pooling_type = 1`).
+///
+/// # Errors
+///
+/// Returns [`InferenceError::BackendInit`] if the llama.cpp runtime cannot be
+/// initialized, or [`InferenceError::BackendFailed`] if the model file cannot
+/// be loaded.
+pub fn build_loaded_embed_backend(
+    model_path: &Path,
+) -> Result<Box<dyn InferenceBackend>, InferenceError> {
+    // Resolve infer backend type for GPU selection.
+    let infer_backend_type = preferred_llama_backend();
+
+    let backend = infer::LlamaEmbedBackend::load(model_path, infer_backend_type).map_err(|e| {
+        InferenceError::BackendFailed(format!(
+            "embed: failed to load model {}: {e}",
+            model_path.display()
+        ))
+    })?;
+
+    Ok(Box::new(LlamaEmbedBackendAdapter::new(backend)))
 }

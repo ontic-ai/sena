@@ -13,8 +13,8 @@ use tracing::debug;
 /// Dimensionality of Sena's embedding vectors.
 ///
 /// Must match `StoreConfig.store.vector_dimensions` in the ech0 configuration.
-/// Using 384 as a default (compatible with small nomic-embed models).
-pub const EMBEDDING_DIMENSIONS: usize = 384;
+/// Using 768 as a default (compatible with small nomic-embed models).
+pub const EMBEDDING_DIMENSIONS: usize = 768;
 
 /// Sena's embedding implementation.
 ///

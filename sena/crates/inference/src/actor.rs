@@ -64,6 +64,7 @@ struct ProactiveDecision {
 pub struct InferenceActor {
     bus: Option<Arc<EventBus>>,
     backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
+    embed_backend: Option<Arc<Mutex<Box<dyn InferenceBackend>>>>,
     queue: Arc<Mutex<InferenceQueue>>,
     rx: Option<broadcast::Receiver<Event>>,
     directed_rx: Option<mpsc::Receiver<Event>>,
@@ -116,6 +117,7 @@ impl InferenceActor {
         Self {
             bus: None,
             backend: Arc::new(Mutex::new(backend)),
+            embed_backend: None,
             queue: Arc::new(Mutex::new(InferenceQueue::new(queue_capacity))),
             rx: None,
             directed_rx: None,
@@ -132,6 +134,15 @@ impl InferenceActor {
     pub fn with_inference_max_tokens(self, max_tokens: usize) -> Self {
         self.inference_max_tokens
             .store(max_tokens, Ordering::Relaxed);
+        self
+    }
+
+    /// Set a dedicated embedding backend.
+    ///
+    /// When set, embed requests are routed to this backend instead of the
+    /// primary generation backend.
+    pub fn with_embed_backend(mut self, backend: Box<dyn InferenceBackend>) -> Self {
+        self.embed_backend = Some(Arc::new(Mutex::new(backend)));
         self
     }
 
@@ -376,7 +387,11 @@ impl InferenceActor {
     }
 
     async fn handle_direct_embed_request(&self, request: EmbedRequest) {
-        let result = Self::execute_embed(self.backend.clone(), request.text, bus::CausalId::new())
+        let active_backend = self
+            .embed_backend
+            .clone()
+            .unwrap_or_else(|| self.backend.clone());
+        let result = Self::execute_embed(active_backend, request.text, bus::CausalId::new())
             .await
             .map_err(|error| error.to_string());
 
@@ -520,6 +535,7 @@ impl InferenceActor {
     async fn worker_loop(
         bus: Arc<EventBus>,
         backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
+        embed_backend: Option<Arc<Mutex<Box<dyn InferenceBackend>>>>,
         queue: Arc<Mutex<InferenceQueue>>,
         inference_max_tokens: Arc<AtomicUsize>,
         mut work_signal: mpsc::Receiver<()>,
@@ -568,7 +584,11 @@ impl InferenceActor {
                         causal_id,
                         response_tx,
                     } => {
-                        let result = Self::execute_embed(backend.clone(), text, causal_id).await;
+                        let active_backend = embed_backend
+                            .clone()
+                            .unwrap_or_else(|| backend.clone());
+                        let result =
+                            Self::execute_embed(active_backend, text, causal_id).await;
                         let _ = response_tx.send(result.map_err(|e| e.to_string()));
                     }
                     WorkKind::Extract {
@@ -1270,6 +1290,7 @@ impl Actor for InferenceActor {
         // Spawn worker task
         let worker_bus = bus.clone();
         let worker_backend = self.backend.clone();
+        let worker_embed_backend = self.embed_backend.clone();
         let worker_queue = self.queue.clone();
         let worker_inference_max_tokens = self.inference_max_tokens.clone();
 
@@ -1277,6 +1298,7 @@ impl Actor for InferenceActor {
             Self::worker_loop(
                 worker_bus,
                 worker_backend,
+                worker_embed_backend,
                 worker_queue,
                 worker_inference_max_tokens,
                 work_rx,

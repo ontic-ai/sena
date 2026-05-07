@@ -18,6 +18,7 @@ pub use discovery::discover_models;
 pub use error::InferenceError;
 pub use filter::OutputFilter;
 pub use llama_loader::build_loaded_llama_backend;
+pub use llama_loader::build_loaded_embed_backend;
 pub use llama_loader::preferred_llama_backend;
 pub use mock::{MockBackend, MockConfig};
 pub use queue::{InferenceQueue, WorkItem, WorkKind};

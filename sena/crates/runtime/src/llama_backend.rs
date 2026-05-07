@@ -56,6 +56,7 @@ impl inference::InferenceBackend for LlamaBackendAdapter {
             top_p: params.top_p,
             max_tokens: params.max_tokens,
             ctx_size: 2048, // Default context size
+            kv_cache: infer::KvCacheConfig::none(),
         };
 
         // Run inference in a blocking task since the infer crate's methods are sync
@@ -91,6 +92,7 @@ impl inference::InferenceBackend for LlamaBackendAdapter {
             top_p: params.top_p,
             max_tokens: params.max_tokens,
             ctx_size: 2048,
+            kv_cache: infer::KvCacheConfig::none(),
         };
 
         let backend = self
