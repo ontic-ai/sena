@@ -14,7 +14,6 @@ path = "src/main.rs"
 vulkan = ["runtime/vulkan"]
 
 [dependencies]
-runtime = { path = "../runtime" }
 ipc = { path = "../ipc" }
 bus = { path = "../bus" }
 
@@ -24,3 +23,9 @@ tracing-subscriber.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tray-icon.workspace = true
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+runtime = { path = "../runtime", features = ["vulkan"] }
+
+[target.'cfg(not(any(target_os = "windows", target_os = "linux")))'.dependencies]
+runtime = { path = "../runtime" }
