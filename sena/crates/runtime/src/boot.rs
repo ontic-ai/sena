@@ -550,7 +550,14 @@ async fn spawn_actors_with_data_dir(
 
     // Step 5: Inference actor spawn
     let (embed_tx, embed_rx) = tokio::sync::mpsc::channel(32);
-    let inference_actor = builder::build_inference_actor(config.inference_max_tokens, embed_rx)?;
+    let embed_models_dir = resolve_embed_models_dir()?;
+    let embed_model_info = MemoryModelManifest::required_embed_model();
+    let embed_model_path = ModelCache::cached_path(&embed_models_dir, &embed_model_info);
+    let inference_actor = builder::build_inference_actor(
+        config.inference_max_tokens,
+        embed_rx,
+        Some(embed_model_path),
+    )?;
     let inference_name: &'static str = "inference";
     expected.push(inference_name);
     let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
@@ -571,6 +578,7 @@ async fn spawn_actors_with_data_dir(
         platform_actor,
         bus.clone(),
         config.clipboard_observation_enabled,
+        config.file_watch_paths.clone(),
     );
     handles.push((platform_name, platform_handle));
 
@@ -776,6 +784,7 @@ fn spawn_platform_actor(
     actor: platform::PlatformActor,
     bus: std::sync::Arc<EventBus>,
     clipboard_enabled: bool,
+    file_watch_paths: Vec<PathBuf>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let name = "platform";
@@ -795,6 +804,7 @@ fn spawn_platform_actor(
                 poll_intervals::CLIPBOARD,
                 poll_intervals::KEYSTROKE,
                 clipboard_enabled,
+                &file_watch_paths,
             )
             .await;
 
