@@ -486,23 +486,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bus",
- "crossterm",
- "ipc",
- "ratatui",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3979,6 +3962,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+]
+
+[[package]]
+name = "sena-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bus",
+ "crossterm",
+ "ipc",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

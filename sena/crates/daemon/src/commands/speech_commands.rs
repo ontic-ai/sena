@@ -137,6 +137,53 @@ impl CommandHandler for SpeechListenStopHandler {
     }
 }
 
+/// Handler for "speech.say" command.
+pub struct SpeechSayHandler {
+    bus: Arc<EventBus>,
+}
+
+impl SpeechSayHandler {
+    pub fn new(bus: Arc<EventBus>) -> Self {
+        Self { bus }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for SpeechSayHandler {
+    fn name(&self) -> &'static str {
+        "speech.say"
+    }
+
+    fn description(&self) -> &'static str {
+        "Speak text verbatim through TTS"
+    }
+
+    async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        let text = payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                IpcError::InvalidPayload("missing or invalid 'text' field".to_string())
+            })?;
+
+        let causal_id = CausalId::new();
+
+        self.bus
+            .broadcast(Event::Speech(SpeechEvent::SpeakRequested {
+                text: text.to_string(),
+                causal_id,
+            }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        Ok(json!({
+            "status": "requested",
+            "text_chars": text.chars().count(),
+            "causal_id": causal_id.as_u64(),
+        }))
+    }
+}
+
 /// Handler for "speech.status" command.
 pub struct SpeechStatusHandler;
 

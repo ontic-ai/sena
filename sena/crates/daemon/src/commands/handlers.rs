@@ -12,7 +12,9 @@ use crate::commands::{
         OnboardingStatusHandler, PingHandler, RuntimeState, ShutdownHandler, StatusHandler,
         SubmitOnboardingConfigHandler, SubmitOnboardingNameHandler,
     },
-    speech_commands::{SpeechListenStartHandler, SpeechListenStopHandler, SpeechStatusHandler},
+    speech_commands::{
+        SpeechListenStartHandler, SpeechListenStopHandler, SpeechSayHandler, SpeechStatusHandler,
+    },
     transparency_commands::TransparencyQueryHandler,
 };
 use ipc::CommandRegistry;
@@ -70,6 +72,7 @@ pub fn register_all(
     registry.register(Arc::new(SpeechListenStopHandler::new(
         boot_result.bus.clone(),
     )));
+      registry.register(Arc::new(SpeechSayHandler::new(boot_result.bus.clone())));
     registry.register(Arc::new(SpeechStatusHandler));
 
     // Memory commands

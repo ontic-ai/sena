@@ -58,6 +58,16 @@ const HELP_SPEECH: &[(&str, &str, &str)] = &[
         "stop listening and finalize the transcript",
         "/stop",
     ),
+    (
+        "/say \"text\"",
+        "speak text verbatim through TTS (audio test)",
+        "/say \"hello world\"",
+    ),
+    (
+        "/run \"text\"",
+        "run full inference pipeline as if spoken",
+        "/run \"what time is it\"",
+    ),
     ("/speech, /audio", "show speech subsystem status", "/speech"),
 ];
 
@@ -166,6 +176,16 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/stop",
         description: "Stop listening",
+        category: CommandCategory::Speech,
+    },
+    SlashCommand {
+        command: "/say",
+        description: "Speak text verbatim through TTS",
+        category: CommandCategory::Speech,
+    },
+    SlashCommand {
+        command: "/run",
+        description: "Run full inference pipeline as if spoken",
         category: CommandCategory::Speech,
     },
     SlashCommand {
@@ -888,6 +908,17 @@ impl Shell {
         self.daemon_uptime_secs + self.daemon_uptime_anchor.elapsed().as_secs()
     }
 
+    fn parse_quoted_command_text(input: &str, command: &str) -> Option<String> {
+        let remainder = input.trim().strip_prefix(command)?.trim();
+        let text = remainder.strip_prefix('"')?.strip_suffix('"')?;
+
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    }
+
     async fn handle_slash_command(&mut self, input: &str) -> Result<(), CliError> {
         let parts: Vec<&str> = input.split_whitespace().collect();
         if parts.is_empty() {
@@ -910,6 +941,8 @@ impl Shell {
             "/load" => self.cmd_load_model(parts.get(1).copied()).await?,
             "/listen" | "/mic" => self.cmd_listen_start().await?,
             "/stop" | "/end" => self.cmd_listen_stop().await?,
+            "/say" => self.cmd_say(input).await?,
+            "/run" => self.cmd_run(input).await?,
             "/observation" | "/obs" => self.cmd_observation().await?,
             "/memory" | "/mem" => self.cmd_transparency_memory().await?,
             "/memory-stats" | "/memstats" => self.cmd_memory_stats().await?,
@@ -1086,6 +1119,34 @@ impl Shell {
             Ok(response) => self.log_message(format!("Listening stopped: {}", response)),
             Err(e) => self.log_message(format!("Could not stop listening: {}", e)),
         }
+        Ok(())
+    }
+
+    async fn cmd_say(&mut self, input: &str) -> Result<(), CliError> {
+        let Some(text) = Self::parse_quoted_command_text(input, "/say") else {
+            self.log_message("usage: /say \"text to speak\"".to_string());
+            return Ok(());
+        };
+
+        match self.ipc.send("speech.say", json!({"text": text})).await {
+            Ok(_) => self.log_message(format!("[SAY] \"{}\"", text)),
+            Err(e) => self.log_message(format!("Could not send speech.say: {}", e)),
+        }
+
+        Ok(())
+    }
+
+    async fn cmd_run(&mut self, input: &str) -> Result<(), CliError> {
+        let Some(text) = Self::parse_quoted_command_text(input, "/run") else {
+            self.log_message("usage: /run \"text to process\"".to_string());
+            return Ok(());
+        };
+
+        match self.ipc.send("inference.run", json!({"text": text})).await {
+            Ok(_) => self.log_message(format!("[RUN] \"{}\"", text)),
+            Err(e) => self.log_message(format!("Could not send inference.run: {}", e)),
+        }
+
         Ok(())
     }
 
@@ -1703,8 +1764,48 @@ impl Drop for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::Shell;
+    use super::{HELP_SPEECH, SLASH_COMMANDS, Shell};
     use serde_json::json;
+
+    #[test]
+    fn quoted_command_text_parses_balanced_quotes_only() {
+        assert_eq!(
+            Shell::parse_quoted_command_text("/say \"hello world\"", "/say"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            Shell::parse_quoted_command_text("/run \"  hi there  \"", "/run"),
+            Some("  hi there  ".to_string())
+        );
+
+        assert_eq!(Shell::parse_quoted_command_text("/say", "/say"), None);
+        assert_eq!(
+            Shell::parse_quoted_command_text("/say \"\"", "/say"),
+            None
+        );
+        assert_eq!(
+            Shell::parse_quoted_command_text("/say hello world", "/say"),
+            None
+        );
+        assert_eq!(
+            Shell::parse_quoted_command_text("/run \"unterminated", "/run"),
+            None
+        );
+    }
+
+    #[test]
+    fn help_and_slash_catalog_include_say_and_run() {
+        assert!(HELP_SPEECH.iter().any(|(command, description, _)| {
+            *command == "/say \"text\""
+                && *description == "speak text verbatim through TTS (audio test)"
+        }));
+        assert!(HELP_SPEECH.iter().any(|(command, description, _)| {
+            *command == "/run \"text\""
+                && *description == "run full inference pipeline as if spoken"
+        }));
+        assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/say"));
+        assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/run"));
+    }
 
     #[test]
     fn listen_mode_push_events_replace_live_partial_and_finalize_cleanly() {

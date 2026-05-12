@@ -1,7 +1,7 @@
 //! Inference-related IPC command handlers.
 
 use async_trait::async_trait;
-use bus::{CausalId, Event, EventBus, InferenceEvent, InferenceSource, Priority};
+use bus::{CausalId, Event, EventBus, InferenceEvent, SpeechEvent};
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -196,24 +196,24 @@ impl CommandHandler for RunInferenceHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Run inference with a prompt"
+        "Inject text into the full voice inference pipeline"
     }
 
     async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
-        let prompt = payload
-            .get("prompt")
+        let text = payload
+            .get("text")
+            .or_else(|| payload.get("prompt"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                IpcError::InvalidPayload("missing or invalid 'prompt' field".to_string())
+                IpcError::InvalidPayload("missing or invalid 'text' field".to_string())
             })?;
 
         let causal_id = CausalId::new();
 
         self.bus
-            .broadcast(Event::Inference(InferenceEvent::InferenceRequested {
-                prompt: prompt.to_string(),
-                priority: Priority::Normal,
-                source: InferenceSource::UserText,
+            .broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
+                text: text.to_string(),
+                confidence: 1.0,
                 causal_id,
             }))
             .await
@@ -221,7 +221,7 @@ impl CommandHandler for RunInferenceHandler {
 
         Ok(json!({
             "status": "requested",
-            "prompt_chars": prompt.len(),
+            "text_chars": text.chars().count(),
             "causal_id": causal_id.as_u64(),
         }))
     }

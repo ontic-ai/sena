@@ -1,5 +1,5 @@
 [package]
-name = "cli"
+name = "sena-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
+type FileWatchReceiver = mpsc::UnboundedReceiver<notify::Result<notify::Event>>;
+type FileWatcherState = (Option<RecommendedWatcher>, Option<FileWatchReceiver>);
+
 /// Platform actor — holds a native backend and manages signal broadcasting.
 pub struct PlatformActor {
     backend: Box<dyn PlatformBackend>,
@@ -350,15 +353,7 @@ impl PlatformActor {
         warn!("PlatformActor polling loop exited");
     }
 
-    fn create_file_watcher(
-        watch_paths: &[PathBuf],
-    ) -> Result<
-        (
-            Option<RecommendedWatcher>,
-            Option<mpsc::UnboundedReceiver<notify::Result<notify::Event>>>,
-        ),
-        PlatformError,
-    > {
+    fn create_file_watcher(watch_paths: &[PathBuf]) -> Result<FileWatcherState, PlatformError> {
         if watch_paths.is_empty() {
             return Ok((None, None));
         }

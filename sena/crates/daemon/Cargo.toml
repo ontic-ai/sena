@@ -25,7 +25,7 @@ serde_json.workspace = true
 tray-icon.workspace = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
-runtime = { path = "../runtime", features = ["vulkan"] }
+runtime = { path = "../runtime" }
 
 [target.'cfg(not(any(target_os = "windows", target_os = "linux")))'.dependencies]
 runtime = { path = "../runtime" }
