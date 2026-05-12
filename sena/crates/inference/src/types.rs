@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_STOP_SEQUENCES: [&str; 3] = ["\nUser:", "\nAssistant:", "\nSena:"];
+
 /// Backend type for inference execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BackendType {
@@ -44,10 +46,28 @@ impl Default for InferenceParams {
             top_p: 0.9,
             top_k: 40,
             max_tokens: 512,
-            stop_sequences: Vec::new(),
+            stop_sequences: DEFAULT_STOP_SEQUENCES
+                .iter()
+                .map(|sequence| (*sequence).to_string())
+                .collect(),
             repeat_penalty: 1.1,
         }
     }
 }
 
 use std::fmt;
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_STOP_SEQUENCES, InferenceParams};
+
+    #[test]
+    fn default_stop_sequences_match_dialogue_contract() {
+        let params = InferenceParams::default();
+        let expected: Vec<String> = DEFAULT_STOP_SEQUENCES
+            .iter()
+            .map(|sequence| (*sequence).to_string())
+            .collect();
+        assert_eq!(params.stop_sequences, expected);
+    }
+}

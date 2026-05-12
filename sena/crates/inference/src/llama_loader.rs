@@ -1,4 +1,4 @@
-//! Helper for constructing a loaded llama backend from a specific model path.
+//! Helper for constructing loaded infer-backed llama adapters.
 
 use crate::backend::InferenceBackend;
 use crate::error::InferenceError;
@@ -9,13 +9,46 @@ use infer::InferenceBackend as InferBackendTrait;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+use tracing::info;
+
+const DEFAULT_CTX_SIZE: u32 = 2048;
+
+fn to_infer_params(prompt: String, params: InferenceParams) -> infer::InferenceParams {
+    infer::InferenceParams {
+        request_id: uuid::Uuid::new_v4(),
+        prompt,
+        temperature: params.temperature,
+        top_k: params.top_k,
+        top_p: params.top_p,
+        repeat_penalty: params.repeat_penalty,
+        max_tokens: params.max_tokens,
+        ctx_size: DEFAULT_CTX_SIZE,
+        stop_sequences: params.stop_sequences,
+        kv_cache: infer::KvCacheConfig::none(),
+    }
+}
+
+fn to_infer_params_ref(prompt: &str, params: &InferenceParams) -> infer::InferenceParams {
+    infer::InferenceParams {
+        request_id: uuid::Uuid::new_v4(),
+        prompt: prompt.to_string(),
+        temperature: params.temperature,
+        top_k: params.top_k,
+        top_p: params.top_p,
+        repeat_penalty: params.repeat_penalty,
+        max_tokens: params.max_tokens,
+        ctx_size: DEFAULT_CTX_SIZE,
+        stop_sequences: params.stop_sequences.clone(),
+        kv_cache: infer::KvCacheConfig::none(),
+    }
+}
 
 struct LlamaBackendAdapter {
-    inner: Arc<Mutex<crate::LlamaBackend>>,
+    inner: Arc<Mutex<infer::LlamaBackend>>,
 }
 
 impl LlamaBackendAdapter {
-    fn new(backend: crate::LlamaBackend) -> Self {
+    fn new(backend: infer::LlamaBackend) -> Self {
         Self {
             inner: Arc::new(Mutex::new(backend)),
         }
@@ -37,24 +70,15 @@ impl InferenceBackend for LlamaBackendAdapter {
         prompt: String,
         params: InferenceParams,
     ) -> Result<InferenceStream, InferenceError> {
-        let infer_params = infer::InferenceParams {
-            request_id: uuid::Uuid::new_v4(),
-            prompt,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            max_tokens: params.max_tokens,
-            ctx_size: 2048,
-            kv_cache: infer::KvCacheConfig::none(),
-        };
-
-        let backend_clone = self.inner.clone();
+        let infer_params = to_infer_params(prompt, params);
+        let backend_clone = Arc::clone(&self.inner);
         let stream_rx = tokio::task::spawn_blocking(move || {
             let backend = backend_clone.blocking_lock();
             backend.stream(infer_params)
         })
         .await
-        .map_err(|e| InferenceError::ExecutionFailed(format!("spawn_blocking failed: {}", e)))?
-        .map_err(|e| InferenceError::ExecutionFailed(format!("stream failed: {}", e)))?;
+        .map_err(|error| InferenceError::ExecutionFailed(format!("spawn_blocking failed: {}", error)))?
+        .map_err(|error| InferenceError::ExecutionFailed(format!("stream failed: {}", error)))?;
 
         let (tx, rx) = mpsc::channel(100);
         tokio::task::spawn_blocking(move || {
@@ -69,23 +93,14 @@ impl InferenceBackend for LlamaBackendAdapter {
     }
 
     fn complete(&self, prompt: &str, params: &InferenceParams) -> Result<String, InferenceError> {
-        let infer_params = infer::InferenceParams {
-            request_id: uuid::Uuid::new_v4(),
-            prompt: prompt.to_string(),
-            temperature: params.temperature,
-            top_p: params.top_p,
-            max_tokens: params.max_tokens,
-            ctx_size: 2048,
-            kv_cache: infer::KvCacheConfig::none(),
-        };
-
+        let infer_params = to_infer_params_ref(prompt, params);
         let backend = self
             .inner
             .try_lock()
             .map_err(|_| InferenceError::ExecutionFailed("backend busy".to_string()))?;
         backend
             .complete(&infer_params)
-            .map_err(|e| InferenceError::ExecutionFailed(format!("complete failed: {}", e)))
+            .map_err(|error| InferenceError::ExecutionFailed(format!("complete failed: {}", error)))
     }
 
     async fn shutdown(&mut self) -> Result<(), InferenceError> {
@@ -131,27 +146,37 @@ pub fn preferred_llama_backend() -> infer::BackendType {
 pub fn build_loaded_llama_backend(
     model_path: &Path,
 ) -> Result<Box<dyn InferenceBackend>, InferenceError> {
-    let mut backend = crate::LlamaBackend::new()
-        .map_err(|e| InferenceError::BackendInit(format!("llama backend init failed: {}", e)))?;
-
     let backend_type = preferred_llama_backend();
-    backend.load_model(model_path, backend_type).map_err(|e| {
+    let model_size_mb = std::fs::metadata(model_path)
+        .map(|metadata| metadata.len() / (1024 * 1024))
+        .unwrap_or(0);
+    info!(
+        compute_backend = %backend_type,
+        model_path = %model_path.display(),
+        model_size_mb,
+        "loading infer llama generation model"
+    );
+
+    let mut backend = infer::LlamaBackend::new()
+        .map_err(|error| InferenceError::BackendInit(format!("llama backend init failed: {}", error)))?;
+    backend.load_model(model_path, backend_type).map_err(|error| {
         InferenceError::BackendFailed(format!(
             "failed to load model from {}: {}",
             model_path.display(),
-            e
+            error
         ))
     })?;
+
+    info!(
+        compute_backend = %backend_type,
+        model_path = %model_path.display(),
+        model_size_mb,
+        "infer llama generation model loaded"
+    );
 
     Ok(Box::new(LlamaBackendAdapter::new(backend)))
 }
 
-// ---------------------------------------------------------------------------
-// Dedicated embedding backend — wraps infer::LlamaEmbedBackend
-// ---------------------------------------------------------------------------
-
-/// Adapter that wraps `infer::LlamaEmbedBackend` and implements
-/// `inference::InferenceBackend` (the sena-local async trait).
 struct LlamaEmbedBackendAdapter {
     inner: Arc<Mutex<infer::LlamaEmbedBackend>>,
 }
@@ -185,15 +210,15 @@ impl InferenceBackend for LlamaEmbedBackendAdapter {
     }
 
     async fn embed(&self, text: String) -> Result<Vec<f32>, InferenceError> {
-        let inner = self.inner.clone();
+        let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let backend = inner.blocking_lock();
             backend
                 .embed(&text)
-                .map_err(|e| InferenceError::ExecutionFailed(format!("embed failed: {e}")))
+                .map_err(|error| InferenceError::ExecutionFailed(format!("embed failed: {}", error)))
         })
         .await
-        .map_err(|e| InferenceError::ExecutionFailed(format!("embed: spawn_blocking: {e}")))?
+        .map_err(|error| InferenceError::ExecutionFailed(format!("embed: spawn_blocking: {error}")))?
     }
 
     async fn shutdown(&mut self) -> Result<(), InferenceError> {
@@ -201,29 +226,26 @@ impl InferenceBackend for LlamaEmbedBackendAdapter {
     }
 }
 
-/// Build a dedicated embedding backend loaded with the given GGUF model path.
-///
-/// Uses [`infer::LlamaEmbedBackend`] which shares the process-global llama.cpp
-/// runtime with the generation backend.  Mean pooling is used, matching the
-/// nomic-embed-text-v1.5 model card (`nomic-bert.pooling_type = 1`).
-///
-/// # Errors
-///
-/// Returns [`InferenceError::BackendInit`] if the llama.cpp runtime cannot be
-/// initialized, or [`InferenceError::BackendFailed`] if the model file cannot
-/// be loaded.
 pub fn build_loaded_embed_backend(
     model_path: &Path,
 ) -> Result<Box<dyn InferenceBackend>, InferenceError> {
-    // Resolve infer backend type for GPU selection.
-    let infer_backend_type = preferred_llama_backend();
-
-    let backend = infer::LlamaEmbedBackend::load(model_path, infer_backend_type).map_err(|e| {
+    let backend_type = preferred_llama_backend();
+    let backend = infer::LlamaEmbedBackend::load(model_path, backend_type).map_err(|error| {
         InferenceError::BackendFailed(format!(
-            "embed: failed to load model {}: {e}",
-            model_path.display()
+            "embed: failed to load model {}: {}",
+            model_path.display(),
+            error
         ))
     })?;
 
     Ok(Box::new(LlamaEmbedBackendAdapter::new(backend)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn preferred_backend_type_is_selectable() {
+        let backend = super::preferred_llama_backend();
+        assert!(!backend.to_string().is_empty());
+    }
 }
