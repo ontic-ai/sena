@@ -176,16 +176,17 @@ pub fn build_ctp_actor() -> Result<
     Ok((actor, signal_tx))
 }
 
-/// Build the STT actor with real or stub backend.
+/// Build the STT actor with a real Parakeet backend.
 ///
-/// Attempts to construct a Parakeet backend if all required assets are present.
-/// Falls back to stub backend if assets are missing or initialization fails.
+/// Required STT assets must be present by builder time. Missing assets or
+/// backend initialization failures are treated as boot-blocking errors rather
+/// than silently degrading to a stub backend.
 ///
 /// # Arguments
 /// * `models_dir` - Path to the speech models directory
 /// * `config` - Runtime configuration containing STT device and VAD settings
 ///
-/// Returns an SttActor with the best available backend.
+/// Returns an SttActor when the Parakeet backend can be constructed.
 pub fn build_stt_actor(
     models_dir: &Path,
     config: &crate::config::SenaConfig,
@@ -210,28 +211,23 @@ pub fn build_stt_actor(
                 return Ok(actor);
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "ParakeetSttBackend initialization failed — falling back to stub"
-                );
+                return Err(RuntimeError::ModelLoadFailed(format!(
+                    "ParakeetSttBackend initialization failed: {}",
+                    e
+                )));
             }
         }
     } else {
-        tracing::debug!(
-            "Parakeet assets not available (encoder: {}, decoder: {}, tokenizer: {}) — using stub backend",
-            encoder_path.exists(),
-            decoder_path.exists(),
-            tokenizer_path.exists()
-        );
+        return Err(RuntimeError::RequiredModelMissing {
+            model_name: "parakeet stt assets".to_string(),
+            reason: format!(
+                "required Parakeet assets missing (encoder: {}, decoder: {}, tokenizer: {})",
+                encoder_path.exists(),
+                decoder_path.exists(),
+                tokenizer_path.exists()
+            ),
+        });
     }
-
-    // Fall back to stub backend
-    tracing::info!("STT actor: using StubSttBackend");
-    let backend = Box::new(speech::StubSttBackend::new(1600));
-    let actor = speech::SttActor::new(backend)
-        .with_audio_config(stt_audio_config)
-        .with_vad_config(stt_energy_threshold, stt_silence_duration_secs);
-    Ok(actor)
 }
 
 fn stt_audio_config(config: &crate::config::SenaConfig) -> AudioInputConfig {
@@ -363,11 +359,11 @@ mod tests {
     }
 
     #[test]
-    fn stt_actor_builds_with_stub_backend_when_assets_missing() {
+    fn stt_actor_fails_when_assets_missing() {
         let models_dir = tempdir().expect("failed to create tempdir");
         let config = crate::config::SenaConfig::default();
         let result = build_stt_actor(models_dir.path(), &config);
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(RuntimeError::RequiredModelMissing { .. })));
     }
 
     #[test]

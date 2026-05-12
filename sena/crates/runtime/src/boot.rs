@@ -263,14 +263,10 @@ async fn detect_onboarding_state() -> Result<bool, RuntimeError> {
 
 /// Verify and repair required speech models.
 ///
-/// Checks each available speech model and attempts to download missing ones.
-/// Unlike strict boot requirements, speech model verification is permissive:
-/// - Missing models are logged as warnings, not fatal errors
-/// - Download failures are logged but do not block boot
-/// - Runtime builder will fall back to stub backends if models are unavailable
-///
-/// This approach ensures Sena can boot and run in degraded mode even without
-/// complete speech model assets.
+/// Checks each required speech model and attempts to download missing ones.
+/// Verification itself is permissive so the download phase can attempt repair,
+/// but actor construction is strict: if assets are still missing by builder
+/// time, runtime boot fails instead of silently degrading to stub speech.
 async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), RuntimeError> {
     let models_dir = resolve_models_dir()?;
 
@@ -291,10 +287,10 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
             }
             Err(e) => {
                 warn!(
-                    "Model verification/repair failed for {}: {}. Speech backend may use stub.",
+                    "Model verification/repair failed for {}: {}. Runtime boot will fail later if assets remain unavailable.",
                     model.name(), e
                 );
-                // Continue anyway â€” builder will fall back to stubs
+                // Continue anyway — builder will fail fast if assets remain unavailable.
             }
         }
     }
