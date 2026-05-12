@@ -140,8 +140,6 @@ mod tests {
                 timestamp: now,
             },
             session_duration: Duration::from_secs(3600),
-            inferred_task: None,
-            user_state: None,
             visual_context: None,
             timestamp: now,
             soul_identity_signal: None,

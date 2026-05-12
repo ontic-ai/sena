@@ -65,8 +65,6 @@ impl ContextAssembler {
             clipboard_digest,
             keystroke_cadence,
             session_duration,
-            inferred_task: None,
-            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
             soul_identity_signal: previous.and_then(|p| p.soul_identity_signal.clone()),
@@ -108,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn assembler_leaves_task_inference_to_inference_actor() {
+    fn assembler_keeps_snapshot_structural() {
         let assembler = ContextAssembler::new();
         let mut buffer = SignalBuffer::new(Duration::from_secs(60));
         buffer.push_window(WindowContext {
@@ -120,9 +118,6 @@ mod tests {
 
         let snapshot = assembler.assemble_with_previous(&buffer, Instant::now(), None);
 
-        assert!(
-            snapshot.inferred_task.is_none(),
-            "CTP should not hardcode semantic task meaning in the context assembler"
-        );
+        assert!(snapshot.visual_context.is_none());
     }
 }

@@ -9,9 +9,7 @@ const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
 /// Evaluates whether CTP should emit a ThoughtEvent for a given snapshot.
 pub struct TriggerGate {
     min_interval: Duration,
-    sensitivity: f32,
     last_trigger: Option<Instant>,
-    last_snapshot: Option<ContextSnapshot>,
 }
 
 impl TriggerGate {
@@ -19,16 +17,8 @@ impl TriggerGate {
     pub fn new(min_interval: Duration) -> Self {
         Self {
             min_interval,
-            sensitivity: 0.5,
             last_trigger: None,
-            last_snapshot: None,
         }
-    }
-
-    /// Set the sensitivity (0.0 = hardest to trigger; 1.0 = easiest to trigger).
-    pub fn with_sensitivity(mut self, sensitivity: f32) -> Self {
-        self.sensitivity = sensitivity.clamp(0.0, 1.0);
-        self
     }
 
     /// Reset the trigger timer so the next interval check can fire immediately.
@@ -39,80 +29,24 @@ impl TriggerGate {
     /// Evaluate whether a ThoughtEvent should be emitted.
     ///
     /// The first call never fires. It establishes a baseline snapshot so later
-    /// evaluations can reason about context changes instead of immediately
+    /// evaluations can establish the initial cooldown state instead of immediately
     /// triggering during startup.
     pub fn should_trigger(&mut self, snapshot: &ContextSnapshot) -> bool {
         let now = Instant::now();
+        let _ = snapshot;
 
-        let time_since_last = match self.last_trigger {
+        match self.last_trigger {
             None => {
                 self.last_trigger = Some(now);
-                self.last_snapshot = Some(snapshot.clone());
-                return false;
+                false
             }
-            Some(last) => now.duration_since(last),
-        };
-
-        let periodic_trigger = time_since_last >= self.min_interval;
-        let base_score = self
-            .last_snapshot
-            .as_ref()
-            .map(|previous| context_diff_score(previous, snapshot))
-            .unwrap_or(0.0);
-        let significance_trigger = base_score >= diff_threshold(self.sensitivity);
-
-        self.last_snapshot = Some(snapshot.clone());
-
-        if periodic_trigger || significance_trigger {
-            self.last_trigger = Some(now);
-            true
-        } else {
-            false
+            Some(last) if now.duration_since(last) >= self.min_interval => {
+                self.last_trigger = Some(now);
+                true
+            }
+            Some(_) => false,
         }
     }
-}
-
-fn diff_threshold(sensitivity: f32) -> f32 {
-    0.75 - (0.50 * sensitivity)
-}
-
-fn context_diff_score(previous: &ContextSnapshot, current: &ContextSnapshot) -> f32 {
-    let mut score: f32 = 0.0;
-
-    if previous.active_app.app_name != current.active_app.app_name {
-        score += 0.55;
-    }
-
-    if previous.active_app.window_title != current.active_app.window_title {
-        score += 0.15;
-    }
-
-    if previous.clipboard_digest != current.clipboard_digest {
-        score += 0.55;
-    }
-
-    let file_delta = previous
-        .recent_files
-        .len()
-        .abs_diff(current.recent_files.len());
-    if file_delta >= 2 {
-        score += 0.20;
-    }
-
-    if current.keystroke_cadence.burst_detected
-        && !previous.keystroke_cadence.burst_detected
-        && current.keystroke_cadence.idle_duration >= Duration::from_secs(45)
-    {
-        score += 0.55;
-    }
-
-    if current.keystroke_cadence.events_per_minute >= 180.0
-        && previous.keystroke_cadence.events_per_minute < 180.0
-    {
-        score += 0.20;
-    }
-
-    score.min(1.0)
 }
 
 impl Default for TriggerGate {
@@ -145,8 +79,6 @@ mod tests {
                 timestamp: now,
             },
             session_duration: Duration::from_secs(10),
-            inferred_task: None,
-            user_state: None,
             visual_context: None,
             timestamp: now,
             soul_identity_signal: None,
@@ -183,16 +115,16 @@ mod tests {
     }
 
     #[test]
-    fn context_switch_triggers_without_waiting_interval() {
+    fn context_switch_does_not_bypass_cooldown() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999));
 
         assert!(!gate.should_trigger(&snapshot("Code")));
-        assert!(gate.should_trigger(&snapshot("Browser")));
+        assert!(!gate.should_trigger(&snapshot("Browser")));
     }
 
     #[test]
-    fn window_title_change_contributes_to_diff_score() {
-        let mut gate = TriggerGate::new(Duration::from_secs(9999)).with_sensitivity(1.0);
+    fn window_title_change_does_not_bypass_cooldown() {
+        let mut gate = TriggerGate::new(Duration::from_secs(9999));
         let first = snapshot("Code");
 
         let mut second = snapshot("Code");
@@ -203,8 +135,8 @@ mod tests {
     }
 
     #[test]
-    fn keystroke_shift_can_trigger_without_waiting_interval() {
-        let mut gate = TriggerGate::new(Duration::from_secs(9999)).with_sensitivity(1.0);
+    fn keystroke_shift_does_not_bypass_cooldown() {
+        let mut gate = TriggerGate::new(Duration::from_secs(9999));
         let first = snapshot("Code");
         let mut second = snapshot("Code");
         second.keystroke_cadence.burst_detected = true;
@@ -212,17 +144,17 @@ mod tests {
         second.keystroke_cadence.events_per_minute = 180.0;
 
         assert!(!gate.should_trigger(&first));
-        assert!(gate.should_trigger(&second));
+        assert!(!gate.should_trigger(&second));
     }
 
     #[test]
-    fn clipboard_change_can_trigger_without_waiting_interval() {
+    fn clipboard_change_does_not_bypass_cooldown() {
         let mut gate = TriggerGate::new(Duration::from_secs(9999));
         let first = snapshot("Code");
         let mut second = snapshot("Code");
         second.clipboard_digest = Some("digest-2".to_string());
 
         assert!(!gate.should_trigger(&first));
-        assert!(gate.should_trigger(&second));
+        assert!(!gate.should_trigger(&second));
     }
 }

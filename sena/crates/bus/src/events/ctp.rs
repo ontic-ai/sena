@@ -70,10 +70,6 @@ pub struct ContextSnapshot {
     pub keystroke_cadence: KeystrokeCadence,
     /// Session duration since boot.
     pub session_duration: Duration,
-    /// Inferred task with semantic description.
-    pub inferred_task: Option<EnrichedInferredTask>,
-    /// User cognitive state.
-    pub user_state: Option<UserState>,
     /// Visual context from recent screen capture.
     pub visual_context: Option<VisualContext>,
     /// When this snapshot was captured.
@@ -95,12 +91,6 @@ pub enum CTPEvent {
 
     /// Context snapshot was assembled (may not trigger thought).
     ContextSnapshotReady(ContextSnapshot),
-
-    /// User state was computed.
-    UserStateComputed(UserState),
-
-    /// Signal pattern was detected.
-    SignalPatternDetected(SignalPattern),
 
     /// Signal received and buffered by CTP.
     SignalReceived {
@@ -132,8 +122,6 @@ mod tests {
                 timestamp: Instant::now(),
             },
             session_duration: Duration::from_secs(10),
-            inferred_task: None,
-            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
             soul_identity_signal: None,

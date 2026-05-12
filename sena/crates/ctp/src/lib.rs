@@ -13,10 +13,7 @@
 //! - `CtpActor`: signal buffer, snapshot assembler, trigger evaluator
 //! - `SignalBuffer`: rolling time-window accumulator for platform events
 //! - `ContextAssembler`: transforms signal buffer into ContextSnapshot
-//! - `TriggerGate`: decides when to emit ThoughtEvent based on significance
-//! - `PatternEngine`: detects behavioral patterns from signals
-//! - `TaskInferenceEngine`: infers semantic task descriptions
-//! - `UserStateClassifier`: computes user cognitive state
+//! - `TriggerGate`: enforces proactive-thought cooldown over raw snapshots
 //!
 //! ## Dependencies
 //!
@@ -31,20 +28,14 @@
 pub mod actor;
 pub mod context_assembler;
 pub mod error;
-pub mod pattern_engine;
 pub mod signal;
 pub mod signal_buffer;
-pub mod task_inference;
 pub mod transparency_query;
 pub mod trigger_gate;
-pub mod user_state;
 
 pub use actor::CtpActor;
 pub use context_assembler::ContextAssembler;
 pub use error::CtpError;
-pub use pattern_engine::PatternEngine;
 pub use signal::CtpSignal;
 pub use signal_buffer::SignalBuffer;
-pub use task_inference::TaskInferenceEngine;
 pub use trigger_gate::TriggerGate;
-pub use user_state::UserStateClassifier;

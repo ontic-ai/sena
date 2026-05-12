@@ -362,10 +362,6 @@ async fn forward_bus_events_to_ipc(
                     "type": "ThoughtEventTriggered",
                     "data": {
                         "app": snapshot.active_app.app_name,
-                        "task": snapshot
-                            .inferred_task
-                            .as_ref()
-                            .map(|t| t.semantic_description.clone()),
                     }
                 })),
                 _ => None,

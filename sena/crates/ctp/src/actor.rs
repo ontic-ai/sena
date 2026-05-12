@@ -56,8 +56,7 @@ impl CtpActor {
             bus_rx: None,
             signal_buffer: SignalBuffer::new(Duration::from_secs(300)), // 5-minute window
             context_assembler: ContextAssembler::new(),
-            trigger_gate: TriggerGate::new(Duration::from_secs(600)) // 10-minute default interval
-                .with_sensitivity(0.5),
+            trigger_gate: TriggerGate::new(Duration::from_secs(600)), // 10-minute default interval
             session_start: Instant::now(),
             last_snapshot: None,
             cached_identity_signal: None,
@@ -103,10 +102,6 @@ impl CtpActor {
         if self.cached_identity_signal.is_some() {
             snapshot.soul_identity_signal = self.cached_identity_signal.clone();
         }
-
-        // CTP emits raw context only. Interpretation is deferred to the model.
-        snapshot.user_state = None;
-        snapshot.inferred_task = None;
 
         // Emit snapshot ready event
         bus.broadcast(Event::CTP(Box::new(CTPEvent::ContextSnapshotReady(
@@ -551,8 +546,7 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
             {
                 if let CTPEvent::ContextSnapshotReady(snapshot) = *boxed {
-                    assert!(snapshot.inferred_task.is_none());
-                    assert!(snapshot.user_state.is_none());
+                    assert!(snapshot.visual_context.is_none());
                     observed_snapshot = true;
                     break;
                 }
@@ -603,8 +597,7 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
             {
                 if let CTPEvent::ThoughtEventTriggered(snapshot) = *boxed {
-                    assert!(snapshot.inferred_task.is_none());
-                    assert!(snapshot.user_state.is_none());
+                    assert!(snapshot.visual_context.is_none());
                     observed = true;
                     break;
                 }

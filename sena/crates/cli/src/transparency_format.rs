@@ -9,10 +9,6 @@ use bus::events::transparency::{MemoryResponse, ObservationResponse, ReasoningRe
 pub fn format_observation_response(resp: &ObservationResponse) -> String {
     let snapshot = &resp.snapshot;
     let app = &snapshot.active_app.app_name;
-    let task = match &snapshot.inferred_task {
-        Some(hint) => format!("{} ({:.0}%)", hint.category, hint.confidence * 100.0),
-        None => "(no task inferred)".to_string(),
-    };
     let clipboard = if snapshot.clipboard_digest.is_some() {
         "clipboard ready"
     } else {
@@ -28,7 +24,6 @@ pub fn format_observation_response(resp: &ObservationResponse) -> String {
 
     format!(
         "Window:      {app}\n\
-         Task:        {task}\n\
          Clipboard:   {clipboard}\n\
          Keyboard:    {rate:.1} events/min\n\
          Session:     {session}"
@@ -133,8 +128,6 @@ mod tests {
                 timestamp: Instant::now(),
             },
             session_duration: Duration::from_secs(125),
-            inferred_task: None,
-            user_state: None,
             visual_context: None,
             timestamp: Instant::now(),
             soul_identity_signal: None,

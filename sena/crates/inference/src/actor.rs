@@ -1196,11 +1196,6 @@ impl InferenceActor {
                 "idle_duration_seconds": snapshot.keystroke_cadence.idle_duration.as_secs(),
             },
             "session_duration_seconds": snapshot.session_duration.as_secs(),
-            "user_state": snapshot.user_state.as_ref().map(|user_state| serde_json::json!({
-                "frustration_level": user_state.frustration_level,
-                "flow_detected": user_state.flow_detected,
-                "context_switch_cost": user_state.context_switch_cost,
-            })),
             "visual_context": snapshot.visual_context.as_ref().map(|visual_context| serde_json::json!({
                 "resolution": visual_context.resolution,
                 "age_seconds": visual_context.age.as_secs(),
@@ -2296,12 +2291,6 @@ mod tests {
                     timestamp: now,
                 },
                 session_duration: std::time::Duration::from_secs(900),
-                inferred_task: None,
-                user_state: Some(bus::events::ctp::UserState {
-                    frustration_level: 15,
-                    flow_detected: true,
-                    context_switch_cost: 72,
-                }),
                 visual_context: Some(bus::events::ctp::VisualContext {
                     resolution: (1920, 1080),
                     age: std::time::Duration::from_secs(3),
@@ -2339,8 +2328,6 @@ mod tests {
 
         assert!(captured_prompt.contains("recent_files"));
         assert!(captured_prompt.contains("main.rs"));
-        assert!(captured_prompt.contains("user_state"));
-        assert!(captured_prompt.contains("context_switch_cost"));
         assert!(captured_prompt.contains("visual_context"));
         assert!(captured_prompt.contains("identity_signal"));
         assert!(captured_prompt.contains("memory_relevance"));

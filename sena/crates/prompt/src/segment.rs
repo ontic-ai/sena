@@ -117,18 +117,6 @@ impl PromptSegment {
                         .collect();
                     parts.push(format!("Recent files: {}", files.join(", ")));
                 }
-                if let Some(task) = &snapshot.inferred_task {
-                    parts.push(format!(
-                        "Inferred task: {} (confidence: {:.2})",
-                        task.semantic_description, task.confidence
-                    ));
-                }
-                if let Some(state) = &snapshot.user_state {
-                    parts.push(format!(
-                        "User state: frustration={}, flow={}, switch_cost={}",
-                        state.frustration_level, state.flow_detected, state.context_switch_cost
-                    ));
-                }
                 Some(format!("## Current Context\n{}", parts.join("\n")))
             }
 
@@ -162,36 +150,7 @@ impl PromptSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus::events::ctp::{ContextSnapshot, EnrichedInferredTask, UserState};
-    use bus::events::platform::{KeystrokeCadence, WindowContext};
     use bus::events::soul::{RichSoulSummary, SoulSection, SoulSectionType};
-    use std::time::{Duration, Instant};
-
-    fn make_snapshot() -> ContextSnapshot {
-        let now = Instant::now();
-        ContextSnapshot {
-            active_app: WindowContext {
-                app_name: "Code".to_string(),
-                window_title: Some("main.rs".to_string()),
-                bundle_id: None,
-                timestamp: now,
-            },
-            recent_files: vec![],
-            clipboard_digest: None,
-            keystroke_cadence: KeystrokeCadence {
-                events_per_minute: 120.0,
-                burst_detected: false,
-                idle_duration: Duration::from_secs(5),
-                timestamp: now,
-            },
-            session_duration: Duration::from_secs(3600),
-            inferred_task: None,
-            user_state: None,
-            visual_context: None,
-            timestamp: now,
-            soul_identity_signal: None,
-        }
-    }
 
     #[test]
     fn rich_soul_context_segment_assembles_sections() {
@@ -245,39 +204,6 @@ mod tests {
 
         assert!(rendered.contains("action:"));
         assert!(rendered.contains("speak | observe | nothing"));
-    }
-
-    #[test]
-    fn current_context_shows_enriched_task() {
-        let mut snapshot = make_snapshot();
-        snapshot.inferred_task = Some(EnrichedInferredTask {
-            category: "coding".to_string(),
-            semantic_description: "Editing Rust code in VSCode".to_string(),
-            confidence: 0.85,
-        });
-
-        let segment = PromptSegment::CurrentContext(Box::new(snapshot));
-        let result = segment.to_text().expect("should render");
-
-        assert!(result.contains("Editing Rust code in VSCode"));
-        assert!(result.contains("0.85"));
-    }
-
-    #[test]
-    fn current_context_shows_user_state() {
-        let mut snapshot = make_snapshot();
-        snapshot.user_state = Some(UserState {
-            frustration_level: 45,
-            flow_detected: true,
-            context_switch_cost: 60,
-        });
-
-        let segment = PromptSegment::CurrentContext(Box::new(snapshot));
-        let result = segment.to_text().expect("should render");
-
-        assert!(result.contains("frustration=45"));
-        assert!(result.contains("flow=true"));
-        assert!(result.contains("switch_cost=60"));
     }
 
     #[test]
