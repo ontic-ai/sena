@@ -42,7 +42,7 @@ pub struct TtsActor {
     shutdown_requested: bool,
     /// Next expected sentence index for playback.
     pub(crate) next_playback_index: u32,
-    /// Audio output stream for speaker playback (lazily initialized).
+    /// Audio output stream for speaker playback.
     audio_output: Option<AudioOutputStream>,
     /// Current speaking rate derived from Soul personality.
     speaking_rate: f32,
@@ -104,12 +104,30 @@ impl TtsActor {
     /// Ensure audio output stream is initialized.
     #[cfg(not(test))]
     fn ensure_audio_output(&mut self) -> Result<(), SpeechActorError> {
-        if self.audio_output.is_none() {
+        let needs_init = self
+            .audio_output
+            .as_ref()
+            .map(|stream| !stream.is_active())
+            .unwrap_or(true);
+
+        if needs_init {
             let config = AudioOutputConfig::default();
             let stream = AudioOutputStream::start(config)
                 .map_err(|e| SpeechActorError::AudioDevice(format!("audio output init: {}", e)))?;
+
+            let format = stream.format();
+            info!(
+                device = %stream.device_name(),
+                sample_rate = format.sample_rate,
+                channels = format.channels,
+                sample_format = ?format.sample_format,
+                buffer_size_frames = ?format.buffer_size_frames,
+                preferred_sample_rate = stream.preferred_config().sample_rate,
+                preferred_channels = stream.preferred_config().channels,
+                preferred_buffer_size_frames = stream.preferred_config().buffer_size_frames,
+                "TTS audio output ready"
+            );
             self.audio_output = Some(stream);
-            debug!("Audio output stream initialized");
         }
         Ok(())
     }
@@ -466,9 +484,8 @@ impl Actor for TtsActor {
             .set_prosody(self.speaking_rate, self.pitch_scale);
 
         #[cfg(not(test))]
-        if let Err(e) = self.ensure_audio_output() {
-            warn!(error = %e, "audio output pre-initialization failed; will retry on first playback");
-        }
+        self.ensure_audio_output()
+            .map_err(|e| ActorError::StartupFailed(format!("tts audio output initialization failed: {}", e)))?;
 
         // Emit ActorReady event
         bus.broadcast(Event::System(SystemEvent::ActorReady {
@@ -490,9 +507,20 @@ impl Actor for TtsActor {
 
         while !self.shutdown_requested {
             tokio::select! {
-                Ok(event) = rx.recv() => {
-                    if let Err(e) = self.handle_bus_event(event).await {
-                        error!(error = %e, "Failed to handle bus event");
+                recv_result = rx.recv() => {
+                    match recv_result {
+                        Ok(event) => {
+                            if let Err(e) = self.handle_bus_event(event).await {
+                                error!(error = %e, "Failed to handle bus event");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "TTS actor lagged on broadcast receiver");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            info!("TTS actor broadcast channel closed");
+                            break;
+                        }
                     }
                 }
             }
@@ -815,5 +843,25 @@ mod tests {
         // Queue should be cleared
         assert!(actor.queue.is_empty());
         assert!(!actor.is_speaking);
+    }
+    
+    #[tokio::test]
+    async fn tts_actor_run_exits_when_broadcast_channel_closes() {
+        let backend = Box::new(StubTtsBackend::new(16000));
+        let mut actor = TtsActor::new(backend);
+        let bus = Arc::new(EventBus::new());
+
+        actor
+            .start(bus.clone())
+            .await
+            .expect("start should succeed");
+
+        actor.bus = None;
+        drop(bus);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), actor.run())
+            .await
+            .expect("run should not hang")
+            .expect("run should exit cleanly when channel closes");
     }
 }

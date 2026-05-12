@@ -5,8 +5,9 @@
 
 use crate::error::TtsError;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, StreamConfig};
+use cpal::{SampleFormat, StreamConfig, SupportedBufferSize};
 use std::collections::VecDeque;
+use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -44,14 +45,34 @@ impl Default for AudioOutputConfig {
     }
 }
 
+/// Runtime audio format negotiated with the output device.
+#[derive(Debug, Clone)]
+pub struct AudioDeviceFormat {
+    /// Sample rate accepted by the live output stream.
+    pub sample_rate: u32,
+    /// Channel count accepted by the live output stream.
+    pub channels: u16,
+    /// Sample format accepted by the live output stream.
+    pub sample_format: SampleFormat,
+    /// Requested fixed buffer size if one was selected, otherwise device default.
+    pub buffer_size_frames: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct NegotiatedOutputConfig {
+    device_name: String,
+    stream_config: StreamConfig,
+    format: AudioDeviceFormat,
+}
+
 /// Audio output stream manager.
 ///
 /// Internally owns a dedicated playback thread so the actor can remain Send.
 pub struct AudioOutputStream {
-    #[allow(dead_code)]
     config: AudioOutputConfig,
+    device_name: String,
+    live_format: AudioDeviceFormat,
     play_tx: Option<mpsc::UnboundedSender<PlaybackCommand>>,
-    stop_tx: Option<std::sync::mpsc::Sender<()>>,
     playback_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -61,6 +82,7 @@ enum PlaybackCommand {
         completion_tx: oneshot::Sender<Result<(), TtsError>>,
     },
     Clear,
+    Stop,
 }
 
 struct PendingPlayback {
@@ -96,33 +118,34 @@ impl AudioOutputStream {
     /// Returns the stream handle and a sender for audio buffers to play.
     pub fn start(config: AudioOutputConfig) -> Result<Self, TtsError> {
         let (play_tx, play_rx) = mpsc::unbounded_channel();
-        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), TtsError>>();
+        let (ready_tx, ready_rx) =
+            std::sync::mpsc::channel::<Result<NegotiatedOutputConfig, TtsError>>();
 
         let worker_config = config.clone();
         let playback_thread = thread::spawn(move || {
-            run_playback_loop(worker_config, play_rx, stop_rx, ready_tx);
+            run_playback_loop(worker_config, play_rx, ready_tx);
         });
 
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {
+            Ok(Ok(negotiated)) => {
                 tracing::debug!("audio playback thread ready");
                 Ok(Self {
                     config,
+                    device_name: negotiated.device_name,
+                    live_format: negotiated.format,
                     play_tx: Some(play_tx),
-                    stop_tx: Some(stop_tx),
                     playback_thread: Some(playback_thread),
                 })
             }
             Ok(Err(e)) => {
                 tracing::error!("audio playback thread initialization failed: {}", e);
-                let _ = stop_tx.send(());
+                let _ = play_tx.send(PlaybackCommand::Stop);
                 let _ = playback_thread.join();
                 Err(e)
             }
             Err(_) => {
                 tracing::error!("audio playback thread startup timed out");
-                let _ = stop_tx.send(());
+                let _ = play_tx.send(PlaybackCommand::Stop);
                 let _ = playback_thread.join();
                 Err(TtsError::BackendError(
                     "audio playback startup timed out".to_string(),
@@ -165,12 +188,27 @@ impl AudioOutputStream {
     pub fn is_active(&self) -> bool {
         self.playback_thread.is_some()
     }
+
+    /// Returns the device name associated with the live output stream.
+    pub fn device_name(&self) -> &str {
+        &self.device_name
+    }
+
+    /// Returns the runtime format negotiated with the live output stream.
+    pub fn format(&self) -> AudioDeviceFormat {
+        self.live_format.clone()
+    }
+
+    /// Returns the configured preference set used when opening the stream.
+    pub fn preferred_config(&self) -> &AudioOutputConfig {
+        &self.config
+    }
 }
 
 impl Drop for AudioOutputStream {
     fn drop(&mut self) {
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
+        if let Some(play_tx) = self.play_tx.take() {
+            let _ = play_tx.send(PlaybackCommand::Stop);
         }
         if let Some(handle) = self.playback_thread.take() {
             let _ = handle.join();
@@ -181,43 +219,32 @@ impl Drop for AudioOutputStream {
 fn run_playback_loop(
     config: AudioOutputConfig,
     mut play_rx: mpsc::UnboundedReceiver<PlaybackCommand>,
-    stop_rx: std::sync::mpsc::Receiver<()>,
-    ready_tx: std::sync::mpsc::Sender<Result<(), TtsError>>,
+    ready_tx: std::sync::mpsc::Sender<Result<NegotiatedOutputConfig, TtsError>>,
 ) {
     let host = cpal::default_host();
     let device = match host.default_output_device() {
         Some(d) => d,
         None => {
             let _ = ready_tx.send(Err(TtsError::BackendError(
-                "no default output device".to_string(),
+                "no audio output device available".to_string(),
             )));
             return;
         }
     };
 
-    let output_cfg = match device.default_output_config() {
-        Ok(c) => c,
+    let negotiated = match negotiate_output_config(&device, &config) {
+        Ok(negotiated) => negotiated,
         Err(e) => {
-            let _ = ready_tx.send(Err(TtsError::BackendError(format!(
-                "get output config failed: {}",
-                e
-            ))));
+            let _ = ready_tx.send(Err(e));
             return;
         }
-    };
-
-    let stream_config = StreamConfig {
-        channels: config.channels,
-        sample_rate: cpal::SampleRate(config.sample_rate),
-        buffer_size: cpal::BufferSize::Default,
     };
 
     let playback_state = Arc::new(Mutex::new(PlaybackState::default()));
 
     let stream = match build_output_stream(
         &device,
-        &stream_config,
-        output_cfg.sample_format(),
+        &negotiated,
         Arc::clone(&playback_state),
     ) {
         Ok(s) => s,
@@ -229,26 +256,37 @@ fn run_playback_loop(
 
     if let Err(e) = stream.play() {
         let _ = ready_tx.send(Err(TtsError::BackendError(format!(
-            "stream play failed: {}",
-            e
+            "stream play failed for device '{}' at {}Hz/{}ch {:?}: {}",
+            negotiated.device_name,
+            negotiated.format.sample_rate,
+            negotiated.format.channels,
+            negotiated.format.sample_format,
+            e,
         ))));
         return;
     }
 
-    let _ = ready_tx.send(Ok(()));
+    tracing::info!(
+        device = %negotiated.device_name,
+        sample_rate = negotiated.format.sample_rate,
+        channels = negotiated.format.channels,
+        sample_format = ?negotiated.format.sample_format,
+        buffer_size_frames = ?negotiated.format.buffer_size_frames,
+        preferred_sample_rate = config.sample_rate,
+        preferred_channels = config.channels,
+        preferred_buffer_size_frames = config.buffer_size_frames,
+        "audio output stream opened"
+    );
 
-    loop {
-        if stop_rx.try_recv().is_ok() {
-            tracing::debug!("audio playback loop received stop signal");
-            break;
-        }
+    let _ = ready_tx.send(Ok(negotiated.clone()));
 
-        match play_rx.try_recv() {
-            Ok(PlaybackCommand::Enqueue {
+    while let Some(command) = play_rx.blocking_recv() {
+        match command {
+            PlaybackCommand::Enqueue {
                 buffer,
                 completion_tx,
-            }) => {
-                let adapted = adapt_buffer_format(&buffer, &config);
+            } => {
+                let adapted = adapt_buffer_format(&buffer, &negotiated.format);
                 let sample_count = adapted.samples.len();
                 let mut state = playback_state
                     .lock()
@@ -256,41 +294,116 @@ fn run_playback_loop(
                 state
                     .queue
                     .push_back(PendingPlayback::new(adapted.samples, completion_tx));
-                tracing::trace!("queued {} samples for playback", sample_count);
+                tracing::trace!(
+                    device = %negotiated.device_name,
+                    queued_samples = sample_count,
+                    input_sample_rate = buffer.sample_rate,
+                    input_channels = buffer.channels,
+                    output_sample_rate = negotiated.format.sample_rate,
+                    output_channels = negotiated.format.channels,
+                    "queued audio buffer for playback"
+                );
             }
-            Ok(PlaybackCommand::Clear) => {
+            PlaybackCommand::Clear => {
                 clear_playback_state(&playback_state, "playback interrupted");
             }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                tracing::debug!("audio playback channel disconnected");
+            PlaybackCommand::Stop => {
+                tracing::debug!(device = %negotiated.device_name, "audio playback loop received stop signal");
                 break;
             }
         }
     }
 
+    if play_rx.is_closed() {
+        tracing::debug!(device = %negotiated.device_name, "audio playback channel disconnected");
+    }
+
     clear_playback_state(&playback_state, "audio output stopped");
     drop(stream);
-    tracing::debug!("audio playback loop exiting");
+    tracing::debug!(device = %negotiated.device_name, "audio playback loop exiting");
+}
+
+fn negotiate_output_config(
+    device: &cpal::Device,
+    preferred: &AudioOutputConfig,
+) -> Result<NegotiatedOutputConfig, TtsError> {
+    let device_name = device
+        .name()
+        .unwrap_or_else(|_| "<unknown output device>".to_string());
+
+    let supported_config = device.default_output_config().map_err(|e| {
+        TtsError::BackendError(format!(
+            "default output config unavailable for device '{}': {}",
+            device_name, e
+        ))
+    })?;
+
+    let mut stream_config = supported_config.config();
+    if let Some(buffer_size_frames) = select_buffer_size_frames(
+        supported_config.buffer_size(),
+        preferred.buffer_size_frames,
+    ) {
+        stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size_frames);
+    }
+
+    let format = AudioDeviceFormat {
+        sample_rate: stream_config.sample_rate.0,
+        channels: stream_config.channels,
+        sample_format: supported_config.sample_format(),
+        buffer_size_frames: match stream_config.buffer_size {
+            cpal::BufferSize::Default => None,
+            cpal::BufferSize::Fixed(frames) => Some(frames),
+        },
+    };
+
+    Ok(NegotiatedOutputConfig {
+        device_name,
+        stream_config,
+        format,
+    })
+}
+
+fn select_buffer_size_frames(
+    supported_buffer_size: &SupportedBufferSize,
+    preferred_frames: usize,
+) -> Option<u32> {
+    let preferred_frames = u32::try_from(preferred_frames).ok()?;
+
+    match supported_buffer_size {
+        SupportedBufferSize::Range { min, max }
+            if preferred_frames >= *min && preferred_frames <= *max =>
+        {
+            Some(preferred_frames)
+        }
+        _ => None,
+    }
 }
 
 fn build_output_stream(
     device: &cpal::Device,
-    config: &StreamConfig,
-    format: SampleFormat,
+    negotiated: &NegotiatedOutputConfig,
     playback_state: Arc<Mutex<PlaybackState>>,
 ) -> Result<cpal::Stream, TtsError> {
-    let channels = config.channels as usize;
+    let channels = negotiated.format.channels as usize;
+    let device_name = negotiated.device_name.clone();
+    let format = negotiated.format.clone();
+    let error_state = Arc::clone(&playback_state);
 
-    let err_fn = |err| {
-        tracing::error!("audio output stream error: {}", err);
+    let err_fn = move |err| {
+        tracing::error!(
+            device = %device_name,
+            sample_rate = format.sample_rate,
+            channels = format.channels,
+            sample_format = ?format.sample_format,
+            error = %err,
+            "audio output stream error"
+        );
+        clear_playback_state(&error_state, "audio output stream failed");
     };
 
-    let stream = match format {
+    let stream = match negotiated.format.sample_format {
         SampleFormat::F32 => device.build_output_stream(
-            config,
+            &negotiated.stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 write_output_data(data, &playback_state, channels);
             },
@@ -298,14 +411,14 @@ fn build_output_stream(
             None,
         ),
         SampleFormat::I16 => device.build_output_stream(
-            config,
+            &negotiated.stream_config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                 let mut state = playback_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if let Some(source_sample) = next_output_sample(&mut state) {
-                        *sample = (source_sample * i16::MAX as f32) as i16;
+                        *sample = (source_sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     } else {
                         *sample = 0;
                     }
@@ -315,13 +428,14 @@ fn build_output_stream(
             None,
         ),
         SampleFormat::U16 => device.build_output_stream(
-            config,
+            &negotiated.stream_config,
             move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                 let mut state = playback_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 for sample in data.iter_mut() {
                     if let Some(source_sample) = next_output_sample(&mut state) {
+                        let source_sample = source_sample.clamp(-1.0, 1.0);
                         *sample = ((source_sample + 1.0) * 0.5 * u16::MAX as f32) as u16;
                     } else {
                         *sample = u16::MAX / 2;
@@ -333,13 +447,25 @@ fn build_output_stream(
         ),
         _ => {
             return Err(TtsError::BackendError(format!(
-                "unsupported sample format: {:?}",
-                format
+                "unsupported sample format for device '{}' at {}Hz/{}ch: {:?}",
+                negotiated.device_name,
+                negotiated.format.sample_rate,
+                negotiated.format.channels,
+                negotiated.format.sample_format,
             )));
         }
     };
 
-    stream.map_err(|e| TtsError::BackendError(format!("build output stream failed: {}", e)))
+    stream.map_err(|e| {
+        TtsError::BackendError(format!(
+            "build output stream failed for device '{}' at {}Hz/{}ch {:?}: {}",
+            negotiated.device_name,
+            negotiated.format.sample_rate,
+            negotiated.format.channels,
+            negotiated.format.sample_format,
+            e,
+        ))
+    })
 }
 
 fn next_output_sample(state: &mut PlaybackState) -> Option<f32> {
@@ -380,7 +506,7 @@ fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, channe
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for frame in data.chunks_mut(channels) {
-        let source_sample = next_output_sample(&mut state).unwrap_or(0.0);
+        let source_sample = next_output_sample(&mut state).unwrap_or(0.0).clamp(-1.0, 1.0);
         for sample in frame.iter_mut() {
             *sample = source_sample;
         }
@@ -388,84 +514,129 @@ fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, channe
 }
 
 /// Adapt audio buffer to target format (sample rate and channel count).
-fn adapt_buffer_format(source: &AudioBuffer, target_config: &AudioOutputConfig) -> AudioBuffer {
-    let samples = &source.samples;
-
-    // Step 1: Channel adaptation
-    let channel_adapted = if source.channels == target_config.channels {
-        samples.clone()
-    } else if source.channels == 1 && target_config.channels == 2 {
-        // Mono to stereo: duplicate each sample
-        samples
-            .iter()
-            .flat_map(|&sample| std::iter::repeat_n(sample, 2))
-            .collect()
-    } else if source.channels == 2 && target_config.channels == 1 {
-        // Stereo to mono: average pairs
-        samples
-            .chunks(2)
-            .map(|pair| {
-                if pair.len() == 2 {
-                    (pair[0] + pair[1]) / 2.0
-                } else {
-                    pair[0]
-                }
-            })
-            .collect()
-    } else {
-        tracing::warn!(
-            "unsupported channel adaptation: {} -> {}",
-            source.channels,
-            target_config.channels
-        );
-        samples.clone()
-    };
-
-    // Step 2: Sample rate adaptation (simple linear interpolation)
-    let samples_final = if source.sample_rate == target_config.sample_rate {
-        channel_adapted
+fn adapt_buffer_format(source: &AudioBuffer, target_format: &AudioDeviceFormat) -> AudioBuffer {
+    let resampled = if source.sample_rate == target_format.sample_rate {
+        source.samples.clone()
     } else {
         resample_linear(
-            &channel_adapted,
+            &source.samples,
             source.sample_rate,
-            target_config.sample_rate,
+            target_format.sample_rate,
+            source.channels as usize,
         )
     };
 
+    let samples_final = adapt_channels(
+        &resampled,
+        source.channels as usize,
+        target_format.channels as usize,
+    );
+
     AudioBuffer {
         samples: samples_final,
-        channels: target_config.channels,
-        sample_rate: target_config.sample_rate,
+        channels: target_format.channels,
+        sample_rate: target_format.sample_rate,
     }
 }
 
+fn adapt_channels(samples: &[f32], source_channels: usize, target_channels: usize) -> Vec<f32> {
+    if samples.is_empty() || source_channels == 0 || target_channels == 0 {
+        return Vec::new();
+    }
+
+    if source_channels == target_channels {
+        return samples.to_vec();
+    }
+
+    if source_channels == 1 {
+        return samples
+            .iter()
+            .flat_map(|&sample| std::iter::repeat_n(sample, target_channels))
+            .collect();
+    }
+
+    if target_channels == 1 {
+        return samples
+            .chunks(source_channels)
+            .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
+            .collect();
+    }
+
+    let frame_count = samples.len().div_ceil(source_channels);
+    let mut adapted = Vec::with_capacity(frame_count * target_channels);
+
+    for frame in samples.chunks(source_channels) {
+        for channel in 0..target_channels {
+            let sample = frame
+                .get(channel)
+                .copied()
+                .or_else(|| frame.first().copied())
+                .unwrap_or(0.0);
+            adapted.push(sample);
+        }
+    }
+
+    adapted
+}
+
 /// Simple linear interpolation resampler.
-fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
-    if samples.is_empty() {
+fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32, channels: usize) -> Vec<f32> {
+    if samples.is_empty() || channels == 0 {
+        return Vec::new();
+    }
+
+    if src_rate == dst_rate {
+        return samples.to_vec();
+    }
+
+    let input_frames = samples.len().div_ceil(channels);
+    if input_frames == 0 {
         return Vec::new();
     }
 
     let ratio = src_rate as f64 / dst_rate as f64;
-    let output_len = (samples.len() as f64 / ratio).ceil() as usize;
-    let mut output = Vec::with_capacity(output_len);
+    let output_frames = (input_frames as f64 / ratio).ceil() as usize;
+    let mut output = Vec::with_capacity(output_frames * channels);
 
-    for i in 0..output_len {
-        let src_idx = i as f64 * ratio;
-        let idx0 = src_idx.floor() as usize;
-        let idx1 = (idx0 + 1).min(samples.len() - 1);
-        let frac = src_idx - idx0 as f64;
+    for frame_index in 0..output_frames {
+        let src_frame = frame_index as f64 * ratio;
+        let idx0 = src_frame.floor() as usize;
+        let idx1 = (idx0 + 1).min(input_frames - 1);
+        let frac = src_frame - idx0 as f64;
 
-        let sample = samples[idx0] * (1.0 - frac) as f32 + samples[idx1] * frac as f32;
-        output.push(sample);
+        for channel in 0..channels {
+            let sample0 = frame_sample(samples, idx0, channel, channels);
+            let sample1 = frame_sample(samples, idx1, channel, channels);
+            let sample = sample0 * (1.0 - frac) as f32 + sample1 * frac as f32;
+            output.push(sample);
+        }
     }
 
     output
+}
+
+fn frame_sample(samples: &[f32], frame_index: usize, channel_index: usize, channels: usize) -> f32 {
+    let sample_index = frame_index * channels + channel_index;
+    samples
+        .get(sample_index)
+        .copied()
+        .or_else(|| samples.get(frame_index * channels).copied())
+        .unwrap_or(0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    fn test_format(sample_rate: u32, channels: u16) -> AudioDeviceFormat {
+        AudioDeviceFormat {
+            sample_rate,
+            channels,
+            sample_format: SampleFormat::F32,
+            buffer_size_frames: None,
+        }
+    }
 
     #[test]
     fn audio_buffer_channel_mono_to_stereo() {
@@ -474,13 +645,9 @@ mod tests {
             channels: 1,
             sample_rate: 16000,
         };
-        let config = AudioOutputConfig {
-            channels: 2,
-            sample_rate: 16000,
-            ..Default::default()
-        };
+        let format = test_format(16000, 2);
 
-        let adapted = adapt_buffer_format(&source, &config);
+        let adapted = adapt_buffer_format(&source, &format);
         assert_eq!(adapted.channels, 2);
         assert_eq!(adapted.samples.len(), 6);
         assert_eq!(adapted.samples, vec![0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
@@ -493,13 +660,9 @@ mod tests {
             channels: 2,
             sample_rate: 16000,
         };
-        let config = AudioOutputConfig {
-            channels: 1,
-            sample_rate: 16000,
-            ..Default::default()
-        };
+        let format = test_format(16000, 1);
 
-        let adapted = adapt_buffer_format(&source, &config);
+        let adapted = adapt_buffer_format(&source, &format);
         assert_eq!(adapted.channels, 1);
         assert_eq!(adapted.samples.len(), 2);
         assert!((adapted.samples[0] - 0.15).abs() < 0.001);
@@ -507,9 +670,23 @@ mod tests {
     }
 
     #[test]
+    fn audio_buffer_channel_mono_to_multichannel() {
+        let source = AudioBuffer {
+            samples: vec![0.1, 0.2],
+            channels: 1,
+            sample_rate: 22050,
+        };
+        let format = test_format(22050, 4);
+
+        let adapted = adapt_buffer_format(&source, &format);
+        assert_eq!(adapted.channels, 4);
+        assert_eq!(adapted.samples, vec![0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2]);
+    }
+
+    #[test]
     fn audio_buffer_resample_upsampling() {
         let samples = vec![0.0, 1.0, 0.0];
-        let resampled = resample_linear(&samples, 8000, 16000);
+        let resampled = resample_linear(&samples, 8000, 16000, 1);
         assert!(resampled.len() > samples.len());
         assert!(resampled.len() <= samples.len() * 2 + 1);
     }
@@ -517,9 +694,23 @@ mod tests {
     #[test]
     fn audio_buffer_resample_downsampling() {
         let samples = vec![0.0, 0.5, 1.0, 0.5, 0.0];
-        let resampled = resample_linear(&samples, 16000, 8000);
+        let resampled = resample_linear(&samples, 16000, 8000, 1);
         assert!(resampled.len() < samples.len());
         assert!(resampled.len() >= samples.len() / 2);
+    }
+
+    #[test]
+    fn audio_buffer_resample_preserves_stereo_channels() {
+        let samples = vec![0.0, 1.0, 1.0, 0.0];
+        let resampled = resample_linear(&samples, 2, 3, 2);
+
+        assert_eq!(resampled.len(), 6);
+        assert!((resampled[0] - 0.0).abs() < 0.001);
+        assert!((resampled[1] - 1.0).abs() < 0.001);
+        assert!((resampled[2] - 0.6666667).abs() < 0.001);
+        assert!((resampled[3] - 0.33333334).abs() < 0.001);
+        assert!((resampled[4] - 1.0).abs() < 0.001);
+        assert!((resampled[5] - 0.0).abs() < 0.001);
     }
 
     #[test]
@@ -529,13 +720,9 @@ mod tests {
             channels: 1,
             sample_rate: 16000,
         };
-        let config = AudioOutputConfig {
-            channels: 1,
-            sample_rate: 16000,
-            ..Default::default()
-        };
+        let format = test_format(16000, 1);
 
-        let adapted = adapt_buffer_format(&source, &config);
+        let adapted = adapt_buffer_format(&source, &format);
         assert_eq!(adapted.samples, source.samples);
     }
 
