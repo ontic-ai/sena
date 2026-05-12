@@ -24,12 +24,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 use text::SentenceBoundaryIterator;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 
 /// Default queue capacity.
 const DEFAULT_QUEUE_CAPACITY: usize = 100;
+const EMBEDDING_FALLBACK_DIMENSIONS: usize = 768;
+const MEMORY_WRITE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const REASONING_PREVIEW_CHARS: usize = 160;
 const REASONING_HISTORY_LIMIT: usize = 8;
 
@@ -72,6 +75,7 @@ pub struct InferenceActor {
     embed_tx_guard: Option<mpsc::Sender<EmbedRequest>>,
     work_tx: Option<mpsc::Sender<()>>,
     inference_max_tokens: Arc<AtomicUsize>,
+    pending_user_inputs: HashMap<bus::CausalId, String>,
     pending_reasoning: HashMap<bus::CausalId, InferenceSource>,
     reasoning_history: VecDeque<LastReasoningState>,
 }
@@ -125,6 +129,7 @@ impl InferenceActor {
             embed_tx_guard,
             work_tx: None,
             inference_max_tokens: Arc::new(AtomicUsize::new(InferenceParams::default().max_tokens)),
+            pending_user_inputs: HashMap::new(),
             pending_reasoning: HashMap::new(),
             reasoning_history: VecDeque::new(),
         }
@@ -174,6 +179,101 @@ impl InferenceActor {
 
     fn forget_pending_reasoning(&mut self, causal_id: bus::CausalId) {
         self.pending_reasoning.remove(&causal_id);
+    }
+
+    fn remember_user_input(&mut self, causal_id: bus::CausalId, text: String) {
+        self.pending_user_inputs.insert(causal_id, text);
+    }
+
+    async fn write_memory_with_ack(
+        bus: &Arc<EventBus>,
+        text: String,
+        kind: MemoryKind,
+        causal_id: bus::CausalId,
+    ) -> Result<(), InferenceError> {
+        let mut ack_rx = bus.subscribe_broadcast();
+
+        bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
+            text,
+            kind,
+            causal_id,
+        }))
+        .await?;
+
+        tokio::time::timeout(MEMORY_WRITE_ACK_TIMEOUT, async {
+            loop {
+                match ack_rx.recv().await {
+                    Ok(Event::Memory(MemoryEvent::MemoryWriteCompleted { causal_id: ack_id }))
+                        if ack_id == causal_id =>
+                    {
+                        return Ok(());
+                    }
+                    Ok(Event::Memory(MemoryEvent::MemoryWriteFailed {
+                        causal_id: ack_id,
+                        reason,
+                    })) if ack_id == causal_id => {
+                        return Err(InferenceError::ExecutionFailed(format!(
+                            "memory write failed: {}",
+                            reason
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Err(InferenceError::ExecutionFailed(format!(
+                            "memory write ack channel closed: {}",
+                            error
+                        )));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            InferenceError::ExecutionFailed(format!(
+                "memory write acknowledgement timed out after {} seconds",
+                MEMORY_WRITE_ACK_TIMEOUT.as_secs()
+            ))
+        })?
+    }
+
+    async fn persist_completed_exchange(
+        &mut self,
+        bus: &Arc<EventBus>,
+        source: InferenceSource,
+        response_text: &str,
+        causal_id: bus::CausalId,
+    ) -> Result<(), InferenceError> {
+        if !matches!(source, InferenceSource::UserVoice | InferenceSource::UserText) {
+            return Ok(());
+        }
+
+        if let Some(user_text) = self.pending_user_inputs.remove(&causal_id) {
+            let trimmed = user_text.trim();
+            if !trimmed.is_empty() {
+                Self::write_memory_with_ack(
+                    bus,
+                    format!("User: {}", trimmed),
+                    MemoryKind::Episodic,
+                    causal_id,
+                )
+                .await?;
+            }
+        } else {
+            warn!(?causal_id, "missing cached user input for completed exchange");
+        }
+
+        let trimmed_response = response_text.trim();
+        if !trimmed_response.is_empty() {
+            Self::write_memory_with_ack(
+                bus,
+                format!("Sena: {}", trimmed_response),
+                MemoryKind::Episodic,
+                causal_id,
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     fn build_reasoning_response(
@@ -989,11 +1089,28 @@ impl InferenceActor {
         let backend_guard = backend.lock().await;
 
         if !backend_guard.is_loaded() {
-            return Err(InferenceError::ModelNotLoaded);
+            warn!("embedding backend not loaded; returning zero-vector fallback");
+            return Ok(vec![0.0; EMBEDDING_FALLBACK_DIMENSIONS]);
         }
 
-        let embedding = backend_guard.embed(text).await?;
-        Ok(embedding)
+        match backend_guard.embed(text).await {
+            Ok(embedding) if embedding.len() == EMBEDDING_FALLBACK_DIMENSIONS => Ok(embedding),
+            Ok(embedding) => {
+                warn!(
+                    expected = EMBEDDING_FALLBACK_DIMENSIONS,
+                    actual = embedding.len(),
+                    "embedding backend returned unexpected dimension; returning zero-vector fallback"
+                );
+                Ok(vec![0.0; EMBEDDING_FALLBACK_DIMENSIONS])
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "embedding backend failed; returning zero-vector fallback"
+                );
+                Ok(vec![0.0; EMBEDDING_FALLBACK_DIMENSIONS])
+            }
+        }
     }
 
     /// Execute an extraction request.
@@ -1383,13 +1500,23 @@ impl Actor for InferenceActor {
                             causal_id,
                             ..
                         })) => {
-                            if matches!(source, InferenceSource::UserVoice | InferenceSource::UserText) {
-                                let _ = bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
-                                    text: full_text,
-                                    kind: MemoryKind::Episodic,
-                                    causal_id,
-                                })).await;
+                            if let Err(error) = self
+                                .persist_completed_exchange(&bus, source, &full_text, causal_id)
+                                .await
+                            {
+                                warn!(
+                                    error = %error,
+                                    ?causal_id,
+                                    "failed to persist completed exchange to memory"
+                                );
                             }
+                        }
+                        Ok(Event::Speech(bus::SpeechEvent::TranscriptionCompleted {
+                            text,
+                            causal_id,
+                            ..
+                        })) => {
+                            self.remember_user_input(causal_id, text);
                         }
                         Ok(Event::Inference(InferenceEvent::InferenceFailed { causal_id, .. }))
                         | Ok(Event::Inference(InferenceEvent::InferenceFailedWithOrigin {
@@ -1397,6 +1524,7 @@ impl Actor for InferenceActor {
                             ..
                         })) => {
                             self.forget_pending_reasoning(causal_id);
+                            self.pending_user_inputs.remove(&causal_id);
                         }
                         Ok(Event::Inference(InferenceEvent::ModelLoadRequested {
                             model_path,
@@ -1948,6 +2076,87 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         assert_eq!(shared_budget.load(Ordering::Relaxed), 896);
+    }
+
+    #[tokio::test]
+    async fn execute_embed_falls_back_to_zero_vector() {
+        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> = Arc::new(Mutex::new(Box::new(
+            MockBackend::unloaded(),
+        )));
+
+        let vector = InferenceActor::execute_embed(backend, "hello".to_string(), bus::CausalId::new())
+            .await
+            .expect("embed fallback should succeed");
+
+        assert_eq!(vector.len(), EMBEDDING_FALLBACK_DIMENSIONS);
+        assert!(vector.iter().all(|value| *value == 0.0));
+    }
+
+    #[tokio::test]
+    async fn persist_completed_exchange_writes_separate_user_and_sena_nodes() {
+        let bus = Arc::new(EventBus::new());
+        let backend = Box::new(MockBackend::default_loaded());
+        let mut actor = InferenceActor::new(backend);
+        let causal_id = bus::CausalId::new();
+        let observed_writes = Arc::new(StdMutex::new(Vec::new()));
+
+        actor.remember_user_input(causal_id, "remember this exchange".to_string());
+
+        let responder_bus = bus.clone();
+        let observed_clone = observed_writes.clone();
+        let responder = tokio::spawn(async move {
+            let mut rx = responder_bus.subscribe_broadcast();
+            let mut seen = 0;
+
+            while seen < 2 {
+                match rx.recv().await {
+                    Ok(Event::Memory(MemoryEvent::MemoryWriteRequest {
+                        text,
+                        kind,
+                        causal_id,
+                    })) => {
+                        assert_eq!(kind, MemoryKind::Episodic);
+                        observed_clone
+                            .lock()
+                            .expect("memory write capture mutex")
+                            .push(text);
+                        responder_bus
+                            .broadcast(Event::Memory(MemoryEvent::MemoryWriteCompleted {
+                                causal_id,
+                            }))
+                            .await
+                            .expect("memory write completion should broadcast");
+                        seen += 1;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("memory write responder channel failed: {error}"),
+                }
+            }
+        });
+
+        actor
+            .persist_completed_exchange(
+                &bus,
+                InferenceSource::UserText,
+                "I will remember it.",
+                causal_id,
+            )
+            .await
+            .expect("completed exchange should persist");
+
+        responder.await.expect("memory write responder should finish");
+
+        let writes = observed_writes
+            .lock()
+            .expect("memory write capture mutex")
+            .clone();
+        assert_eq!(
+            writes,
+            vec![
+                "User: remember this exchange".to_string(),
+                "Sena: I will remember it.".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

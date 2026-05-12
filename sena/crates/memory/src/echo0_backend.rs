@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const NODES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("memory_nodes");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_meta");
@@ -57,6 +57,10 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     similarity.clamp(0.0, 1.0)
 }
 
+fn is_zero_vector(vector: &[f32]) -> bool {
+    !vector.is_empty() && vector.iter().all(|value| *value == 0.0)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNode {
     pub id: u64,
@@ -66,6 +70,12 @@ pub struct MemoryNode {
     pub kind: MemoryKind,
     pub timestamp: u64,
     pub causal_id: u64,
+}
+
+impl MemoryNode {
+    fn has_embedding(&self) -> bool {
+        self.embedding.len() == EMBEDDING_DIMENSIONS && !is_zero_vector(&self.embedding)
+    }
 }
 
 /// Persistent redb-backed memory store.
@@ -136,6 +146,32 @@ impl PersistentMemoryStore {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+
+    fn fallback_recency_chunks(mut nodes: Vec<MemoryNode>, limit: usize) -> Vec<ScoredChunk> {
+        let now = Self::now();
+
+        nodes.sort_by(|left, right| {
+            right
+                .timestamp
+                .cmp(&left.timestamp)
+                .then_with(|| {
+                    right
+                        .importance
+                        .partial_cmp(&left.importance)
+                        .unwrap_or(Ordering::Equal)
+                })
+        });
+
+        nodes
+            .into_iter()
+            .take(limit)
+            .map(|node| ScoredChunk {
+                content: node.text,
+                score: node.importance.clamp(0.0, 1.0),
+                age_seconds: now.saturating_sub(node.timestamp),
+            })
+            .collect()
     }
 
     fn next_node_id(&self) -> Result<u64, MemoryError> {
@@ -246,19 +282,27 @@ impl PersistentMemoryStore {
             "persistent memory ingest requested"
         );
 
-        let embedding = self
-            .embedder
-            .embed(text)
-            .await
-            .map_err(|e| MemoryError::InvalidEmbedding(e.to_string()))?;
-
-        if embedding.len() != EMBEDDING_DIMENSIONS {
-            return Err(MemoryError::InvalidEmbedding(format!(
-                "expected {}-dim embedding, got {}",
-                EMBEDDING_DIMENSIONS,
-                embedding.len()
-            )));
-        }
+        let embedding = match self.embedder.embed(text).await {
+            Ok(vector) if vector.len() == EMBEDDING_DIMENSIONS && !is_zero_vector(&vector) => {
+                vector
+            }
+            Ok(vector) => {
+                warn!(
+                    expected = EMBEDDING_DIMENSIONS,
+                    actual = vector.len(),
+                    zero_vector = is_zero_vector(&vector),
+                    "embedding unavailable or unsupported; storing node without semantic vector"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "embedding request failed; storing node without semantic vector"
+                );
+                Vec::new()
+            }
+        };
 
         let node = MemoryNode {
             id: self.next_node_id()?,
@@ -283,26 +327,51 @@ impl PersistentMemoryStore {
             return Ok(Vec::new());
         }
 
-        let query_embedding = self
-            .embedder
-            .embed(query)
-            .await
-            .map_err(|e| MemoryError::InvalidEmbedding(e.to_string()))?;
-        let query_lower = query.to_lowercase();
+        let nodes = self.load_nodes()?;
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let has_embeddings = nodes.iter().any(MemoryNode::has_embedding);
+        let query_embedding = match self.embedder.embed(query).await {
+            Ok(vector) if vector.len() == EMBEDDING_DIMENSIONS && !is_zero_vector(&vector) => {
+                Some(vector)
+            }
+            Ok(vector) => {
+                warn!(
+                    expected = EMBEDDING_DIMENSIONS,
+                    actual = vector.len(),
+                    zero_vector = is_zero_vector(&vector),
+                    "query embedding unavailable; falling back to recency retrieval"
+                );
+                None
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "query embedding failed; falling back to recency retrieval"
+                );
+                None
+            }
+        };
+
+        let Some(query_embedding) = query_embedding else {
+            return Ok(Self::fallback_recency_chunks(nodes, limit));
+        };
+
+        if !has_embeddings {
+            return Ok(Self::fallback_recency_chunks(nodes, limit));
+        }
+
         let now = Self::now();
-        let mut scored: Vec<_> = self
-            .load_nodes()?
+        let mut scored: Vec<_> = nodes
             .into_iter()
+            .filter(MemoryNode::has_embedding)
             .map(|node| {
                 let similarity = cosine_similarity(&query_embedding, &node.embedding);
-                let lexical_match = node.text.to_lowercase().contains(&query_lower);
                 ScoredChunk {
                     content: node.text,
-                    score: if lexical_match {
-                        node.importance
-                    } else {
-                        (similarity * node.importance).clamp(0.0, 1.0)
-                    },
+                    score: (similarity * node.importance).clamp(0.0, 1.0),
                     age_seconds: now.saturating_sub(node.timestamp),
                 }
             })
@@ -430,6 +499,18 @@ mod tests {
         tokio::spawn(async move {
             while let Some(request) = embed_rx.recv().await {
                 let _ = request.response_tx.send(Ok(test_embedding(&request.text)));
+            }
+        });
+        embed_tx
+    }
+
+    fn spawn_zero_embed_sender() -> mpsc::Sender<EmbedRequest> {
+        let (embed_tx, mut embed_rx) = mpsc::channel::<EmbedRequest>(8);
+        tokio::spawn(async move {
+            while let Some(request) = embed_rx.recv().await {
+                let _ = request
+                    .response_tx
+                    .send(Ok(vec![0.0; EMBEDDING_DIMENSIONS]));
             }
         });
         embed_tx
@@ -566,7 +647,8 @@ mod tests {
         // Query before decay
         let results_before = backend.query("test", 10).await.expect("query failed");
         assert_eq!(results_before.len(), 1);
-        assert_eq!(results_before[0].score, 1.0);
+        let initial_score = results_before[0].score;
+        assert!(initial_score > 0.0);
 
         // Consolidate to decay
         backend.consolidate().await.expect("consolidate failed");
@@ -574,7 +656,7 @@ mod tests {
         // Query after decay
         let results_after = backend.query("test", 10).await.expect("query failed");
         assert_eq!(results_after.len(), 1);
-        assert_eq!(results_after[0].score, 0.9);
+        assert!((results_after[0].score - (initial_score * 0.9)).abs() < f32::EPSILON);
     }
 
     #[tokio::test]
@@ -623,5 +705,48 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].content.contains("rust coding world"));
+    }
+
+    #[tokio::test]
+    async fn ingest_without_embeddings_still_persists_node() {
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let mut backend = PersistentMemoryStore::open(
+            &temp_dir.path().join("memory.redb"),
+            SenaEmbedder::disconnected(),
+        )
+        .expect("store should open");
+
+        backend
+            .ingest("first memory", MemoryKind::Episodic, CausalId::new())
+            .await
+            .expect("ingest should succeed without embeddings");
+
+        let nodes = backend.load_nodes().expect("load nodes failed");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].embedding.is_empty());
+
+        let results = backend
+            .query_semantic("anything", 5)
+            .await
+            .expect("query should fall back to recency");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "first memory");
+    }
+
+    #[tokio::test]
+    async fn zero_vector_embeddings_are_stored_without_semantic_vector() {
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let embedder = SenaEmbedder::new(spawn_zero_embed_sender());
+        let mut backend = PersistentMemoryStore::open(&temp_dir.path().join("memory.redb"), embedder)
+            .expect("store should open");
+
+        backend
+            .ingest("fallback memory", MemoryKind::Semantic, CausalId::new())
+            .await
+            .expect("ingest should succeed");
+
+        let nodes = backend.load_nodes().expect("load nodes failed");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].embedding.is_empty());
     }
 }

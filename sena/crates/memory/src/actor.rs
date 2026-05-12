@@ -7,10 +7,9 @@ use bus::events::{
     TemporalBehaviorPattern,
 };
 use bus::{
-    Actor, ActorError, CausalId, Event, EventBus, InferenceEvent, SoulEvent, SpeechEvent,
-    TransparencyEvent, TransparencyQuery, TransparencyResult,
+    Actor, ActorError, CausalId, Event, EventBus, SoulEvent, TransparencyEvent, TransparencyQuery,
+    TransparencyResult,
 };
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -166,7 +165,6 @@ pub struct MemoryActor {
     bus: Option<Arc<EventBus>>,
     backend: Box<dyn MemoryBackend>,
     backup_config: BackupConfig,
-    pending_user_utterances: HashMap<CausalId, String>,
     /// Cache of soul personalization data observed through bus events.
     soul_cache: SoulPersonalityCache,
 }
@@ -178,7 +176,6 @@ impl MemoryActor {
             bus: None,
             backend,
             backup_config: BackupConfig::default(),
-            pending_user_utterances: HashMap::new(),
             soul_cache: SoulPersonalityCache::default(),
         }
     }
@@ -192,15 +189,7 @@ impl MemoryActor {
             bus: None,
             backend,
             backup_config,
-            pending_user_utterances: HashMap::new(),
             soul_cache: SoulPersonalityCache::default(),
-        }
-    }
-
-    fn decorate_memory_write(&mut self, text: String, causal_id: CausalId) -> String {
-        match self.pending_user_utterances.remove(&causal_id) {
-            Some(user_text) => format!("User: {}\nAssistant: {}", user_text.trim(), text.trim()),
-            None => text,
         }
     }
 
@@ -578,7 +567,6 @@ impl Actor for MemoryActor {
                                     }
                                 }
                                 MemoryEvent::MemoryWriteRequest { text, kind, causal_id } => {
-                                    let text = self.decorate_memory_write(text, causal_id);
                                     if let Err(e) =
                                         self.handle_ingest_request(text, kind, causal_id).await
                                     {
@@ -730,20 +718,6 @@ impl Actor for MemoryActor {
                             Ok(Event::Soul(SoulEvent::Deleted { .. })) => {
                                 self.soul_cache = SoulPersonalityCache::default();
                                 debug!("soul_cache: cleared after soul deletion");
-                            }
-                            Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
-                                text,
-                                causal_id,
-                                ..
-                            })) => {
-                                self.pending_user_utterances.insert(causal_id, text);
-                            }
-                            Ok(Event::Inference(InferenceEvent::InferenceFailed { causal_id, .. }))
-                            | Ok(Event::Inference(InferenceEvent::InferenceFailedWithOrigin {
-                                causal_id,
-                                ..
-                            })) => {
-                                self.pending_user_utterances.remove(&causal_id);
                             }
                             Ok(_) => {}
                             Err(e) => {
@@ -1096,7 +1070,8 @@ mod tests {
             .await
             .expect("query failed");
         assert_eq!(chunks_before.len(), 2, "should find both chunks");
-        assert_eq!(chunks_before[0].score, 1.0, "fresh chunks have score 1.0");
+        let initial_score = chunks_before[0].score;
+        assert!(initial_score > 0.0, "fresh chunks should have a positive score");
 
         // Perform consolidation
         let result = actor.backend.consolidate().await;
@@ -1110,7 +1085,10 @@ mod tests {
             .await
             .expect("query failed");
         assert_eq!(chunks_after.len(), 2, "chunks should still be found");
-        assert_eq!(chunks_after[0].score, 0.9, "importance should decay to 0.9");
+        assert!(
+            (chunks_after[0].score - (initial_score * 0.9)).abs() < f32::EPSILON,
+            "importance decay should scale semantic score by 0.9"
+        );
 
         // Run multiple consolidations to trigger pruning
         for _ in 0..15 {
@@ -1259,7 +1237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_write_request_persists_user_and_assistant_exchange() {
+    async fn memory_write_requests_persist_separate_exchange_nodes() {
         use tokio::time::{Duration, timeout};
 
         let temp_dir = tempdir().expect("failed to create temp dir");
@@ -1276,58 +1254,74 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(25)).await;
 
         let causal_id = CausalId::new();
-        bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
-            text: "remember this exchange".to_string(),
-            confidence: 0.99,
-            causal_id,
-        }))
-        .await
-        .expect("speech event should broadcast");
-
         bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
-            text: "I will remember it".to_string(),
+            text: "User: remember this exchange".to_string(),
             kind: MemoryKind::Episodic,
             causal_id,
         }))
         .await
-        .expect("memory write should broadcast");
+        .expect("user memory write should broadcast");
 
-        let mut completed = false;
+        let mut completed = 0;
         for _ in 0..20 {
             if let Ok(Ok(Event::Memory(MemoryEvent::MemoryWriteCompleted {
                 causal_id: completed_id,
             }))) = timeout(Duration::from_millis(100), rx.recv()).await
             {
                 assert_eq!(completed_id, causal_id);
-                completed = true;
+                completed += 1;
                 break;
             }
         }
-        assert!(completed, "memory write should complete");
+        assert_eq!(completed, 1, "user memory write should complete");
+
+        bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
+            text: "Sena: I will remember it".to_string(),
+            kind: MemoryKind::Episodic,
+            causal_id,
+        }))
+        .await
+        .expect("assistant memory write should broadcast");
+
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Memory(MemoryEvent::MemoryWriteCompleted {
+                causal_id: completed_id,
+            }))) = timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                assert_eq!(completed_id, causal_id);
+                completed += 1;
+                break;
+            }
+        }
+        assert_eq!(completed, 2, "assistant memory write should complete");
 
         bus.broadcast(Event::Memory(MemoryEvent::QueryRequested {
-            query: "remember exchange".to_string(),
-            limit: 5,
+            query: "remember".to_string(),
+            limit: 10,
             causal_id,
         }))
         .await
         .expect("query should broadcast");
 
-        let mut query_saw_exchange = false;
+        let mut query_saw_user = false;
+        let mut query_saw_sena = false;
         for _ in 0..20 {
             if let Ok(Ok(Event::Memory(MemoryEvent::QueryCompleted { chunks, .. }))) =
                 timeout(Duration::from_millis(100), rx.recv()).await
             {
-                query_saw_exchange = chunks.iter().any(|chunk| {
-                    chunk.content.contains("User: remember this exchange")
-                        && chunk.content.contains("Assistant: I will remember it")
-                });
-                if query_saw_exchange {
+                query_saw_user = chunks
+                    .iter()
+                    .any(|chunk| chunk.content.contains("User: remember this exchange"));
+                query_saw_sena = chunks
+                    .iter()
+                    .any(|chunk| chunk.content.contains("Sena: I will remember it"));
+                if query_saw_user && query_saw_sena {
                     break;
                 }
             }
         }
-        assert!(query_saw_exchange, "persisted exchange should be queryable");
+        assert!(query_saw_user, "user exchange node should be queryable");
+        assert!(query_saw_sena, "assistant exchange node should be queryable");
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await
