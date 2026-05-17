@@ -1,0 +1,16 @@
+[package]
+name = "sri"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+
+tokio.workspace = true
+serde.workspace = true
+chrono.workspace = true
+sysinfo.workspace = true
+tracing.workspace = true

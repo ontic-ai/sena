@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bus", "crates/cli", "crates/crypto", "crates/text", "crates/soul", "crates/memory", "crates/platform", "crates/ctp", "crates/inference", "crates/prompt", "crates/speech", "crates/runtime", "crates/ipc", "crates/daemon"]
+members = ["crates/bus", "crates/cli", "crates/crypto", "crates/text", "crates/soul", "crates/memory", "crates/platform", "crates/ctp", "crates/inference", "crates/prompt", "crates/speech", "crates/runtime", "crates/ipc", "crates/daemon", "crates/sri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +28,8 @@ redb = "2.4"
 infer = { git = "https://github.com/ontic-ai/infer", tag = "v0.3.2", features = ["llama"] }
 ech0 = { git = "https://github.com/kura120/ech0", tag = "v0.1.2" }
 uuid = { version = "1.11", features = ["v4", "serde"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.39.2"
 tray-icon = "0.20"
 tempfile = "3.14"
 reqwest = { version = "0.12", features = ["stream"] }
