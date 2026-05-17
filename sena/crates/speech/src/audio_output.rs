@@ -6,12 +6,21 @@
 use crate::error::TtsError;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig, SupportedBufferSize};
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+use rubato::{
+    Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction, calculate_cutoff,
+};
 use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+
+const RUBATO_SINC_LEN: usize = 256;
+const RUBATO_OVERSAMPLING_FACTOR: usize = 256;
+const RUBATO_INPUT_CHUNK_FRAMES: usize = 1024;
 
 /// Audio buffer to be played.
 #[derive(Debug, Clone)]
@@ -110,6 +119,270 @@ impl PendingPlayback {
 #[derive(Default)]
 struct PlaybackState {
     queue: VecDeque<PendingPlayback>,
+}
+
+struct PlaybackFormatAdapter {
+    source_sample_rate: u32,
+    source_channels: usize,
+    target_format: AudioDeviceFormat,
+    resampler: Option<SincFormatResampler>,
+}
+
+impl PlaybackFormatAdapter {
+    fn new(
+        source_sample_rate: u32,
+        source_channels: u16,
+        target_format: AudioDeviceFormat,
+    ) -> Result<Self, TtsError> {
+        let source_channels = usize::from(source_channels);
+        let resampler = if source_sample_rate == target_format.sample_rate {
+            None
+        } else {
+            Some(SincFormatResampler::new(
+                source_sample_rate,
+                target_format.sample_rate,
+                source_channels,
+            )?)
+        };
+
+        Ok(Self {
+            source_sample_rate,
+            source_channels,
+            target_format,
+            resampler,
+        })
+    }
+
+    fn adapt_buffer(&mut self, source: &AudioBuffer) -> Result<AudioBuffer, TtsError> {
+        if source.sample_rate != self.source_sample_rate {
+            return Err(TtsError::BackendError(format!(
+                "unexpected audio sample rate: expected {}Hz, got {}Hz",
+                self.source_sample_rate, source.sample_rate,
+            )));
+        }
+
+        if usize::from(source.channels) != self.source_channels {
+            return Err(TtsError::BackendError(format!(
+                "unexpected audio channel count: expected {}, got {}",
+                self.source_channels, source.channels,
+            )));
+        }
+
+        let resampled = if let Some(resampler) = &mut self.resampler {
+            resampler.process_clip(&source.samples)?
+        } else {
+            source.samples.clone()
+        };
+
+        let samples = adapt_channels(
+            &resampled,
+            self.source_channels,
+            usize::from(self.target_format.channels),
+        );
+
+        Ok(AudioBuffer {
+            samples,
+            channels: self.target_format.channels,
+            sample_rate: self.target_format.sample_rate,
+        })
+    }
+
+    fn reset(&mut self) {
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
+    }
+
+    fn uses_resampler(&self) -> bool {
+        self.resampler.is_some()
+    }
+}
+
+struct SincFormatResampler {
+    inner: Async<f32>,
+    channels: usize,
+    delay_frames_to_trim: usize,
+}
+
+impl SincFormatResampler {
+    fn new(src_rate: u32, dst_rate: u32, channels: usize) -> Result<Self, TtsError> {
+        if channels == 0 {
+            return Err(TtsError::BackendError(
+                "rubato sinc resampler requires at least one channel".to_string(),
+            ));
+        }
+
+        let window = WindowFunction::BlackmanHarris2;
+        let inner = Async::<f32>::new_sinc(
+            dst_rate as f64 / src_rate as f64,
+            1.0,
+            &SincInterpolationParameters {
+                sinc_len: RUBATO_SINC_LEN,
+                f_cutoff: calculate_cutoff(RUBATO_SINC_LEN, window),
+                oversampling_factor: RUBATO_OVERSAMPLING_FACTOR,
+                interpolation: SincInterpolationType::Cubic,
+                window,
+            },
+            RUBATO_INPUT_CHUNK_FRAMES,
+            channels,
+            FixedAsync::Input,
+        )
+        .map_err(|e| {
+            TtsError::BackendError(format!(
+                "rubato sinc resampler init failed for {}Hz -> {}Hz: {}",
+                src_rate, dst_rate, e,
+            ))
+        })?;
+
+        let delay_frames_to_trim = inner.output_delay();
+
+        Ok(Self {
+            inner,
+            channels,
+            delay_frames_to_trim,
+        })
+    }
+
+    fn process_clip(&mut self, interleaved_samples: &[f32]) -> Result<Vec<f32>, TtsError> {
+        if interleaved_samples.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if !interleaved_samples.len().is_multiple_of(self.channels) {
+            return Err(TtsError::BackendError(format!(
+                "interleaved sample count {} is not divisible by channel count {}",
+                interleaved_samples.len(), self.channels,
+            )));
+        }
+
+        let input_frames = interleaved_samples.len() / self.channels;
+        if input_frames == 0 {
+            return Ok(Vec::new());
+        }
+
+        let expected_output_frames =
+            (input_frames as f64 * self.inner.resample_ratio()).ceil() as usize;
+        let mut output = Vec::with_capacity(expected_output_frames * self.channels);
+        let mut frame_offset = 0;
+
+        while input_frames.saturating_sub(frame_offset) >= self.inner.input_frames_next() {
+            let chunk_frames = self.inner.input_frames_next();
+            let input_chunk = build_planar_input(
+                interleaved_samples,
+                self.channels,
+                frame_offset,
+                chunk_frames,
+                chunk_frames,
+            );
+            self.process_chunk(input_chunk, None, &mut output)?;
+            frame_offset += chunk_frames;
+        }
+
+        let remaining_frames = input_frames.saturating_sub(frame_offset);
+        if remaining_frames > 0 {
+            let chunk_frames = self.inner.input_frames_next();
+            let input_chunk = build_planar_input(
+                interleaved_samples,
+                self.channels,
+                frame_offset,
+                remaining_frames,
+                chunk_frames,
+            );
+            self.process_chunk(input_chunk, Some(remaining_frames), &mut output)?;
+        }
+
+        let target_samples = expected_output_frames * self.channels;
+        let max_flush_pumps = 8;
+        let mut flush_pumps = 0;
+        while output.len() < target_samples {
+            if flush_pumps >= max_flush_pumps {
+                return Err(TtsError::BackendError(format!(
+                    "rubato sinc resampler flush stalled after {} zero-padded chunks",
+                    max_flush_pumps,
+                )));
+            }
+
+            let chunk_frames = self.inner.input_frames_next();
+            let zero_chunk = vec![vec![0.0; chunk_frames]; self.channels];
+            self.process_chunk(zero_chunk, Some(0), &mut output)?;
+            flush_pumps += 1;
+        }
+
+        output.truncate(target_samples);
+        Ok(output)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.delay_frames_to_trim = self.inner.output_delay();
+    }
+
+    fn process_chunk(
+        &mut self,
+        input_chunk: Vec<Vec<f32>>,
+        partial_len: Option<usize>,
+        output: &mut Vec<f32>,
+    ) -> Result<(), TtsError> {
+        let input_frames = input_chunk.first().map_or(0, Vec::len);
+        let input = SequentialSliceOfVecs::new(&input_chunk, self.channels, input_frames)
+            .map_err(|e| {
+                TtsError::BackendError(format!(
+                    "rubato input adapter init failed for {} frames: {}",
+                    input_frames, e,
+                ))
+            })?;
+
+        let output_frames = self.inner.output_frames_max();
+        let mut output_chunk = vec![vec![0.0; output_frames]; self.channels];
+        let mut output_adapter =
+            SequentialSliceOfVecs::new_mut(&mut output_chunk, self.channels, output_frames)
+                .map_err(|e| {
+                    TtsError::BackendError(format!(
+                        "rubato output adapter init failed for {} frames: {}",
+                        output_frames, e,
+                    ))
+                })?;
+
+        let indexing = partial_len.map(|partial_len| Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            partial_len: Some(partial_len),
+            active_channels_mask: None,
+        });
+
+        let (_consumed, produced_frames) = self
+            .inner
+            .process_into_buffer(&input, &mut output_adapter, indexing.as_ref())
+            .map_err(|e| {
+                TtsError::BackendError(format!(
+                    "rubato sinc resample failed for {} input frames: {}",
+                    input_frames, e,
+                ))
+            })?;
+
+        let frames_to_skip = self.delay_frames_to_trim.min(produced_frames);
+        self.delay_frames_to_trim -= frames_to_skip;
+
+        if produced_frames <= frames_to_skip {
+            return Ok(());
+        }
+
+        output.reserve((produced_frames - frames_to_skip) * self.channels);
+        for frame_samples in output_chunk
+            .first()
+            .into_iter()
+            .flat_map(|channel| channel.iter().enumerate())
+            .skip(frames_to_skip)
+            .take(produced_frames - frames_to_skip)
+        {
+            let (frame_index, _) = frame_samples;
+            for channel_samples in output_chunk.iter().take(self.channels) {
+                output.push(channel_samples[frame_index]);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl AudioOutputStream {
@@ -241,6 +514,17 @@ fn run_playback_loop(
     };
 
     let playback_state = Arc::new(Mutex::new(PlaybackState::default()));
+    let mut format_adapter = match PlaybackFormatAdapter::new(
+        config.sample_rate,
+        config.channels,
+        negotiated.format.clone(),
+    ) {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+    };
 
     let stream = match build_output_stream(
         &device,
@@ -275,6 +559,7 @@ fn run_playback_loop(
         preferred_sample_rate = config.sample_rate,
         preferred_channels = config.channels,
         preferred_buffer_size_frames = config.buffer_size_frames,
+        resampler = if format_adapter.uses_resampler() { "rubato sinc" } else { "none" },
         "audio output stream opened"
     );
 
@@ -286,26 +571,40 @@ fn run_playback_loop(
                 buffer,
                 completion_tx,
             } => {
-                let adapted = adapt_buffer_format(&buffer, &negotiated.format);
-                let sample_count = adapted.samples.len();
-                let mut state = playback_state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state
-                    .queue
-                    .push_back(PendingPlayback::new(adapted.samples, completion_tx));
-                tracing::trace!(
-                    device = %negotiated.device_name,
-                    queued_samples = sample_count,
-                    input_sample_rate = buffer.sample_rate,
-                    input_channels = buffer.channels,
-                    output_sample_rate = negotiated.format.sample_rate,
-                    output_channels = negotiated.format.channels,
-                    "queued audio buffer for playback"
-                );
+                match format_adapter.adapt_buffer(&buffer) {
+                    Ok(adapted) => {
+                        let sample_count = adapted.samples.len();
+                        let mut state = playback_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state
+                            .queue
+                            .push_back(PendingPlayback::new(adapted.samples, completion_tx));
+                        tracing::trace!(
+                            device = %negotiated.device_name,
+                            queued_samples = sample_count,
+                            input_sample_rate = buffer.sample_rate,
+                            input_channels = buffer.channels,
+                            output_sample_rate = negotiated.format.sample_rate,
+                            output_channels = negotiated.format.channels,
+                            "queued audio buffer for playback"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            device = %negotiated.device_name,
+                            input_sample_rate = buffer.sample_rate,
+                            input_channels = buffer.channels,
+                            error = %error,
+                            "failed to adapt audio buffer for playback"
+                        );
+                        let _ = completion_tx.send(Err(error));
+                    }
+                }
             }
             PlaybackCommand::Clear => {
                 clear_playback_state(&playback_state, "playback interrupted");
+                format_adapter.reset();
             }
             PlaybackCommand::Stop => {
                 tracing::debug!(device = %negotiated.device_name, "audio playback loop received stop signal");
@@ -319,8 +618,29 @@ fn run_playback_loop(
     }
 
     clear_playback_state(&playback_state, "audio output stopped");
+    format_adapter.reset();
     drop(stream);
     tracing::debug!(device = %negotiated.device_name, "audio playback loop exiting");
+}
+
+fn build_planar_input(
+    interleaved_samples: &[f32],
+    channels: usize,
+    frame_offset: usize,
+    available_frames: usize,
+    chunk_frames: usize,
+) -> Vec<Vec<f32>> {
+    let mut planar = vec![vec![0.0; chunk_frames]; channels];
+
+    for (channel_index, channel_samples) in planar.iter_mut().enumerate().take(channels) {
+        for (frame_index, sample) in channel_samples.iter_mut().enumerate().take(available_frames) {
+            let input_frame_index = frame_offset + frame_index;
+            let input_offset = input_frame_index * channels;
+            *sample = interleaved_samples[input_offset + channel_index];
+        }
+    }
+
+    planar
 }
 
 fn negotiate_output_config(
@@ -513,32 +833,6 @@ fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, channe
     }
 }
 
-/// Adapt audio buffer to target format (sample rate and channel count).
-fn adapt_buffer_format(source: &AudioBuffer, target_format: &AudioDeviceFormat) -> AudioBuffer {
-    let resampled = if source.sample_rate == target_format.sample_rate {
-        source.samples.clone()
-    } else {
-        resample_linear(
-            &source.samples,
-            source.sample_rate,
-            target_format.sample_rate,
-            source.channels as usize,
-        )
-    };
-
-    let samples_final = adapt_channels(
-        &resampled,
-        source.channels as usize,
-        target_format.channels as usize,
-    );
-
-    AudioBuffer {
-        samples: samples_final,
-        channels: target_format.channels,
-        sample_rate: target_format.sample_rate,
-    }
-}
-
 fn adapt_channels(samples: &[f32], source_channels: usize, target_channels: usize) -> Vec<f32> {
     if samples.is_empty() || source_channels == 0 || target_channels == 0 {
         return Vec::new();
@@ -579,55 +873,34 @@ fn adapt_channels(samples: &[f32], source_channels: usize, target_channels: usiz
     adapted
 }
 
-/// Simple linear interpolation resampler.
-fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32, channels: usize) -> Vec<f32> {
-    if samples.is_empty() || channels == 0 {
-        return Vec::new();
-    }
-
-    if src_rate == dst_rate {
-        return samples.to_vec();
-    }
-
-    let input_frames = samples.len().div_ceil(channels);
-    if input_frames == 0 {
-        return Vec::new();
-    }
-
-    let ratio = src_rate as f64 / dst_rate as f64;
-    let output_frames = (input_frames as f64 / ratio).ceil() as usize;
-    let mut output = Vec::with_capacity(output_frames * channels);
-
-    for frame_index in 0..output_frames {
-        let src_frame = frame_index as f64 * ratio;
-        let idx0 = src_frame.floor() as usize;
-        let idx1 = (idx0 + 1).min(input_frames - 1);
-        let frac = src_frame - idx0 as f64;
-
-        for channel in 0..channels {
-            let sample0 = frame_sample(samples, idx0, channel, channels);
-            let sample1 = frame_sample(samples, idx1, channel, channels);
-            let sample = sample0 * (1.0 - frac) as f32 + sample1 * frac as f32;
-            output.push(sample);
-        }
-    }
-
-    output
-}
-
-fn frame_sample(samples: &[f32], frame_index: usize, channel_index: usize, channels: usize) -> f32 {
-    let sample_index = frame_index * channels + channel_index;
-    samples
-        .get(sample_index)
-        .copied()
-        .or_else(|| samples.get(frame_index * channels).copied())
-        .unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    fn test_adapter(
+        source_sample_rate: u32,
+        source_channels: u16,
+        target_sample_rate: u32,
+        target_channels: u16,
+    ) -> PlaybackFormatAdapter {
+        PlaybackFormatAdapter::new(
+            source_sample_rate,
+            source_channels,
+            test_format(target_sample_rate, target_channels),
+        )
+        .expect("playback format adapter should initialize")
+    }
+
+    fn assert_samples_close(actual: &[f32], expected: &[f32], epsilon: f32) {
+        assert_eq!(actual.len(), expected.len(), "sample lengths should match");
+        for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= epsilon,
+                "sample {index} differed: actual={actual}, expected={expected}, epsilon={epsilon}",
+            );
+        }
+    }
 
     fn test_format(sample_rate: u32, channels: u16) -> AudioDeviceFormat {
         AudioDeviceFormat {
@@ -645,9 +918,11 @@ mod tests {
             channels: 1,
             sample_rate: 16000,
         };
-        let format = test_format(16000, 2);
 
-        let adapted = adapt_buffer_format(&source, &format);
+        let mut adapter = test_adapter(16000, 1, 16000, 2);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("mono -> stereo adaptation should succeed");
         assert_eq!(adapted.channels, 2);
         assert_eq!(adapted.samples.len(), 6);
         assert_eq!(adapted.samples, vec![0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
@@ -660,9 +935,11 @@ mod tests {
             channels: 2,
             sample_rate: 16000,
         };
-        let format = test_format(16000, 1);
 
-        let adapted = adapt_buffer_format(&source, &format);
+        let mut adapter = test_adapter(16000, 2, 16000, 1);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("stereo -> mono adaptation should succeed");
         assert_eq!(adapted.channels, 1);
         assert_eq!(adapted.samples.len(), 2);
         assert!((adapted.samples[0] - 0.15).abs() < 0.001);
@@ -676,41 +953,75 @@ mod tests {
             channels: 1,
             sample_rate: 22050,
         };
-        let format = test_format(22050, 4);
 
-        let adapted = adapt_buffer_format(&source, &format);
+        let mut adapter = test_adapter(22050, 1, 22050, 4);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("mono -> multichannel adaptation should succeed");
         assert_eq!(adapted.channels, 4);
         assert_eq!(adapted.samples, vec![0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2]);
     }
 
     #[test]
     fn audio_buffer_resample_upsampling() {
-        let samples = vec![0.0, 1.0, 0.0];
-        let resampled = resample_linear(&samples, 8000, 16000, 1);
-        assert!(resampled.len() > samples.len());
-        assert!(resampled.len() <= samples.len() * 2 + 1);
+        let source = AudioBuffer {
+            samples: vec![0.0, 1.0, 0.0, -1.0],
+            channels: 1,
+            sample_rate: 8000,
+        };
+
+        let mut adapter = test_adapter(8000, 1, 16000, 1);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("upsampling should succeed");
+
+        assert!(adapted.samples.len() > source.samples.len());
     }
 
     #[test]
     fn audio_buffer_resample_downsampling() {
-        let samples = vec![0.0, 0.5, 1.0, 0.5, 0.0];
-        let resampled = resample_linear(&samples, 16000, 8000, 1);
-        assert!(resampled.len() < samples.len());
-        assert!(resampled.len() >= samples.len() / 2);
+        let source = AudioBuffer {
+            samples: vec![0.0, 0.5, 1.0, 0.5, 0.0, -0.5],
+            channels: 1,
+            sample_rate: 16000,
+        };
+
+        let mut adapter = test_adapter(16000, 1, 8000, 1);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("downsampling should succeed");
+
+        assert!(adapted.samples.len() < source.samples.len());
     }
 
     #[test]
     fn audio_buffer_resample_preserves_stereo_channels() {
-        let samples = vec![0.0, 1.0, 1.0, 0.0];
-        let resampled = resample_linear(&samples, 2, 3, 2);
+        let frames = 512;
+        let source = AudioBuffer {
+            samples: (0..frames).flat_map(|_| [0.0, 1.0]).collect(),
+            channels: 2,
+            sample_rate: 32000,
+        };
 
-        assert_eq!(resampled.len(), 6);
-        assert!((resampled[0] - 0.0).abs() < 0.001);
-        assert!((resampled[1] - 1.0).abs() < 0.001);
-        assert!((resampled[2] - 0.6666667).abs() < 0.001);
-        assert!((resampled[3] - 0.33333334).abs() < 0.001);
-        assert!((resampled[4] - 1.0).abs() < 0.001);
-        assert!((resampled[5] - 0.0).abs() < 0.001);
+        let mut adapter = test_adapter(32000, 2, 48000, 2);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("stereo resampling should succeed");
+
+        assert_eq!(adapted.channels, 2);
+        assert!(adapted.samples.len() > source.samples.len());
+        let adapted_frames: Vec<_> = adapted.samples.chunks_exact(2).collect();
+        let center_frames = &adapted_frames[64..adapted_frames.len() - 64];
+        let left_avg = center_frames
+            .iter()
+            .map(|frame| frame[0].abs())
+            .sum::<f32>()
+            / center_frames.len() as f32;
+        let right_avg = center_frames.iter().map(|frame| frame[1]).sum::<f32>()
+            / center_frames.len() as f32;
+
+        assert!(left_avg < 0.02);
+        assert!((right_avg - 1.0).abs() < 0.02);
     }
 
     #[test]
@@ -720,10 +1031,34 @@ mod tests {
             channels: 1,
             sample_rate: 16000,
         };
-        let format = test_format(16000, 1);
 
-        let adapted = adapt_buffer_format(&source, &format);
+        let mut adapter = test_adapter(16000, 1, 16000, 1);
+        let adapted = adapter
+            .adapt_buffer(&source)
+            .expect("identity adaptation should succeed");
         assert_eq!(adapted.samples, source.samples);
+    }
+
+    #[test]
+    fn sinc_resampler_reset_restores_initial_output() {
+        let source = AudioBuffer {
+            samples: (0..256).map(|index| index as f32 / 256.0).collect(),
+            channels: 1,
+            sample_rate: 22050,
+        };
+
+        let mut adapter = test_adapter(22050, 1, 96000, 1);
+        let first = adapter
+            .adapt_buffer(&source)
+            .expect("first resample should succeed");
+
+        adapter.reset();
+
+        let after_reset = adapter
+            .adapt_buffer(&source)
+            .expect("resample after reset should succeed");
+
+        assert_samples_close(&first.samples, &after_reset.samples, 0.0001);
     }
 
     #[tokio::test]
