@@ -11,11 +11,13 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use sri::{HealthStatus, RegisteredSriNode, ResourceKind, SignalSource, SriEvent, SriResourceSnapshot, SriSnapshot, SriTreeNode, TreeAction};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,17 +26,7 @@ use tracing::info;
 
 #[derive(Clone, Debug)]
 struct LoopInfo {
-    name: String,
-    description: String,
     enabled: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct VramState {
-    used_mb: u32,
-    total_mb: u32,
-    percent: u8,
-    updated_at: Instant,
 }
 
 const HELP_CORE: &[(&str, &str, &str)] = &[
@@ -121,6 +113,8 @@ const HELP_RUNTIME: &[(&str, &str, &str)] = &[
         "toggle a specific loop",
         "/loops speech off",
     ),
+    ("/tree", "toggle live vs full tree expansion", "/tree"),
+    ("/sri", "dump the current SRI snapshot", "/sri"),
     ("/events, /watch", "subscribe to daemon events", "/events"),
     ("/shutdown", "stop the daemon", "/shutdown"),
 ];
@@ -244,6 +238,16 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         category: CommandCategory::Runtime,
     },
     SlashCommand {
+        command: "/tree",
+        description: "Toggle live vs full tree expansion",
+        category: CommandCategory::Runtime,
+    },
+    SlashCommand {
+        command: "/sri",
+        description: "Dump the current SRI snapshot",
+        category: CommandCategory::Runtime,
+    },
+    SlashCommand {
         command: "/events",
         description: "Subscribe to daemon events",
         category: CommandCategory::Runtime,
@@ -359,14 +363,21 @@ enum ModalState {
     Models(ModelModal),
 }
 
+#[derive(Clone, Debug, Default)]
+struct SriPanelState {
+    snapshot: Option<SriSnapshot>,
+    active_shelf: Option<String>,
+}
+
 struct ShellRenderState<'a> {
     message_log: &'a [String],
-    loops: &'a [LoopInfo],
+    response_log: &'a [String],
     input_buffer: &'a str,
     daemon_status: &'a str,
     daemon_uptime_secs: u64,
     log_scroll: usize,
-    vram: Option<VramState>,
+    sri_panel: Option<&'a SriPanelState>,
+    full_tree: bool,
     slash_dropdown: Option<&'a SlashDropdown>,
     modal: Option<&'a ModalState>,
 }
@@ -374,8 +385,9 @@ struct ShellRenderState<'a> {
 pub struct Shell {
     ipc: IpcClient,
     message_log: Arc<Mutex<Vec<String>>>,
+    response_log: Arc<Mutex<Vec<String>>>,
+    sri_panel: Arc<Mutex<SriPanelState>>,
     loops: Arc<Mutex<HashMap<String, LoopInfo>>>,
-    vram: Arc<Mutex<Option<VramState>>>,
     input_buffer: String,
     should_quit: bool,
     daemon_status: String,
@@ -385,6 +397,7 @@ pub struct Shell {
     connection_alive: Arc<AtomicBool>,
     log_scroll: usize,
     quit_armed: bool,
+    full_tree: bool,
     slash_dropdown: Option<SlashDropdown>,
     modal: Option<ModalState>,
 }
@@ -403,20 +416,50 @@ impl Shell {
             "Welcome to Sena CLI".to_string(),
             "Type /help for commands".to_string(),
         ]));
+        let response_log = Arc::new(Mutex::new(vec![
+            "[LLM] waiting for live response stream".to_string(),
+        ]));
+        let sri_panel = Arc::new(Mutex::new(SriPanelState::default()));
         let loops: Arc<Mutex<HashMap<String, LoopInfo>>> = Arc::new(Mutex::new(HashMap::new()));
-        let vram: Arc<Mutex<Option<VramState>>> = Arc::new(Mutex::new(None));
 
         let mut daemon_uptime_secs = 0;
 
-        match ipc.send("events.subscribe", json!({})).await {
+        match ipc.send("sri.subscribe", json!({})).await {
             Ok(_) => {
                 if let Ok(mut log) = message_log.lock() {
-                    log.push("[SYS] subscribed to daemon event stream".to_string());
+                    log.push("[SYS] subscribed to SRI stream".to_string());
                 }
             }
             Err(e) => {
                 if let Ok(mut log) = message_log.lock() {
-                    log.push(format!("[ERR] events.subscribe failed: {}", e));
+                    log.push(format!("[ERR] sri.subscribe failed: {}", e));
+                }
+            }
+        }
+
+        match ipc.send("sri.snapshot", json!({})).await {
+            Ok(response) => {
+                if let Some(snapshot) = response.get("snapshot").cloned() {
+                    match serde_json::from_value::<SriSnapshot>(snapshot) {
+                        Ok(snapshot) => {
+                            if let Ok(mut panel) = sri_panel.lock() {
+                                Self::set_snapshot(&mut panel, snapshot);
+                            }
+                            if let Ok(mut log) = message_log.lock() {
+                                log.push("[SYS] loaded initial SRI snapshot".to_string());
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut log) = message_log.lock() {
+                                log.push(format!("[ERR] invalid sri.snapshot payload: {}", error));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                if let Ok(mut log) = message_log.lock() {
+                    log.push(format!("[ERR] sri.snapshot failed: {}", error));
                 }
             }
         }
@@ -445,7 +488,7 @@ impl Shell {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let description = loop_data
+                let _description = loop_data
                     .get("description")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -456,24 +499,60 @@ impl Shell {
                     .unwrap_or(false);
                 loops_map.insert(
                     name.clone(),
-                    LoopInfo {
-                        name,
-                        description,
-                        enabled,
-                    },
+                    LoopInfo { enabled },
                 );
             }
         }
 
         let push_log = Arc::clone(&message_log);
+        let push_response_log = Arc::clone(&response_log);
+        let push_sri_panel = Arc::clone(&sri_panel);
         let push_loops = Arc::clone(&loops);
-        let push_vram = Arc::clone(&vram);
         let connection_alive = Arc::new(AtomicBool::new(true));
         let connection_alive_task = Arc::clone(&connection_alive);
         let mut push_rx = ipc.subscribe_events();
 
         tokio::spawn(async move {
             while let Some(event) = push_rx.recv().await {
+                let stream = event
+                    .get("stream")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("events");
+
+                if stream == "sri" {
+                    let Some(event_value) = event.get("event").cloned() else {
+                        continue;
+                    };
+
+                    match serde_json::from_value::<SriEvent>(event_value) {
+                        Ok(sri_event) => {
+                            let maybe_signal = if let (Ok(mut panel), Ok(mut response_log)) = (
+                                push_sri_panel.lock(),
+                                push_response_log.lock(),
+                            ) {
+                                Self::apply_sri_event(&mut panel, &mut response_log, sri_event)
+                            } else {
+                                None
+                            };
+
+                            if let Some(line) = maybe_signal
+                                && let Ok(mut log) = push_log.lock()
+                            {
+                                Self::append_push_line(&mut log, line);
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut log) = push_log.lock() {
+                                Self::append_push_line(
+                                    &mut log,
+                                    format!("[ERR] could not decode sri event: {}", error),
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let data = event.get("data").cloned().unwrap_or(Value::Null);
 
@@ -488,22 +567,6 @@ impl Shell {
                     loop_info.enabled = enabled;
                 }
 
-                if event_type == "VramUsageUpdated" {
-                    let used_mb = data.get("used_mb").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let total_mb =
-                        data.get("total_mb").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let percent = data.get("percent").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-                    if let Ok(mut vram_state) = push_vram.lock() {
-                        *vram_state = Some(VramState {
-                            used_mb,
-                            total_mb,
-                            percent,
-                            updated_at: Instant::now(),
-                        });
-                    }
-                    continue;
-                }
-
                 if let Some(line) = Self::format_push_event(&event)
                     && let Ok(mut log) = push_log.lock()
                 {
@@ -516,8 +579,9 @@ impl Shell {
         Ok(Self {
             ipc,
             message_log,
+            response_log,
+            sri_panel,
             loops,
-            vram,
             input_buffer: String::new(),
             should_quit: false,
             daemon_status: "Connected".to_string(),
@@ -527,6 +591,7 @@ impl Shell {
             connection_alive,
             log_scroll: 0,
             quit_armed: false,
+            full_tree: false,
             slash_dropdown: None,
             modal: None,
         })
@@ -694,19 +759,23 @@ impl Shell {
     pub async fn run(mut self) -> Result<(), CliError> {
         info!("Shell TUI starting");
 
-        if let (Ok(log), Ok(loops_map)) = (self.message_log.lock(), self.loops.lock()) {
-            let loops_vec: Vec<LoopInfo> = loops_map.values().cloned().collect();
+        if let (Ok(log), Ok(response_log), Ok(panel)) = (
+            self.message_log.lock(),
+            self.response_log.lock(),
+            self.sri_panel.lock(),
+        ) {
             let uptime_secs = self.current_uptime_secs();
             Self::render_tui(
                 &mut self.terminal,
                 ShellRenderState {
                     message_log: &log,
-                    loops: &loops_vec,
+                    response_log: &response_log,
                     input_buffer: &self.input_buffer,
                     daemon_status: &self.daemon_status,
                     daemon_uptime_secs: uptime_secs,
                     log_scroll: self.log_scroll,
-                    vram: self.vram.lock().ok().and_then(|v| *v),
+                    sri_panel: Some(&panel),
+                    full_tree: self.full_tree,
                     slash_dropdown: self.slash_dropdown.as_ref(),
                     modal: self.modal.as_ref(),
                 },
@@ -729,19 +798,23 @@ impl Shell {
                 self.handle_key_event(key.code, key.modifiers).await?;
             }
 
-            if let (Ok(log), Ok(loops_map)) = (self.message_log.lock(), self.loops.lock()) {
-                let loops_vec: Vec<LoopInfo> = loops_map.values().cloned().collect();
+            if let (Ok(log), Ok(response_log), Ok(panel)) = (
+                self.message_log.lock(),
+                self.response_log.lock(),
+                self.sri_panel.lock(),
+            ) {
                 let uptime_secs = self.current_uptime_secs();
                 Self::render_tui(
                     &mut self.terminal,
                     ShellRenderState {
                         message_log: &log,
-                        loops: &loops_vec,
+                        response_log: &response_log,
                         input_buffer: &self.input_buffer,
                         daemon_status: &self.daemon_status,
                         daemon_uptime_secs: uptime_secs,
                         log_scroll: self.log_scroll,
-                        vram: self.vram.lock().ok().and_then(|v| *v),
+                        sri_panel: Some(&panel),
+                        full_tree: self.full_tree,
                         slash_dropdown: self.slash_dropdown.as_ref(),
                         modal: self.modal.as_ref(),
                     },
@@ -949,6 +1022,8 @@ impl Shell {
             "/explanation" | "/explain" => self.cmd_explanation(&parts[1..]).await?,
             "/query" | "/search" | "/recall" => self.cmd_memory_query(&parts[1..]).await?,
             "/config" | "/settings" => self.open_config_editor().await?,
+            "/tree" => self.cmd_tree_toggle(),
+            "/sri" => self.cmd_sri_snapshot().await?,
             "/events" | "/watch" => self.cmd_events_subscribe().await?,
             "/inference" | "/infer" => self.cmd_inference_status().await?,
             "/speech" | "/audio" => self.cmd_speech_status().await?,
@@ -1272,13 +1347,10 @@ impl Shell {
                         if let Ok(mut loops_map) = self.loops.lock() {
                             loops_map.clear();
                             for (name, description, enabled) in updates {
+                                let _ = description;
                                 loops_map.insert(
                                     name.clone(),
-                                    LoopInfo {
-                                        name,
-                                        description,
-                                        enabled,
-                                    },
+                                    LoopInfo { enabled },
                                 );
                             }
                         }
@@ -1317,6 +1389,49 @@ impl Shell {
                 self.log_message(format!("Unknown loop state '{}'. Use on or off.", invalid));
             }
         }
+        Ok(())
+    }
+
+    fn cmd_tree_toggle(&mut self) {
+        self.full_tree = !self.full_tree;
+        let mode = if self.full_tree { "full" } else { "live" };
+        self.log_message(format!("[SYS] tree mode set to {}", mode));
+    }
+
+    async fn cmd_sri_snapshot(&mut self) -> Result<(), CliError> {
+        match self.ipc.send("sri.snapshot", json!({})).await {
+            Ok(response) => {
+                let Some(snapshot_value) = response.get("snapshot").cloned() else {
+                    self.log_message("[ERR] sri.snapshot returned no snapshot".to_string());
+                    return Ok(());
+                };
+
+                match serde_json::from_value::<SriSnapshot>(snapshot_value.clone()) {
+                    Ok(snapshot) => {
+                        if let Ok(mut panel) = self.sri_panel.lock() {
+                            Self::set_snapshot(&mut panel, snapshot);
+                        }
+
+                        match serde_json::to_string_pretty(&snapshot_value) {
+                            Ok(pretty) => {
+                                for line in pretty.lines() {
+                                    self.log_message(format!("[SRI] {}", line));
+                                }
+                            }
+                            Err(error) => self.log_message(format!(
+                                "[ERR] could not render sri.snapshot: {}",
+                                error
+                            )),
+                        }
+                    }
+                    Err(error) => {
+                        self.log_message(format!("[ERR] invalid sri.snapshot payload: {}", error))
+                    }
+                }
+            }
+            Err(error) => self.log_message(format!("[ERR] sri.snapshot failed: {}", error)),
+        }
+
         Ok(())
     }
 
@@ -1410,38 +1525,301 @@ impl Shell {
         }
     }
 
+    fn set_snapshot(panel: &mut SriPanelState, snapshot: SriSnapshot) {
+        panel.active_shelf = Self::select_active_shelf(&snapshot, panel.active_shelf.as_deref());
+        panel.snapshot = Some(snapshot);
+    }
+
+    fn select_active_shelf(snapshot: &SriSnapshot, preferred: Option<&str>) -> Option<String> {
+        if let Some(preferred) = preferred
+            && snapshot.open_shelves.iter().any(|path| path == preferred)
+        {
+            return Some(preferred.to_string());
+        }
+
+        snapshot
+            .open_shelves
+            .last()
+            .cloned()
+            .or_else(|| snapshot.nodes.first().map(|node| node.shelf_path.clone()))
+    }
+
+    fn apply_sri_event(
+        panel: &mut SriPanelState,
+        response_log: &mut Vec<String>,
+        event: SriEvent,
+    ) -> Option<String> {
+        match event {
+            SriEvent::TreeSnapshot { tree } => {
+                if let Some(snapshot) = panel.snapshot.as_mut() {
+                    snapshot.tree = tree;
+                    panel.active_shelf = Self::select_active_shelf(snapshot, panel.active_shelf.as_deref());
+                } else {
+                    panel.snapshot = Some(SriSnapshot {
+                        tree,
+                        nodes: Vec::new(),
+                        open_shelves: Vec::new(),
+                        latest_resources: None,
+                    });
+                }
+                None
+            }
+            SriEvent::TreeNavigation {
+                shelf_path, action, ..
+            } => {
+                if let Some(snapshot) = panel.snapshot.as_mut() {
+                    match action {
+                        TreeAction::Open => {
+                            if !snapshot.open_shelves.iter().any(|path| path == &shelf_path) {
+                                snapshot.open_shelves.push(shelf_path.clone());
+                            }
+                            panel.active_shelf = Some(shelf_path);
+                        }
+                        TreeAction::Close => {
+                            snapshot.open_shelves.retain(|path| path != &shelf_path);
+                            let preferred = panel
+                                .active_shelf
+                                .as_deref()
+                                .filter(|path| *path != shelf_path.as_str());
+                            panel.active_shelf = Self::select_active_shelf(snapshot, preferred);
+                        }
+                    }
+                }
+                None
+            }
+            SriEvent::SignalReceived {
+                source,
+                summary,
+                timestamp,
+            } => {
+                if let Some(response_line) = Self::map_response_line(source, &summary) {
+                    Self::append_response_line(response_log, response_line);
+                }
+                Some(Self::format_signal_line(
+                    source,
+                    &summary,
+                    timestamp.format("%H:%M:%S").to_string(),
+                ))
+            }
+            SriEvent::NodeHealthChanged {
+                shelf_path,
+                old: _,
+                new,
+            } => {
+                if let Some(snapshot) = panel.snapshot.as_mut() {
+                    Self::apply_snapshot_health(snapshot, &shelf_path, new);
+                }
+                Some(format!(
+                    "[HEALTH] {} -> {}",
+                    shelf_path,
+                    Self::health_label(new)
+                ))
+            }
+            SriEvent::FunctionCallStub { path, .. } => {
+                Some(format!("[CAPABILITY] {} -> unavailable", path))
+            }
+            SriEvent::ResourceSnapshot(snapshot) => {
+                if let Some(current) = panel.snapshot.as_mut() {
+                    current.latest_resources = Some(snapshot);
+                } else {
+                    panel.snapshot = Some(SriSnapshot {
+                        tree: SriTreeNode::root(),
+                        nodes: Vec::new(),
+                        open_shelves: Vec::new(),
+                        latest_resources: Some(snapshot),
+                    });
+                }
+                None
+            }
+            SriEvent::ResourceAlert {
+                actor,
+                resource,
+                value,
+                threshold,
+            } => Some(format!(
+                "[FAULT] {} {} {:.1} > {:.1}",
+                actor,
+                Self::resource_label(resource),
+                value,
+                threshold
+            )),
+        }
+    }
+
+    fn apply_snapshot_health(snapshot: &mut SriSnapshot, shelf_path: &str, new: HealthStatus) {
+        if let Some(node) = snapshot
+            .nodes
+            .iter_mut()
+            .find(|node| node.shelf_path == shelf_path)
+        {
+            node.health_status = new;
+        }
+
+        Self::refresh_tree_health(&mut snapshot.tree, &snapshot.nodes);
+    }
+
+    fn refresh_tree_health(node: &mut SriTreeNode, nodes: &[RegisteredSriNode]) -> HealthStatus {
+        for child in &mut node.children {
+            Self::refresh_tree_health(child, nodes);
+        }
+
+        let own = if node.registered {
+            nodes.iter()
+                .find(|registered| registered.shelf_path == node.shelf_path)
+                .map(|registered| registered.health_status)
+                .or(Some(node.health_status))
+        } else {
+            None
+        };
+
+        node.health_status = Self::aggregate_health(own, &node.children);
+        node.health_status
+    }
+
+    fn aggregate_health(own: Option<HealthStatus>, children: &[SriTreeNode]) -> HealthStatus {
+        let mut saw_degraded = matches!(own, Some(HealthStatus::Degraded));
+        if matches!(own, Some(HealthStatus::Active)) {
+            return HealthStatus::Active;
+        }
+
+        for child in children {
+            match child.health_status {
+                HealthStatus::Active => return HealthStatus::Active,
+                HealthStatus::Degraded => saw_degraded = true,
+                HealthStatus::Unavailable => {}
+            }
+        }
+
+        if saw_degraded {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Unavailable
+        }
+    }
+
+    fn append_response_line(log: &mut Vec<String>, line: String) {
+        log.push(line);
+        if log.len() > 240 {
+            log.drain(0..40);
+        }
+    }
+
+    fn health_label(status: HealthStatus) -> &'static str {
+        match status {
+            HealthStatus::Active => "active",
+            HealthStatus::Degraded => "degraded",
+            HealthStatus::Unavailable => "unavailable",
+        }
+    }
+
+    fn health_badge(status: HealthStatus) -> &'static str {
+        match status {
+            HealthStatus::Active => "[●]",
+            HealthStatus::Degraded => "[~]",
+            HealthStatus::Unavailable => "[x]",
+        }
+    }
+
+    fn health_style(status: HealthStatus) -> Style {
+        match status {
+            HealthStatus::Active => theme::success(),
+            HealthStatus::Degraded => theme::warning(),
+            HealthStatus::Unavailable => theme::danger(),
+        }
+    }
+
+    fn signal_source_label(source: SignalSource) -> &'static str {
+        match source {
+            SignalSource::Identity => "IDENTITY",
+            SignalSource::Perception => "PERCEPTION",
+            SignalSource::Cognition => "COGNITION",
+            SignalSource::Expression => "EXPRESSION",
+            SignalSource::Environment => "ENVIRONMENT",
+            SignalSource::Fault => "FAULT",
+        }
+    }
+
+    fn format_signal_line(
+        source: SignalSource,
+        summary: &str,
+        timestamp: impl std::fmt::Display,
+    ) -> String {
+        format!(
+            "[{}] {} · {}",
+            Self::signal_source_label(source),
+            summary,
+            timestamp
+        )
+    }
+
+    fn map_response_line(source: SignalSource, summary: &str) -> Option<String> {
+        let lower = summary.to_ascii_lowercase();
+
+        match source {
+            SignalSource::Perception => Some(format!("[STT] {}", summary)),
+            SignalSource::Cognition => {
+                if lower.contains("memory") || lower.contains("context") {
+                    Some(format!("[MEM] {}", summary))
+                } else {
+                    Some(format!("[CTP] {}", summary))
+                }
+            }
+            SignalSource::Expression => {
+                if lower.contains("voice playback") || lower.contains("speaking") {
+                    Some(format!("[TTS] {}", summary))
+                } else {
+                    Some(format!("[LLM] {}", summary))
+                }
+            }
+            SignalSource::Identity => Some(format!("[SOUL] {}", summary)),
+            SignalSource::Fault => Some(format!("[FAULT] {}", summary)),
+            SignalSource::Environment => None,
+        }
+    }
+
     fn render_tui(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         render: ShellRenderState<'_>,
     ) -> Result<(), io::Error> {
         terminal.draw(|frame| {
-            let main_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(0), Constraint::Length(30)])
-                .split(frame.area());
-
-            let left_chunks = Layout::default()
+            let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
                     Constraint::Min(0),
+                    Constraint::Length(6),
                     Constraint::Length(3),
                 ])
-                .split(main_chunks[0]);
+                .split(frame.area());
 
-            Self::render_header(
+            let top = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(31),
+                    Constraint::Percentage(37),
+                    Constraint::Percentage(32),
+                ])
+                .split(vertical[0]);
+
+            Self::render_tree_panel(frame, top[0], render.sri_panel, render.full_tree);
+            Self::render_signal_panel(frame, top[1], render.message_log, render.log_scroll);
+            Self::render_response_panel(frame, top[2], render.response_log);
+            Self::render_resources_panel(
                 frame,
-                left_chunks[0],
+                vertical[1],
+                render.sri_panel,
                 render.daemon_status,
                 render.daemon_uptime_secs,
-                render.vram,
             );
-            Self::render_message_log(frame, left_chunks[1], render.message_log, render.log_scroll);
-            Self::render_input(frame, left_chunks[2], render.input_buffer);
-            Self::render_loops_sidebar(frame, main_chunks[1], render.loops);
+            Self::render_input(
+                frame,
+                vertical[2],
+                render.input_buffer,
+                render.daemon_status,
+                render.daemon_uptime_secs,
+            );
 
             if render.modal.is_none() {
-                Self::render_slash_dropdown(frame, left_chunks[2], render.slash_dropdown);
+                Self::render_slash_dropdown(frame, vertical[2], render.slash_dropdown);
             }
             if let Some(modal_state) = render.modal {
                 Self::render_modal(frame, modal_state);
@@ -1450,65 +1828,112 @@ impl Shell {
         Ok(())
     }
 
-    fn render_header(
+    fn render_tree_panel(
         frame: &mut Frame,
         area: Rect,
-        daemon_status: &str,
-        daemon_uptime_secs: u64,
-        vram: Option<VramState>,
+        sri_panel: Option<&SriPanelState>,
+        full_tree: bool,
     ) {
+        let title = if full_tree { "Capability Tree [ALL]" } else { "Capability Tree [LIVE]" };
+        let lines = if let Some(snapshot) = sri_panel.and_then(|panel| panel.snapshot.as_ref()) {
+            let open_shelves = snapshot
+                .open_shelves
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let mut lines = vec![Line::from(Span::styled("SELF", theme::title_style()))];
+
+            for (index, child) in snapshot.tree.children.iter().enumerate() {
+                Self::push_tree_lines(
+                    &mut lines,
+                    child,
+                    "",
+                    index + 1 == snapshot.tree.children.len(),
+                    &open_shelves,
+                    full_tree,
+                    sri_panel.and_then(|panel| panel.active_shelf.as_deref()),
+                );
+            }
+
+            if lines.len() == 1 {
+                lines.push(Line::from(Span::styled(
+                    "waiting for registered capabilities...",
+                    theme::muted(),
+                )));
+            }
+
+            lines
+        } else {
+            vec![Line::from(Span::styled(
+                "waiting for sri snapshot...",
+                theme::muted(),
+            ))]
+        };
+
+        let panel = Paragraph::new(lines)
+            .block(theme::panel(title))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(panel, area);
+    }
+
+    fn push_tree_lines(
+        lines: &mut Vec<Line<'static>>,
+        node: &SriTreeNode,
+        prefix: &str,
+        is_last: bool,
+        open_shelves: &HashSet<String>,
+        full_tree: bool,
+        active_shelf: Option<&str>,
+    ) {
+        let has_children = !node.children.is_empty();
+        let expanded = full_tree || open_shelves.contains(&node.shelf_path);
+        let connector = if is_last { "└" } else { "├" };
+        let marker = if has_children {
+            if expanded { "▼" } else { "▶" }
+        } else {
+            "•"
+        };
+        let is_active = active_shelf == Some(node.shelf_path.as_str());
+        let show_description = (expanded || is_active) && !node.description.is_empty();
+
         let mut spans = vec![
-            Span::styled("SENA DEV", theme::title_style()),
-            Span::styled("  uptime ", theme::muted()),
-            Span::styled(format!("{}s", daemon_uptime_secs), theme::text()),
-            Span::styled("  daemon ", theme::muted()),
+            Span::styled(format!("{}{}{} ", prefix, connector, marker), theme::muted()),
             Span::styled(
-                daemon_status,
-                if daemon_status == "Connected" {
-                    theme::success()
-                } else {
-                    theme::warning()
-                },
+                node.display_name.clone(),
+                if is_active { theme::title_style() } else { theme::text() },
+            ),
+            Span::styled(
+                format!(" {}", Self::health_badge(node.health_status)),
+                Self::health_style(node.health_status),
             ),
         ];
 
-        if let Some(vram_state) = vram
-            && Instant::now().duration_since(vram_state.updated_at) <= Duration::from_secs(5)
-            && vram_state.total_mb > 0
-        {
-            let bar = Self::vram_bar(vram_state.percent);
-            let used_gb = vram_state.used_mb as f64 / 1024.0;
-            let total_gb = vram_state.total_mb as f64 / 1024.0;
-            let vram_style = if vram_state.percent < 70 {
-                theme::success()
-            } else if vram_state.percent <= 90 {
-                theme::warning()
-            } else {
-                theme::danger()
-            };
-
-            spans.push(Span::styled("  VRAM ", theme::muted()));
+        if show_description {
             spans.push(Span::styled(
-                format!("[{}] {:.1} / {:.1} GB", bar, used_gb, total_gb),
-                vram_style,
+                format!(" {}", Self::truncate_chars(&node.description, 34)),
+                theme::muted(),
             ));
-        } else {
-            spans.push(Span::styled("  VRAM ", theme::muted()));
-            spans.push(Span::styled("[░░░░░░░░░░] n/a", theme::muted()));
         }
 
-        let header = Paragraph::new(Line::from(spans)).block(theme::panel("Status"));
+        lines.push(Line::from(spans));
 
-        frame.render_widget(header, area);
+        if has_children && expanded {
+            let next_prefix = format!("{}{}  ", prefix, if is_last { " " } else { "│" });
+            for (index, child) in node.children.iter().enumerate() {
+                Self::push_tree_lines(
+                    lines,
+                    child,
+                    &next_prefix,
+                    index + 1 == node.children.len(),
+                    open_shelves,
+                    full_tree,
+                    active_shelf,
+                );
+            }
+        }
     }
 
-    fn vram_bar(percent: u8) -> String {
-        let filled = ((percent.min(100) as usize) * 10 + 50) / 100;
-        let empty = 10usize.saturating_sub(filled);
-        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
-    }
-
-    fn render_message_log(frame: &mut Frame, area: Rect, message_log: &[String], scroll: usize) {
+    fn render_signal_panel(frame: &mut Frame, area: Rect, message_log: &[String], scroll: usize) {
         let height = area.height.saturating_sub(2) as usize;
         let width = area.width.saturating_sub(2) as usize;
         let lines = message_log
@@ -1527,15 +1952,37 @@ impl Shell {
         let top_scroll = total.saturating_sub(height + clamped_scroll);
 
         let title = if clamped_scroll > 0 {
-            format!("Messages (↑{} lines)", clamped_scroll)
+            format!("Signals (↑{} lines)", clamped_scroll)
         } else {
-            "Messages".to_string()
+            "Signals".to_string()
         };
 
         let para = Paragraph::new(lines)
             .block(theme::panel(&title))
             .wrap(Wrap { trim: false })
             .scroll((top_scroll as u16, 0));
+
+        frame.render_widget(para, area);
+    }
+
+    fn render_response_panel(frame: &mut Frame, area: Rect, response_log: &[String]) {
+        let height = area.height.saturating_sub(2) as usize;
+        let width = area.width.saturating_sub(2) as usize;
+        let wrapped = response_log
+            .iter()
+            .flat_map(|line| {
+                Self::wrap_log_message(line, width)
+                    .into_iter()
+                    .map(|wrapped| Line::from(Span::styled(wrapped, Self::response_style(line))))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let start = wrapped.len().saturating_sub(height);
+        let visible = wrapped.into_iter().skip(start).collect::<Vec<_>>();
+        let para = Paragraph::new(visible)
+            .block(theme::panel("Response"))
+            .wrap(Wrap { trim: false });
 
         frame.render_widget(para, area);
     }
@@ -1595,38 +2042,173 @@ impl Shell {
         wrapped
     }
 
-    fn render_input(frame: &mut Frame, area: Rect, input_buffer: &str) {
+    fn render_resources_panel(
+        frame: &mut Frame,
+        area: Rect,
+        sri_panel: Option<&SriPanelState>,
+        daemon_status: &str,
+        daemon_uptime_secs: u64,
+    ) {
+        let title = format!("Resources · {} · {}s", daemon_status, daemon_uptime_secs);
+        let lines = if let Some(snapshot) = sri_panel
+            .and_then(|panel| panel.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.latest_resources.as_ref())
+        {
+            Self::resource_lines(snapshot)
+        } else {
+            vec![Line::from(Span::styled(
+                "waiting for sri resource samples...",
+                theme::muted(),
+            ))]
+        };
+
+        let para = Paragraph::new(lines)
+            .block(theme::panel(&title))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(para, area);
+    }
+
+    fn resource_lines(snapshot: &SriResourceSnapshot) -> Vec<Line<'static>> {
+        let mut lines = vec![Self::resource_line(
+            "RAM",
+            (snapshot.total_ram_mb as f32 / 1024.0 * 100.0).clamp(0.0, 100.0),
+            Self::format_mb(snapshot.total_ram_mb),
+            Self::dominant_ram(snapshot),
+        )];
+
+        lines.push(Self::resource_line(
+            "CPU",
+            snapshot.total_cpu_pct.clamp(0.0, 100.0),
+            format!("{:.1}%", snapshot.total_cpu_pct),
+            Self::dominant_cpu(snapshot),
+        ));
+
+        if let (Some(used_mb), Some(total_mb)) = (snapshot.vram_used_mb, snapshot.vram_total_mb) {
+            let percent = if total_mb == 0 {
+                0.0
+            } else {
+                used_mb as f32 / total_mb as f32 * 100.0
+            };
+            lines.push(Self::resource_line(
+                "VRAM",
+                percent.clamp(0.0, 100.0),
+                format!("{} / {}", Self::format_mb(used_mb), Self::format_mb(total_mb)),
+                Self::dominant_vram(snapshot),
+            ));
+        }
+
+        lines
+    }
+
+    fn resource_line(label: &str, percent: f32, total: String, dominant: String) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{:<4}", label), theme::muted()),
+            Span::styled(
+                format!("[{}] {}", Self::resource_bar(percent, 10), total),
+                Self::resource_style(percent),
+            ),
+            Span::styled(format!("  top: {}", dominant), theme::muted()),
+        ])
+    }
+
+    fn resource_bar(percent: f32, width: usize) -> String {
+        let clamped = percent.clamp(0.0, 100.0);
+        let filled = ((clamped / 100.0) * width as f32).round() as usize;
+        let empty = width.saturating_sub(filled.min(width));
+        format!("{}{}", "█".repeat(filled.min(width)), "░".repeat(empty))
+    }
+
+    fn resource_style(percent: f32) -> Style {
+        if percent < 70.0 {
+            theme::success()
+        } else if percent < 90.0 {
+            theme::warning()
+        } else {
+            theme::danger()
+        }
+    }
+
+    fn format_mb(value_mb: u64) -> String {
+        if value_mb >= 1024 {
+            format!("{:.2} GB", value_mb as f64 / 1024.0)
+        } else {
+            format!("{} MB", value_mb)
+        }
+    }
+
+    fn dominant_ram(snapshot: &SriResourceSnapshot) -> String {
+        snapshot
+            .actors
+            .iter()
+            .max_by_key(|actor| actor.ram_mb)
+            .map(|actor| format!("{} {}", actor.actor_name, Self::format_mb(actor.ram_mb)))
+            .unwrap_or_else(|| "n/a".to_string())
+    }
+
+    fn dominant_cpu(snapshot: &SriResourceSnapshot) -> String {
+        snapshot
+            .actors
+            .iter()
+            .max_by(|left, right| left.cpu_pct.total_cmp(&right.cpu_pct))
+            .map(|actor| format!("{} {:.1}%", actor.actor_name, actor.cpu_pct))
+            .unwrap_or_else(|| "n/a".to_string())
+    }
+
+    fn dominant_vram(snapshot: &SriResourceSnapshot) -> String {
+        snapshot
+            .actors
+            .iter()
+            .filter_map(|actor| actor.vram_pct.map(|value| (actor.actor_name.as_str(), value)))
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(actor, value)| format!("{} {:.1}%", actor, value))
+            .unwrap_or_else(|| "n/a".to_string())
+    }
+
+    fn response_style(line: &str) -> Style {
+        if line.starts_with("[TTS]") || line.starts_with("[SOUL]") {
+            theme::warning()
+        } else if line.starts_with("[MEM]") || line.starts_with("[CTP]") {
+            theme::muted()
+        } else if line.starts_with("[FAULT]") {
+            theme::danger()
+        } else if line.starts_with("[LLM]") {
+            theme::success()
+        } else {
+            theme::text()
+        }
+    }
+
+    fn resource_label(resource: ResourceKind) -> &'static str {
+        match resource {
+            ResourceKind::Ram => "ram",
+            ResourceKind::Cpu => "cpu",
+            ResourceKind::Vram => "vram",
+        }
+    }
+
+    fn truncate_chars(text: &str, max_chars: usize) -> String {
+        let count = text.chars().count();
+        if count <= max_chars {
+            return text.to_string();
+        }
+
+        let visible = max_chars.saturating_sub(1);
+        format!("{}…", text.chars().take(visible).collect::<String>())
+    }
+
+    fn render_input(
+        frame: &mut Frame,
+        area: Rect,
+        input_buffer: &str,
+        daemon_status: &str,
+        daemon_uptime_secs: u64,
+    ) {
+        let title = format!("Input · {} · {}s", daemon_status, daemon_uptime_secs);
         let input = Paragraph::new(input_buffer)
-            .block(theme::focused_panel("Input"))
+            .block(theme::focused_panel(&title))
             .style(theme::text());
 
         frame.render_widget(input, area);
-    }
-
-    fn render_loops_sidebar(frame: &mut Frame, area: Rect, loops: &[LoopInfo]) {
-        let mut sorted = loops.to_vec();
-        sorted.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let items: Vec<ListItem> = sorted
-            .iter()
-            .map(|loop_info| {
-                let dot = if loop_info.enabled {
-                    Span::styled("● ", theme::success())
-                } else {
-                    Span::styled("● ", theme::danger())
-                };
-                let text = if loop_info.description.is_empty() {
-                    loop_info.name.clone()
-                } else {
-                    format!("{} — {}", loop_info.name, loop_info.description)
-                };
-                ListItem::new(Line::from(vec![dot, Span::styled(text, theme::text())]))
-            })
-            .collect();
-
-        let loops_widget = List::new(items).block(theme::panel("Loops"));
-
-        frame.render_widget(loops_widget, area);
     }
 
     fn render_slash_dropdown(
