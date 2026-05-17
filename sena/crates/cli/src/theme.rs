@@ -11,6 +11,7 @@ const WARNING: Color = Color::Rgb(250, 189, 47);
 const DANGER: Color = Color::Rgb(251, 73, 52);
 const SELECTION_BG: Color = Color::Rgb(55, 77, 74);
 const PANEL_BORDER: Color = Color::Rgb(74, 89, 88);
+const OVERLAY_BG: Color = Color::Rgb(24, 31, 30);
 
 pub fn panel<'a>(title: &'a str) -> Block<'a> {
     Block::default()
@@ -28,6 +29,15 @@ pub fn focused_panel<'a>(title: &'a str) -> Block<'a> {
         .title_style(title_style())
 }
 
+pub fn overlay_panel<'a>(title: &'a str) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(OVERLAY_BG))
+        .title(title)
+        .title_style(title_style())
+}
+
 pub fn title_style() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
@@ -38,6 +48,14 @@ pub fn text() -> Style {
 
 pub fn muted() -> Style {
     Style::default().fg(MUTED)
+}
+
+pub fn overlay_text() -> Style {
+    text().bg(OVERLAY_BG)
+}
+
+pub fn overlay_muted() -> Style {
+    muted().bg(OVERLAY_BG)
 }
 
 pub fn success() -> Style {

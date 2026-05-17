@@ -11,7 +11,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -29,95 +29,146 @@ struct LoopInfo {
     enabled: bool,
 }
 
-const HELP_CORE: &[(&str, &str, &str)] = &[
-    ("/help, /?", "show the command guide", "/help"),
-    (
-        "/status, /health",
-        "show daemon and actor status",
-        "/status",
-    ),
-    ("/quit, /exit, /bye", "close the CLI", "/quit"),
+const HELP_ESC_RESET_AFTER: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug)]
+struct HelpCommand {
+    command: &'static str,
+    description: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HelpSection {
+    title: &'static str,
+    commands: &'static [HelpCommand],
+}
+
+const HELP_NAVIGATION_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/tree",
+        description: "Toggle full tree view vs live navigation view",
+    },
+    HelpCommand {
+        command: "/sri",
+        description: "Print full SRI node snapshot to signals panel",
+    },
 ];
 
-const HELP_SPEECH: &[(&str, &str, &str)] = &[
-    (
-        "/listen, /mic",
-        "start live microphone transcription",
-        "/listen",
-    ),
-    (
-        "/stop, /end",
-        "stop listening and finalize the transcript",
-        "/stop",
-    ),
-    (
-        "/say \"text\"",
-        "speak text verbatim through TTS (audio test)",
-        "/say \"hello world\"",
-    ),
-    (
-        "/run \"text\"",
-        "run full inference pipeline as if spoken",
-        "/run \"what time is it\"",
-    ),
-    ("/speech, /audio", "show speech subsystem status", "/speech"),
+const HELP_VOICE_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/say \"text\"",
+        description: "Speak text verbatim through TTS (audio test)",
+    },
+    HelpCommand {
+        command: "/run \"text\"",
+        description: "Run full inference pipeline as if spoken",
+    },
 ];
 
-const HELP_MODELS: &[(&str, &str, &str)] = &[
-    ("/models", "list available local models", "/models"),
-    (
-        "/model load <path>",
-        "load a model from disk",
-        "/model load C:/models/qwen.gguf",
-    ),
-    (
-        "/inference, /infer",
-        "show inference subsystem status",
-        "/inference",
-    ),
+const HELP_SYSTEM_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/status",
+        description: "Show all actor health statuses",
+    },
+    HelpCommand {
+        command: "/ping",
+        description: "Show daemon uptime",
+    },
+    HelpCommand {
+        command: "/shutdown",
+        description: "Gracefully shut down the Sena daemon",
+    },
+    HelpCommand {
+        command: "/listen",
+        description: "Enable voice input routing to inference",
+    },
+    HelpCommand {
+        command: "/stop",
+        description: "Disable voice input routing (mic stays open)",
+    },
 ];
 
-const HELP_MEMORY: &[(&str, &str, &str)] = &[
-    (
-        "/observation, /obs",
-        "show Sena's current observation snapshot",
-        "/observation",
-    ),
-    (
-        "/memory, /mem",
-        "show what Sena remembers about you",
-        "/memory",
-    ),
-    (
-        "/memory-stats, /memstats",
-        "show memory store stats",
-        "/memory-stats",
-    ),
-    (
-        "/explanation, /explain <thought_id>",
-        "explain a specific thought",
-        "/explanation latest",
-    ),
-    (
-        "/query, /search <text>",
-        "search memory",
-        "/query project roadmap",
-    ),
-    ("/config, /settings", "open the config editor", "/config"),
+const HELP_CONFIGURATION_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/config",
+        description: "Open the configuration editor",
+    },
+    HelpCommand {
+        command: "/models",
+        description: "List discovered GGUF models",
+    },
+    HelpCommand {
+        command: "/load \"path\"",
+        description: "Load a GGUF model from the given path",
+    },
 ];
 
-const HELP_RUNTIME: &[(&str, &str, &str)] = &[
-    ("/loops, /loop", "list background loops", "/loops"),
-    (
-        "/loops <name> on|off",
-        "toggle a specific loop",
-        "/loops speech off",
-    ),
-    ("/tree", "toggle live vs full tree expansion", "/tree"),
-    ("/sri", "dump the current SRI snapshot", "/sri"),
-    ("/events, /watch", "subscribe to daemon events", "/events"),
-    ("/shutdown", "stop the daemon", "/shutdown"),
+const HELP_MEMORY_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/memory",
+        description: "Show memory store statistics",
+    },
+    HelpCommand {
+        command: "/query \"text\"",
+        description: "Query memory for relevant nodes",
+    },
 ];
+
+const HELP_DEBUG_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/debug [name]",
+        description: "Enable verbose tracing for a named subsystem",
+    },
+    HelpCommand {
+        command: "/verbose",
+        description: "Show last N transcriptions and responses",
+    },
+    HelpCommand {
+        command: "/loops",
+        description: "Show CTP loop status and trigger history",
+    },
+];
+
+const HELP_OTHER_COMMANDS: &[HelpCommand] = &[
+    HelpCommand {
+        command: "/help",
+        description: "Show this screen",
+    },
+];
+
+const HELP_OVERLAY_SECTIONS: &[HelpSection] = &[
+    HelpSection {
+        title: "Navigation",
+        commands: HELP_NAVIGATION_COMMANDS,
+    },
+    HelpSection {
+        title: "Voice & Inference",
+        commands: HELP_VOICE_COMMANDS,
+    },
+    HelpSection {
+        title: "System",
+        commands: HELP_SYSTEM_COMMANDS,
+    },
+    HelpSection {
+        title: "Configuration",
+        commands: HELP_CONFIGURATION_COMMANDS,
+    },
+    HelpSection {
+        title: "Memory",
+        commands: HELP_MEMORY_COMMANDS,
+    },
+    HelpSection {
+        title: "Debug",
+        commands: HELP_DEBUG_COMMANDS,
+    },
+    HelpSection {
+        title: "Other",
+        commands: HELP_OTHER_COMMANDS,
+    },
+];
+
+const HELP_LEFT_COLUMN_SECTION_INDEXES: &[usize] = &[0, 1, 2, 6];
+const HELP_RIGHT_COLUMN_SECTION_INDEXES: &[usize] = &[3, 4, 5];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandCategory {
@@ -358,9 +409,31 @@ impl ModelModal {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct HelpOverlayState {
+    esc_deadline: Option<Instant>,
+}
+
+impl HelpOverlayState {
+    fn handle_escape(&mut self, now: Instant) -> bool {
+        if self.esc_deadline.is_some_and(|deadline| now <= deadline) {
+            self.esc_deadline = None;
+            true
+        } else {
+            self.esc_deadline = Some(now + HELP_ESC_RESET_AFTER);
+            false
+        }
+    }
+
+    fn confirmation_visible(&self, now: Instant) -> bool {
+        self.esc_deadline.is_some_and(|deadline| now <= deadline)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ModalState {
     Models(ModelModal),
+    Help(HelpOverlayState),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -928,6 +1001,12 @@ impl Shell {
 
     async fn handle_modal_key_event(&mut self, code: KeyCode) -> Result<(), CliError> {
         match (&mut self.modal, code) {
+            (Some(ModalState::Help(help)), KeyCode::Esc) => {
+                if help.handle_escape(Instant::now()) {
+                    self.modal = None;
+                }
+            }
+            (Some(ModalState::Help(_)), _) => {}
             (Some(ModalState::Models(modal)), KeyCode::Up) => modal.prev(),
             (Some(ModalState::Models(modal)), KeyCode::Down) => modal.next(),
             (Some(ModalState::Models(_)), KeyCode::Esc) => {
@@ -945,6 +1024,11 @@ impl Shell {
     async fn handle_input(&mut self, input: String) -> Result<(), CliError> {
         let input = input.trim();
         if input.is_empty() {
+            return Ok(());
+        }
+
+        if Self::is_help_command(input) {
+            self.handle_slash_command(input).await?;
             return Ok(());
         }
 
@@ -990,6 +1074,10 @@ impl Shell {
         } else {
             Some(text.to_string())
         }
+    }
+
+    fn is_help_command(input: &str) -> bool {
+        matches!(input.trim(), "/help" | "/?")
     }
 
     async fn handle_slash_command(&mut self, input: &str) -> Result<(), CliError> {
@@ -1049,12 +1137,7 @@ impl Shell {
     }
 
     async fn cmd_help(&mut self) -> Result<(), CliError> {
-        self.log_message("Manual command guide:".to_string());
-        self.log_help_section("Core", HELP_CORE);
-        self.log_help_section("Speech", HELP_SPEECH);
-        self.log_help_section("Models", HELP_MODELS);
-        self.log_help_section("Transparency + Memory + Config", HELP_MEMORY);
-        self.log_help_section("Runtime", HELP_RUNTIME);
+        self.modal = Some(ModalState::Help(HelpOverlayState::default()));
         Ok(())
     }
 
@@ -1494,6 +1577,7 @@ impl Shell {
     async fn handle_model_modal_enter(&mut self) -> Result<(), CliError> {
         let model = self.modal.as_ref().and_then(|modal| match modal {
             ModalState::Models(modal) => modal.selected().cloned(),
+            ModalState::Help(_) => None,
         });
 
         let Some(model) = model else {
@@ -1504,16 +1588,6 @@ impl Shell {
         self.modal = None;
         self.log_message(format!("Loading model '{}'...", model.name));
         self.cmd_load_model(Some(model.path.as_str())).await
-    }
-
-    fn log_help_section(&mut self, title: &str, entries: &[(&str, &str, &str)]) {
-        self.log_message(format!("{}:", title));
-        for (command, description, example) in entries {
-            self.log_message(format!(
-                "  {:<26} {}  e.g. {}",
-                command, description, example
-            ));
-        }
     }
 
     fn log_message(&mut self, message: String) {
@@ -2276,8 +2350,100 @@ impl Shell {
 
     fn render_modal(frame: &mut Frame, modal: &ModalState) {
         match modal {
+            ModalState::Help(help_overlay) => Self::render_help_overlay(frame, help_overlay),
             ModalState::Models(model_modal) => Self::render_model_modal(frame, model_modal),
         }
+    }
+
+    fn render_help_overlay(frame: &mut Frame, help_overlay: &HelpOverlayState) {
+        let area = frame.area();
+        frame.render_widget(Clear, area);
+
+        let block = theme::overlay_panel("Command Guide");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
+            .split(inner);
+
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Sena Manual Controls",
+                theme::overlay_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Full-screen command reference",
+                theme::overlay_muted(),
+            ),
+        ]))
+        .style(theme::overlay_text());
+        frame.render_widget(title, sections[0]);
+
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(sections[1]);
+
+        let left = Paragraph::new(Self::help_overlay_column_lines(HELP_LEFT_COLUMN_SECTION_INDEXES))
+            .style(theme::overlay_text())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(left, columns[0]);
+
+        let right = Paragraph::new(Self::help_overlay_column_lines(HELP_RIGHT_COLUMN_SECTION_INDEXES))
+            .style(theme::overlay_text())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(right, columns[1]);
+
+        let footer_text = if help_overlay.confirmation_visible(Instant::now()) {
+            "Press Esc again to return to Sena"
+        } else {
+            "Press Esc twice to return  ·  Esc once cancels any pending input"
+        };
+        let footer_style = if help_overlay.confirmation_visible(Instant::now()) {
+            theme::overlay_muted().add_modifier(Modifier::DIM)
+        } else {
+            theme::overlay_muted()
+        };
+        let footer = Paragraph::new(Line::from(Span::styled(footer_text, footer_style)))
+            .style(theme::overlay_text());
+        frame.render_widget(footer, sections[2]);
+    }
+
+    fn help_overlay_column_lines(section_indexes: &[usize]) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        for (column_index, section_index) in section_indexes.iter().enumerate() {
+            if column_index > 0 {
+                lines.push(Line::from(String::new()));
+            }
+
+            let section = &HELP_OVERLAY_SECTIONS[*section_index];
+
+            lines.push(Line::from(Span::styled(
+                section.title,
+                theme::overlay_text()
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED),
+            )));
+
+            for command in section.commands {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<22}", command.command),
+                        theme::overlay_text().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(command.description, theme::overlay_text()),
+                ]));
+            }
+        }
+
+        lines
     }
 
     fn render_model_modal(frame: &mut Frame, model_modal: &ModelModal) {
@@ -2346,8 +2512,9 @@ impl Drop for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELP_SPEECH, SLASH_COMMANDS, Shell};
+    use super::{HELP_OVERLAY_SECTIONS, HelpOverlayState, SLASH_COMMANDS, Shell};
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn quoted_command_text_parses_balanced_quotes_only() {
@@ -2377,16 +2544,41 @@ mod tests {
 
     #[test]
     fn help_and_slash_catalog_include_say_and_run() {
-        assert!(HELP_SPEECH.iter().any(|(command, description, _)| {
-            *command == "/say \"text\""
-                && *description == "speak text verbatim through TTS (audio test)"
+        assert!(HELP_OVERLAY_SECTIONS.iter().any(|section| {
+            section.commands.iter().any(|command| {
+                command.command == "/say \"text\""
+                    && command.description == "Speak text verbatim through TTS (audio test)"
+            })
         }));
-        assert!(HELP_SPEECH.iter().any(|(command, description, _)| {
-            *command == "/run \"text\""
-                && *description == "run full inference pipeline as if spoken"
+        assert!(HELP_OVERLAY_SECTIONS.iter().any(|section| {
+            section.commands.iter().any(|command| {
+                command.command == "/run \"text\""
+                    && command.description == "Run full inference pipeline as if spoken"
+            })
         }));
         assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/say"));
         assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/run"));
+    }
+
+    #[test]
+    fn help_overlay_requires_double_escape_within_window() {
+        let start = Instant::now();
+        let mut help = HelpOverlayState::default();
+
+        assert!(!help.handle_escape(start));
+        assert!(help.confirmation_visible(start + Duration::from_secs(1)));
+        assert!(help.handle_escape(start + Duration::from_secs(1)));
+        assert!(!help.confirmation_visible(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn help_overlay_escape_confirmation_expires_after_window() {
+        let start = Instant::now();
+        let mut help = HelpOverlayState::default();
+
+        assert!(!help.handle_escape(start));
+        assert!(!help.confirmation_visible(start + Duration::from_secs(3)));
+        assert!(!help.handle_escape(start + Duration::from_secs(3)));
     }
 
     #[test]
