@@ -454,12 +454,11 @@ impl Actor for SoulActor {
                     schema.last_active = Some(now);
                     schema
                 }
-                None => {
-                    let mut schema = SchemaV1::default();
-                    schema.created_at = now;
-                    schema.session_count = 1;
-                    schema
-                }
+                None => SchemaV1 {
+                    created_at: now,
+                    session_count: 1,
+                    ..SchemaV1::default()
+                },
             };
             store
                 .save_schema(&schema)

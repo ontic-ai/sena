@@ -1474,6 +1474,9 @@ impl Actor for InferenceActor {
                             causal_id,
                         })) => {
                             self.remember_pending_reasoning(source, causal_id);
+                            if source == InferenceSource::UserText {
+                                self.remember_user_input(causal_id, prompt.clone());
+                            }
                             if let Err(e) = self
                                 .handle_inference_request(prompt, source, priority, causal_id)
                                 .await
@@ -1652,6 +1655,48 @@ mod tests {
     use crate::types::BackendType;
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
+    use tokio::sync::oneshot;
+
+    async fn spawn_memory_ack_responder(
+        bus: Arc<EventBus>,
+        expected_writes: usize,
+        observed_writes: Option<Arc<StdMutex<Vec<String>>>>,
+    ) -> (oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let responder = tokio::spawn(async move {
+            let mut rx = bus.subscribe_broadcast();
+            let _ = ready_tx.send(());
+            let mut seen = 0;
+
+            while seen < expected_writes {
+                match rx.recv().await {
+                    Ok(Event::Memory(MemoryEvent::MemoryWriteRequest {
+                        text,
+                        kind,
+                        causal_id,
+                    })) => {
+                        assert_eq!(kind, MemoryKind::Episodic);
+                        if let Some(observed) = &observed_writes {
+                            observed
+                                .lock()
+                                .expect("memory write capture mutex")
+                                .push(text);
+                        }
+                        bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteCompleted {
+                            causal_id,
+                        }))
+                        .await
+                        .expect("memory write completion should broadcast");
+                        seen += 1;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("memory write responder channel failed: {error}"),
+                }
+            }
+        });
+
+        (ready_rx, responder)
+    }
 
     struct PromptCaptureBackend {
         response: String,
@@ -2097,37 +2142,9 @@ mod tests {
 
         actor.remember_user_input(causal_id, "remember this exchange".to_string());
 
-        let responder_bus = bus.clone();
-        let observed_clone = observed_writes.clone();
-        let responder = tokio::spawn(async move {
-            let mut rx = responder_bus.subscribe_broadcast();
-            let mut seen = 0;
-
-            while seen < 2 {
-                match rx.recv().await {
-                    Ok(Event::Memory(MemoryEvent::MemoryWriteRequest {
-                        text,
-                        kind,
-                        causal_id,
-                    })) => {
-                        assert_eq!(kind, MemoryKind::Episodic);
-                        observed_clone
-                            .lock()
-                            .expect("memory write capture mutex")
-                            .push(text);
-                        responder_bus
-                            .broadcast(Event::Memory(MemoryEvent::MemoryWriteCompleted {
-                                causal_id,
-                            }))
-                            .await
-                            .expect("memory write completion should broadcast");
-                        seen += 1;
-                    }
-                    Ok(_) => {}
-                    Err(error) => panic!("memory write responder channel failed: {error}"),
-                }
-            }
-        });
+        let (ready_rx, responder) =
+            spawn_memory_ack_responder(bus.clone(), 2, Some(observed_writes.clone())).await;
+        ready_rx.await.expect("memory ack responder should initialize");
 
         actor
             .persist_completed_exchange(
@@ -2170,6 +2187,9 @@ mod tests {
         tokio::spawn(async move {
             let _ = actor.run().await;
         });
+
+        let (ready_rx, responder) = spawn_memory_ack_responder(bus.clone(), 2, None).await;
+        ready_rx.await.expect("memory ack responder should initialize");
 
         let causal_id = bus::CausalId::new();
         bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
@@ -2258,6 +2278,8 @@ mod tests {
             explicit_id_responded,
             "inference actor should answer reasoning queries by explicit id"
         );
+
+        responder.await.expect("memory ack responder should finish");
     }
 
     #[tokio::test]

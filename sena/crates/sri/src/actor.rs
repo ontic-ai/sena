@@ -200,7 +200,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Speech(SpeechEvent::TranscriptionCompleted { text, .. }) => {
-            set_until(&state, ActivityKind::Transcription, Instant::now() + AUTO_CLOSE_AFTER);
+            set_until(state, ActivityKind::Transcription, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "perception.hearing");
             open_shelf(state, event_tx, "perception.hearing", "speech.transcription_completed");
             emit_signal(
@@ -211,7 +211,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Speech(SpeechEvent::SpeakingStarted { .. }) => {
-            set_until(&state, ActivityKind::Synthesis, Instant::now() + AUTO_CLOSE_AFTER);
+            set_until(state, ActivityKind::Synthesis, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "expression.voice");
             open_shelf(state, event_tx, "expression.voice", "speech.speaking_started");
             emit_signal(
@@ -223,7 +223,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         }
         Event::Speech(SpeechEvent::SpeakingCompleted { .. }) => {
             set_until(
-                &state,
+                state,
                 ActivityKind::Synthesis,
                 Instant::now() + Duration::from_secs(2),
             );
@@ -236,7 +236,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Inference(InferenceEvent::InferenceSentenceReady { text, .. }) => {
-            set_until(&state, ActivityKind::Inference, Instant::now() + AUTO_CLOSE_AFTER);
+            set_until(state, ActivityKind::Inference, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "expression.language");
             open_shelf(
                 state,
@@ -247,7 +247,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             emit_signal(state, event_tx, SignalSource::Expression, clean_summary(&text));
         }
         Event::Inference(InferenceEvent::InferenceStreamCompleted { token_count, .. }) => {
-            set_until(&state, ActivityKind::Inference, Instant::now() + Duration::from_secs(4));
+            set_until(state, ActivityKind::Inference, Instant::now() + Duration::from_secs(4));
             mark_activity(state, "expression.language");
             emit_signal(
                 state,
@@ -293,7 +293,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         }
         Event::CTP(ctp_event) => match ctp_event.as_ref() {
             CTPEvent::ThoughtEventTriggered(snapshot) => {
-                set_until(&state, ActivityKind::Thought, Instant::now() + AUTO_CLOSE_AFTER);
+                set_until(state, ActivityKind::Thought, Instant::now() + AUTO_CLOSE_AFTER);
                 mark_activity(state, "cognition.thought");
                 open_shelf(state, event_tx, "cognition.thought", "ctp.thought_triggered");
 
@@ -318,16 +318,15 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
                     );
                 }
             }
-            CTPEvent::ContextSnapshotReady(snapshot) => {
-                if snapshot.visual_context.is_none() {
-                    emit_function_stub(
-                        state,
-                        event_tx,
-                        "perception.sight.analyze_scene",
-                        FunctionStubStatus::Unavailable,
-                    );
-                }
+            CTPEvent::ContextSnapshotReady(snapshot) if snapshot.visual_context.is_none() => {
+                emit_function_stub(
+                    state,
+                    event_tx,
+                    "perception.sight.analyze_scene",
+                    FunctionStubStatus::Unavailable,
+                );
             }
+            CTPEvent::ContextSnapshotReady(_) => {}
             _ => {}
         },
         Event::Soul(SoulEvent::PersonalityUpdated { metadata, .. }) => {
@@ -604,7 +603,7 @@ fn estimate_actor_resources(
             } else {
                 total_cpu_pct * (*cpu_weight / total_cpu_weight)
             };
-            let vram_pct = total_vram_pct.map(|overall| actor_vram_pct(*actor_name, overall, activity));
+            let vram_pct = total_vram_pct.map(|overall| actor_vram_pct(actor_name, overall, activity));
 
             ActorResourceEstimate {
                 actor_name: (*actor_name).to_string(),
