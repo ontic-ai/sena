@@ -16,6 +16,7 @@ vulkan = ["runtime/vulkan"]
 [dependencies]
 ipc = { path = "../ipc" }
 bus = { path = "../bus" }
+sri = { path = "../sri" }
 
 tokio.workspace = true
 tracing.workspace = true

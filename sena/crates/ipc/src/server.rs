@@ -112,6 +112,7 @@ impl IpcServer {
         mut push_rx: broadcast::Receiver<Value>,
     ) -> Result<(), IpcError> {
         let mut events_subscribed = false;
+        let mut sri_subscribed = false;
 
         loop {
             tokio::select! {
@@ -124,6 +125,10 @@ impl IpcServer {
                         events_subscribed = true;
                     } else if request.command == "events.unsubscribe" {
                         events_subscribed = false;
+                    } else if request.command == "sri.subscribe" {
+                        sri_subscribed = true;
+                    } else if request.command == "sri.unsubscribe" {
+                        sri_subscribed = false;
                     }
 
                     let response = match registry.dispatch(&request.command, request.payload).await {
@@ -134,12 +139,22 @@ impl IpcServer {
                 }
                 // Handle push events from daemon
                 push_result = push_rx.recv() => {
-                    if !events_subscribed {
-                        continue;
-                    }
-
                     match push_result {
                         Ok(event_payload) => {
+                            let stream_name = event_payload
+                                .get("stream")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("events");
+                            let should_forward = match stream_name {
+                                "events" => events_subscribed,
+                                "sri" => sri_subscribed,
+                                _ => events_subscribed,
+                            };
+
+                            if !should_forward {
+                                continue;
+                            }
+
                             let push_event = IpcResponse::push_event(event_payload);
                             framing::write_frame(&mut stream, &push_event).await?;
                         }

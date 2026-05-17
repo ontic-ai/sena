@@ -12,6 +12,7 @@ use crate::commands::{
         OnboardingStatusHandler, PingHandler, RuntimeState, ShutdownHandler, StatusHandler,
         SubmitOnboardingConfigHandler, SubmitOnboardingNameHandler,
     },
+    sri_commands::{SriSnapshotHandler, SriSubscribeHandler, SriUnsubscribeHandler},
     speech_commands::{
         SpeechListenStartHandler, SpeechListenStopHandler, SpeechSayHandler, SpeechStatusHandler,
     },
@@ -39,6 +40,7 @@ pub fn register_all(
     registry: &mut CommandRegistry,
     boot_result: &BootResult,
     state: RuntimeState,
+    sri_state: sri::SriState,
     shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> LoopRegistry {
     // Runtime commands
@@ -86,6 +88,9 @@ pub fn register_all(
     // Event commands
     registry.register(Arc::new(EventsSubscribeHandler));
     registry.register(Arc::new(EventsUnsubscribeHandler));
+    registry.register(Arc::new(SriSubscribeHandler));
+    registry.register(Arc::new(SriUnsubscribeHandler));
+    registry.register(Arc::new(SriSnapshotHandler::new(sri_state)));
 
     // Loop control commands
     let loop_registry = LoopRegistry::new();

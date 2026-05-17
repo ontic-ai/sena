@@ -8,6 +8,7 @@ mod commands {
     pub mod loops_commands;
     pub mod memory_commands;
     pub mod runtime_commands;
+    pub mod sri_commands;
     pub mod speech_commands;
     pub mod transparency_commands;
 }
@@ -17,6 +18,7 @@ mod tray;
 use commands::runtime_commands::RuntimeState;
 use error::DaemonError;
 use ipc::{CommandRegistry, IpcServer};
+use sri::SriActor;
 use std::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -136,6 +138,11 @@ async fn run_daemon_services(
 
     info!("Runtime boot complete, starting supervision and IPC server");
 
+    let sri_actor = SriActor::new(sri::SriRegistry::new());
+    let sri_state = sri_actor.state();
+    let sri_events = sri_actor.event_sender();
+    sri_actor.start(boot_result.bus.clone());
+
     // Create runtime state for command handlers
     let runtime_state = RuntimeState::new();
 
@@ -145,6 +152,7 @@ async fn run_daemon_services(
         &mut registry,
         &boot_result,
         runtime_state.clone(),
+        sri_state,
         shutdown_tx.clone(),
     );
 
@@ -162,8 +170,14 @@ async fn run_daemon_services(
 
     // Spawn event forwarding task — forwards bus events to IPC clients
     let event_forwarding_bus = boot_result.bus.clone();
+    let push_tx_events = push_tx.clone();
     tokio::spawn(async move {
-        forward_bus_events_to_ipc(event_forwarding_bus, push_tx).await;
+        forward_bus_events_to_ipc(event_forwarding_bus, push_tx_events).await;
+    });
+
+    let push_tx_sri = push_tx.clone();
+    tokio::spawn(async move {
+        forward_sri_events_to_ipc(sri_events.subscribe(), push_tx_sri).await;
     });
 
     // Spawn loop status tracking task — updates loop registry when actors report status changes
@@ -452,11 +466,42 @@ async fn forward_bus_events_to_ipc(
 
         if let Some(payload) = push_event {
             // Ignore send errors — no clients connected is fine
-            let _ = push_tx.send(payload);
+            let _ = push_tx.send(serde_json::json!({
+                "stream": "events",
+                "type": payload.get("type").cloned().unwrap_or(serde_json::Value::Null),
+                "data": payload.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            }));
         }
     }
 
     warn!("Event forwarding task exited");
+}
+
+async fn forward_sri_events_to_ipc(
+    mut rx: tokio::sync::broadcast::Receiver<sri::SriEvent>,
+    push_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+) {
+    info!("SRI forwarding task started");
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => match serde_json::to_value(&event) {
+                Ok(event_value) => {
+                    let _ = push_tx.send(serde_json::json!({
+                        "stream": "sri",
+                        "event": event_value,
+                    }));
+                }
+                Err(error) => {
+                    error!(error = %error, "failed to serialize SRI event");
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    warn!("SRI forwarding task exited");
 }
 
 /// Track loop status changes from actors and update the loop registry.
