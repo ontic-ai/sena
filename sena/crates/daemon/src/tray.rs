@@ -49,12 +49,14 @@ pub enum TrayLoopResult {
 
 /// Run the tray loop on the main thread.
 ///
-/// This function blocks until shutdown is requested via menu or the tooltip channel closes.
+/// This function blocks until shutdown is requested via menu, the daemon worker
+/// asks the tray to exit, or the tooltip channel closes.
 ///
 /// # Arguments
 ///
 /// * `tooltip_rx` - Receiver for tooltip update messages
 /// * `action_tx` - Sender for tray action events to daemon task
+/// * `shutdown_rx` - Receiver for daemon-worker shutdown notifications
 ///
 /// # Platform
 ///
@@ -63,6 +65,7 @@ pub enum TrayLoopResult {
 pub fn run_tray_loop(
     tooltip_rx: mpsc::Receiver<TooltipUpdate>,
     action_tx: std::sync::mpsc::Sender<TrayAction>,
+    shutdown_rx: mpsc::Receiver<()>,
 ) -> TrayLoopResult {
     use std::time::Duration;
 
@@ -150,6 +153,15 @@ pub fn run_tray_loop(
             }
         }
 
+        match shutdown_rx.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                return TrayLoopResult::Shutdown;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                // No external shutdown requested.
+            }
+        }
+
         // Windows message pump handling
         // Note: The tray-icon crate does NOT handle the Windows message pump internally.
         // We must explicitly pump messages in this loop to process tray events.
@@ -219,6 +231,7 @@ fn pump_windows_messages() {
 pub fn run_tray_loop(
     _tooltip_rx: mpsc::Receiver<TooltipUpdate>,
     _action_tx: std::sync::mpsc::Sender<TrayAction>,
+    _shutdown_rx: mpsc::Receiver<()>,
 ) -> TrayLoopResult {
     TrayLoopResult::Error("Tray not supported on macOS (Windows only)".to_string())
 }
@@ -227,6 +240,7 @@ pub fn run_tray_loop(
 pub fn run_tray_loop(
     _tooltip_rx: mpsc::Receiver<TooltipUpdate>,
     _action_tx: std::sync::mpsc::Sender<TrayAction>,
+    _shutdown_rx: mpsc::Receiver<()>,
 ) -> TrayLoopResult {
     TrayLoopResult::Error("Tray not supported on Linux (Windows only)".to_string())
 }

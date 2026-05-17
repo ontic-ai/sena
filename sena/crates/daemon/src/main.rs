@@ -21,26 +21,123 @@ use std::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-#[tokio::main]
-async fn main() -> Result<(), DaemonError> {
+fn main() -> Result<(), DaemonError> {
     // Initialize logging
     init_logging()?;
 
     info!("Sena daemon starting");
 
+    // Create shared shutdown channel up front so the tray is available while the
+    // runtime boots on a background worker.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Create tray channels for the main-thread loop.
+    let (tray_action_tx, tray_action_rx) = mpsc::channel();
+    let (tooltip_tx, tooltip_rx) = mpsc::channel();
+    let (tray_shutdown_tx, tray_shutdown_rx) = mpsc::channel();
+
+    tooltip_tx
+        .send(tray::TooltipUpdate {
+            text: "Sena — Booting...".to_string(),
+        })
+        .ok();
+
+    // Spawn tray action handler task.
+    let action_handler_shutdown_tx = shutdown_tx.clone();
+    let tray_action_handle = std::thread::spawn(move || {
+        handle_tray_actions(tray_action_rx, action_handler_shutdown_tx);
+    });
+
+    let daemon_tooltip_tx = tooltip_tx.clone();
+    let daemon_shutdown_tx = shutdown_tx.clone();
+    let daemon_tray_shutdown_tx = tray_shutdown_tx.clone();
+    let daemon_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                DaemonError::SupervisionError(format!(
+                    "failed to build daemon runtime: {}",
+                    e
+                ))
+            })?;
+
+        runtime.block_on(run_daemon_services(
+            daemon_tooltip_tx,
+            shutdown_rx,
+            daemon_shutdown_tx,
+            daemon_tray_shutdown_tx,
+        ))
+    });
+
+    info!("Tray initialized, entering tray loop");
+
+    // Run tray loop on main thread (blocking)
+    // This is required on Windows for proper message pump handling
+    let tray_result = tray::run_tray_loop(tooltip_rx, tray_action_tx, tray_shutdown_rx);
+
+    let tray_error = match tray_result {
+        tray::TrayLoopResult::Shutdown => {
+            info!("Tray loop requested shutdown");
+            let _ = shutdown_tx.send(());
+            None
+        }
+        tray::TrayLoopResult::Error(e) => {
+            warn!("Tray loop error: {}", e);
+            let _ = shutdown_tx.send(());
+            Some(e)
+        }
+    };
+
+    drop(shutdown_tx);
+    drop(tooltip_tx);
+    drop(tray_shutdown_tx);
+
+    tray_action_handle.join().ok();
+
+    let daemon_result = match daemon_thread.join() {
+        Ok(result) => result,
+        Err(_) => {
+            return Err(DaemonError::SupervisionError(
+                "daemon runtime worker thread panicked".to_string(),
+            ));
+        }
+    };
+
+    daemon_result?;
+
+    if let Some(error) = tray_error {
+        return Err(DaemonError::TrayError(error));
+    }
+
+    Ok(())
+}
+
+async fn run_daemon_services(
+    tooltip_tx: mpsc::Sender<tray::TooltipUpdate>,
+    mut shutdown_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    tray_shutdown_tx: mpsc::Sender<()>,
+) -> Result<(), DaemonError> {
     // Boot runtime
     info!("Booting runtime...");
-    let boot_result = runtime::boot()
-        .await
-        .map_err(|e| DaemonError::BootFailed(e.to_string()))?;
+    let boot_result = match runtime::boot().await {
+        Ok(boot_result) => boot_result,
+        Err(e) => {
+            tooltip_tx
+                .send(tray::TooltipUpdate {
+                    text: "Sena — Boot failed".to_string(),
+                })
+                .ok();
+            let _ = tray_shutdown_tx.send(());
+            return Err(DaemonError::BootFailed(e.to_string()));
+        }
+    };
 
     info!("Runtime boot complete, starting supervision and IPC server");
 
     // Create runtime state for command handlers
     let runtime_state = RuntimeState::new();
-
-    // Create shutdown channel
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Create command registry and register all handlers
     let mut registry = CommandRegistry::new();
@@ -76,12 +173,6 @@ async fn main() -> Result<(), DaemonError> {
         track_loop_status_changes(loop_status_bus, loop_registry_clone).await;
     });
 
-    // Create tray action channel (std::sync::mpsc for main thread)
-    let (tray_action_tx, tray_action_rx) = mpsc::channel();
-
-    // Create tooltip update channel (std::sync::mpsc for cross-thread send from tokio)
-    let (tooltip_tx, tooltip_rx) = mpsc::channel();
-
     // Clone bus references before moving boot_result into supervision loop
     let boot_complete_bus = boot_result.bus.clone();
     let supervision_bus = boot_result.bus.clone();
@@ -92,13 +183,6 @@ async fn main() -> Result<(), DaemonError> {
             error!("Supervision loop error: {}", e);
         }
     });
-
-    // Update tray tooltip after boot
-    tooltip_tx
-        .send(tray::TooltipUpdate {
-            text: "Sena — Booting...".to_string(),
-        })
-        .ok();
 
     // Subscribe to BootComplete event to know when runtime is ready
     let runtime_state_clone = runtime_state.clone();
@@ -118,30 +202,6 @@ async fn main() -> Result<(), DaemonError> {
             }
         }
     });
-
-    // Spawn tray action handler task
-    let action_handler_shutdown_tx = shutdown_tx.clone();
-    let tray_action_handle = std::thread::spawn(move || {
-        handle_tray_actions(tray_action_rx, action_handler_shutdown_tx);
-    });
-
-    info!("Daemon ready, entering tray loop");
-
-    // Run tray loop on main thread (blocking)
-    // This is required on Windows for proper message pump handling
-    let tray_result = tray::run_tray_loop(tooltip_rx, tray_action_tx);
-
-    // Tray loop exited — initiate shutdown
-    match tray_result {
-        tray::TrayLoopResult::Shutdown => {
-            info!("Tray loop requested shutdown");
-            // Unblock the select! below so shutdown proceeds immediately.
-            let _ = shutdown_tx.send(());
-        }
-        tray::TrayLoopResult::Error(e) => {
-            warn!("Tray loop error: {}", e);
-        }
-    }
 
     // Wait for shutdown signal or supervision loop exit
     let shutdown_requested = tokio::select! {
@@ -169,11 +229,9 @@ async fn main() -> Result<(), DaemonError> {
         }
     }
 
-    // Join tray action handler
-    tray_action_handle.join().ok();
-
     // Abort IPC server (it will exit when pipe closes)
     ipc_handle.abort();
+    let _ = tray_shutdown_tx.send(());
 
     info!("Sena daemon shutdown complete");
     Ok(())
