@@ -1123,9 +1123,15 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_actors_creates_expected_list() {
+        let _env_lock = env_test_lock();
+        let temp_dir = tempdir().expect("create tempdir");
+        let _env = TestEnvGuard::set(temp_dir.path());
         let bus = Arc::new(EventBus::new());
         let data_dir = tempdir().expect("create tempdir");
-        let config = crate::config::SenaConfig::default();
+        let config = crate::config::SenaConfig {
+            speech_enabled: false,
+            ..Default::default()
+        };
         let result = spawn_actors_with_data_dir(bus, &config, data_dir.path()).await;
         assert!(result.is_ok());
 
@@ -1138,12 +1144,15 @@ mod tests {
         assert!(expected.contains(&"platform"));
         assert!(expected.contains(&"ctp"));
         assert!(expected.contains(&"prompt"));
-        assert!(expected.contains(&"stt"));
-        assert!(expected.contains(&"tts"));
+        assert!(!expected.contains(&"stt"));
+        assert!(!expected.contains(&"tts"));
     }
 
     #[tokio::test]
     async fn spawn_actors_skips_speech_when_disabled() {
+        let _env_lock = env_test_lock();
+        let temp_dir = tempdir().expect("create tempdir");
+        let _env = TestEnvGuard::set(temp_dir.path());
         let bus = Arc::new(EventBus::new());
         let data_dir = tempdir().expect("create tempdir");
         let config = crate::config::SenaConfig {

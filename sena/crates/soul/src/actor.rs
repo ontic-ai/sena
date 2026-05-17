@@ -444,13 +444,23 @@ impl Actor for SoulActor {
                 .initialize()
                 .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
 
-            let mut schema = store
+            let now = Utc::now();
+            let schema = match store
                 .load_schema()
                 .map_err(|e| ActorError::StartupFailed(e.to_string()))?
-                .unwrap_or_default();
-            let now = Utc::now();
-            schema.session_count = schema.session_count.saturating_add(1);
-            schema.last_active = Some(now);
+            {
+                Some(mut schema) => {
+                    schema.session_count = schema.session_count.saturating_add(1);
+                    schema.last_active = Some(now);
+                    schema
+                }
+                None => {
+                    let mut schema = SchemaV1::default();
+                    schema.created_at = now;
+                    schema.session_count = 1;
+                    schema
+                }
+            };
             store
                 .save_schema(&schema)
                 .map_err(|e| ActorError::StartupFailed(e.to_string()))?;
@@ -578,6 +588,14 @@ mod tests {
                 schema: Some(SchemaV1::default()),
             }
         }
+
+        fn without_schema() -> Self {
+            Self {
+                events: Vec::new(),
+                signals: Vec::new(),
+                schema: None,
+            }
+        }
     }
 
     impl SoulStore for TestStore {
@@ -688,6 +706,23 @@ mod tests {
 
         actor.start(Arc::clone(&bus)).await.expect("start failed");
         assert_eq!(actor.schema.session_count, 1);
+        assert!(actor.schema.last_active.is_some());
+        actor.stop().await.expect("stop failed");
+    }
+
+    #[tokio::test]
+    async fn soul_actor_first_boot_initializes_schema_once() {
+        let store = Box::new(TestStore::without_schema());
+        let mut actor = SoulActor::new(store);
+        let bus = Arc::new(EventBus::new());
+
+        actor.start(Arc::clone(&bus)).await.expect("start failed");
+
+        assert_eq!(actor.schema.session_count, 1);
+        assert_eq!(actor.schema.name, "Sena");
+        assert!(actor.schema.last_active.is_none());
+        assert!(actor.schema.created_at <= Utc::now());
+
         actor.stop().await.expect("stop failed");
     }
 

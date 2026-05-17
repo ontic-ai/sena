@@ -15,6 +15,7 @@ const TEMPORAL_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("soul_
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("soul_meta");
 
 const META_SCHEMA_KEY: &str = "schema";
+const META_SCHEMA_INITIALIZED_KEY: &str = "schema_initialized";
 const META_NEXT_ROW_ID_KEY: &str = "next_row_id";
 
 fn db_error(error: impl std::fmt::Display) -> SoulError {
@@ -31,6 +32,16 @@ fn read_u64(bytes: &[u8]) -> Result<u64, SoulError> {
     let mut raw = [0_u8; 8];
     raw.copy_from_slice(bytes);
     Ok(u64::from_le_bytes(raw))
+}
+
+fn read_bool(bytes: &[u8]) -> Result<bool, SoulError> {
+    if bytes.len() != 1 {
+        return Err(SoulError::Database(
+            "invalid bool metadata payload".to_string(),
+        ));
+    }
+
+    Ok(bytes[0] != 0)
 }
 
 /// Redb-backed encrypted Soul store.
@@ -69,23 +80,51 @@ impl RedbSoulStore {
             write_txn.open_table(TEMPORAL_TABLE).map_err(db_error)?;
             let mut meta_table = write_txn.open_table(META_TABLE).map_err(db_error)?;
 
-            if meta_table.get(META_SCHEMA_KEY).map_err(db_error)?.is_none() {
-                let schema = serde_json::to_vec(&SchemaV1::default())
-                    .map_err(|error| SoulError::Database(error.to_string()))?;
-                meta_table
-                    .insert(META_SCHEMA_KEY, schema.as_slice())
-                    .map_err(db_error)?;
-            }
-
-            if meta_table
+            let schema_present = meta_table.get(META_SCHEMA_KEY).map_err(db_error)?.is_some();
+            let schema_initialized = meta_table
+                .get(META_SCHEMA_INITIALIZED_KEY)
+                .map_err(db_error)?
+                .map(|value| read_bool(value.value()))
+                .transpose()?;
+            let next_row_id_present = meta_table
                 .get(META_NEXT_ROW_ID_KEY)
                 .map_err(db_error)?
-                .is_none()
-            {
+                .is_some();
+
+            let is_fresh_store = !schema_present && schema_initialized.is_none() && !next_row_id_present;
+
+            if is_fresh_store {
                 let next_row_id = 1_u64.to_le_bytes();
+                let schema_uninitialized = [0_u8];
                 meta_table
                     .insert(META_NEXT_ROW_ID_KEY, next_row_id.as_slice())
                     .map_err(db_error)?;
+                meta_table
+                    .insert(META_SCHEMA_INITIALIZED_KEY, schema_uninitialized.as_slice())
+                    .map_err(db_error)?;
+            }
+
+            if !is_fresh_store && !next_row_id_present {
+                return Err(SoulError::Database(
+                    "existing soul store is missing next row id metadata".to_string(),
+                ));
+            }
+
+            if !is_fresh_store {
+                match (schema_present, schema_initialized) {
+                    (true, _) => {}
+                    (false, Some(false)) => {}
+                    (false, Some(true)) => {
+                        return Err(SoulError::Database(
+                            "existing soul store is missing schema metadata".to_string(),
+                        ));
+                    }
+                    (false, None) => {
+                        return Err(SoulError::Database(
+                            "existing soul store is missing schema metadata".to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -331,7 +370,24 @@ impl SoulStore for RedbSoulStore {
     fn load_schema(&self) -> Result<Option<SchemaV1>, SoulError> {
         let payload = match self.read_meta_bytes(META_SCHEMA_KEY)? {
             Some(payload) => payload,
-            None => return Ok(None),
+            None => {
+                let initialized = match self.read_meta_bytes(META_SCHEMA_INITIALIZED_KEY)? {
+                    Some(flag) => read_bool(&flag)?,
+                    None => {
+                        return Err(SoulError::Database(
+                            "soul schema metadata missing from store".to_string(),
+                        ));
+                    }
+                };
+
+                if initialized {
+                    return Err(SoulError::Database(
+                        "soul schema metadata missing from store".to_string(),
+                    ));
+                }
+
+                return Ok(None);
+            }
         };
 
         let schema = serde_json::from_slice(&payload)
@@ -345,8 +401,12 @@ impl SoulStore for RedbSoulStore {
         let write_txn = self.db.begin_write().map_err(db_error)?;
         {
             let mut meta_table = write_txn.open_table(META_TABLE).map_err(db_error)?;
+            let schema_initialized = [1_u8];
             meta_table
                 .insert(META_SCHEMA_KEY, payload.as_slice())
+                .map_err(db_error)?;
+            meta_table
+                .insert(META_SCHEMA_INITIALIZED_KEY, schema_initialized.as_slice())
                 .map_err(db_error)?;
         }
         write_txn.commit().map_err(db_error)?;
@@ -397,7 +457,21 @@ impl SoulStore for RedbSoulStore {
         }
         write_txn.commit().map_err(db_error)?;
 
-        self.initialize()?;
+        let write_txn = self.db.begin_write().map_err(db_error)?;
+        {
+            let mut meta_table = write_txn.open_table(META_TABLE).map_err(db_error)?;
+            let next_row_id = 1_u64.to_le_bytes();
+            let schema_uninitialized = [0_u8];
+            meta_table
+                .insert(META_NEXT_ROW_ID_KEY, next_row_id.as_slice())
+                .map_err(db_error)?;
+            meta_table
+                .insert(META_SCHEMA_INITIALIZED_KEY, schema_uninitialized.as_slice())
+                .map_err(db_error)?;
+        }
+        write_txn.commit().map_err(db_error)?;
+
+        info!(path = %self.path.display(), "RedbSoulStore wiped to fresh state");
         Ok(())
     }
 }
@@ -444,10 +518,7 @@ mod tests {
 
         {
             let mut store = RedbSoulStore::open(&db_path).expect("open should succeed");
-            let mut schema = store
-                .load_schema()
-                .expect("load should succeed")
-                .expect("schema should exist");
+            let mut schema = store.load_schema().expect("load should succeed").unwrap_or_default();
             schema.session_count = 4;
             schema.name = "Sena".to_string();
             store.save_schema(&schema).expect("save should succeed");
@@ -460,5 +531,30 @@ mod tests {
             .expect("schema should exist");
         assert_eq!(schema.session_count, 4);
         assert_eq!(schema.name, "Sena");
+    }
+
+    #[test]
+    fn redb_store_fresh_db_has_no_schema_until_saved() {
+        let dir = tempdir().expect("failed to create tempdir");
+        let db_path = dir.path().join("soul.redb");
+
+        let store = RedbSoulStore::open(&db_path).expect("open should succeed");
+        let schema = store.load_schema().expect("load should succeed");
+
+        assert!(schema.is_none());
+    }
+
+    #[test]
+    fn redb_store_reopen_preserves_uninitialized_schema_state() {
+        let dir = tempdir().expect("failed to create tempdir");
+        let db_path = dir.path().join("soul.redb");
+
+        {
+            let _store = RedbSoulStore::open(&db_path).expect("open should succeed");
+        }
+
+        let reopened = RedbSoulStore::open(&db_path).expect("reopen should succeed");
+        let schema = reopened.load_schema().expect("load should succeed");
+        assert!(schema.is_none());
     }
 }
