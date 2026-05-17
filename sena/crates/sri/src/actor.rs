@@ -15,6 +15,8 @@ use crate::{
 const AUTO_CLOSE_AFTER: Duration = Duration::from_secs(10);
 const RESOURCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const ALERT_COOLDOWN: Duration = Duration::from_secs(10);
+const SIGNAL_DEDUP_WINDOW: Duration = Duration::from_secs(5);
+const UNAVAILABLE_STUB_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SIGNAL_SUMMARY_CHARS: usize = 80;
 
 #[derive(Clone)]
@@ -30,6 +32,8 @@ struct SriRuntimeState {
     latest_resources: Option<SriResourceSnapshot>,
     latest_vram: Option<VramTelemetry>,
     last_alerts: HashMap<(String, ResourceKind), Instant>,
+    last_signals: HashMap<String, Instant>,
+    last_function_stubs: HashMap<String, FunctionStubEmission>,
     memory_observation_count: usize,
     inference_active_until: Option<Instant>,
     transcription_active_until: Option<Instant>,
@@ -52,6 +56,12 @@ struct ActivitySnapshot {
     thought_active: bool,
     memory_observation_count: usize,
     vram: Option<VramTelemetry>,
+}
+
+#[derive(Clone, Copy)]
+struct FunctionStubEmission {
+    status: FunctionStubStatus,
+    emitted_at: Instant,
 }
 
 pub struct SriActor {
@@ -154,6 +164,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             }
 
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Fault,
                 format!("actor failed: {} ({})", actor, clean_summary(&reason)),
@@ -168,7 +179,12 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         Event::System(SystemEvent::BootComplete) => {
             mark_activity(state, "environment.system");
             open_shelf(state, event_tx, "environment.system", "system.boot_complete");
-            emit_signal(event_tx, SignalSource::Environment, "runtime ready".to_string());
+            emit_signal(
+                state,
+                event_tx,
+                SignalSource::Environment,
+                "runtime ready".to_string(),
+            );
         }
         Event::System(SystemEvent::VramUsageUpdated {
             used_mb,
@@ -188,6 +204,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "perception.hearing");
             open_shelf(state, event_tx, "perception.hearing", "speech.transcription_completed");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Perception,
                 format!("heard: \"{}\"", clean_summary(&text)),
@@ -198,6 +215,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "expression.voice");
             open_shelf(state, event_tx, "expression.voice", "speech.speaking_started");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Expression,
                 "voice playback started".to_string(),
@@ -211,6 +229,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
             mark_activity(state, "expression.voice");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Expression,
                 "voice playback completed".to_string(),
@@ -225,12 +244,13 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
                 "expression.language",
                 "inference.sentence_ready",
             );
-            emit_signal(event_tx, SignalSource::Expression, clean_summary(&text));
+            emit_signal(state, event_tx, SignalSource::Expression, clean_summary(&text));
         }
         Event::Inference(InferenceEvent::InferenceStreamCompleted { token_count, .. }) => {
             set_until(&state, ActivityKind::Inference, Instant::now() + Duration::from_secs(4));
             mark_activity(state, "expression.language");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Expression,
                 format!("response complete ({} tokens)", token_count),
@@ -242,6 +262,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "cognition.memory");
             open_shelf(state, event_tx, "cognition.memory", "memory.write_completed");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Cognition,
                 "memory write stored".to_string(),
@@ -253,6 +274,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "cognition.memory");
             open_shelf(state, event_tx, "cognition.memory", "memory.query_completed");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Cognition,
                 format!("memory recall: {} chunks", chunks.len()),
@@ -263,6 +285,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "cognition.memory");
             open_shelf(state, event_tx, "cognition.memory", "memory.context_query_completed");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Cognition,
                 format!("memory recall: {} chunks", response.chunks.len()),
@@ -276,6 +299,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
 
                 let title = snapshot.active_app.window_title.as_deref().unwrap_or("untitled");
                 emit_signal(
+                    state,
                     event_tx,
                     SignalSource::Cognition,
                     format!(
@@ -286,18 +310,22 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
                 );
 
                 if snapshot.visual_context.is_none() {
-                    let _ = event_tx.send(SriEvent::FunctionCallStub {
-                        path: "perception.sight.capture_context".to_string(),
-                        status: FunctionStubStatus::Unavailable,
-                    });
+                    emit_function_stub(
+                        state,
+                        event_tx,
+                        "perception.sight.capture_context",
+                        FunctionStubStatus::Unavailable,
+                    );
                 }
             }
             CTPEvent::ContextSnapshotReady(snapshot) => {
                 if snapshot.visual_context.is_none() {
-                    let _ = event_tx.send(SriEvent::FunctionCallStub {
-                        path: "perception.sight.analyze_scene".to_string(),
-                        status: FunctionStubStatus::Unavailable,
-                    });
+                    emit_function_stub(
+                        state,
+                        event_tx,
+                        "perception.sight.analyze_scene",
+                        FunctionStubStatus::Unavailable,
+                    );
                 }
             }
             _ => {}
@@ -306,6 +334,7 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             mark_activity(state, "identity.soul");
             open_shelf(state, event_tx, "identity.soul", "soul.personality_updated");
             emit_signal(
+                state,
                 event_tx,
                 SignalSource::Identity,
                 format!(
@@ -646,12 +675,79 @@ fn emit_health_change(
     }
 }
 
-fn emit_signal(event_tx: &broadcast::Sender<SriEvent>, source: SignalSource, summary: String) {
+fn emit_signal(
+    state: &SriState,
+    event_tx: &broadcast::Sender<SriEvent>,
+    source: SignalSource,
+    summary: String,
+) {
+    let summary = truncate_chars(&summary, MAX_SIGNAL_SUMMARY_CHARS);
+    if !should_emit_signal(state, &summary, Instant::now()) {
+        return;
+    }
+
     let _ = event_tx.send(SriEvent::SignalReceived {
         source,
-        summary: truncate_chars(&summary, MAX_SIGNAL_SUMMARY_CHARS),
+        summary,
         timestamp: Utc::now(),
     });
+}
+
+fn emit_function_stub(
+    state: &SriState,
+    event_tx: &broadcast::Sender<SriEvent>,
+    path: &str,
+    status: FunctionStubStatus,
+) {
+    if !should_emit_function_stub(state, path, status, Instant::now()) {
+        return;
+    }
+
+    let _ = event_tx.send(SriEvent::FunctionCallStub {
+        path: path.to_string(),
+        status,
+    });
+}
+
+fn should_emit_signal(state: &SriState, summary: &str, now: Instant) -> bool {
+    let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
+
+    if runtime
+        .last_signals
+        .get(summary)
+        .is_some_and(|last| now.duration_since(*last) < SIGNAL_DEDUP_WINDOW)
+    {
+        return false;
+    }
+
+    runtime.last_signals.insert(summary.to_string(), now);
+    true
+}
+
+fn should_emit_function_stub(
+    state: &SriState,
+    path: &str,
+    status: FunctionStubStatus,
+    now: Instant,
+) -> bool {
+    let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
+
+    if let Some(previous) = runtime.last_function_stubs.get(path).copied()
+        && previous.status == status
+        && matches!(status, FunctionStubStatus::Unavailable)
+        && now.duration_since(previous.emitted_at) < UNAVAILABLE_STUB_DEDUP_WINDOW
+    {
+        return false;
+    }
+
+    runtime.last_function_stubs.insert(
+        path.to_string(),
+        FunctionStubEmission {
+            status,
+            emitted_at: now,
+        },
+    );
+    true
 }
 
 fn open_shelf(
@@ -809,5 +905,55 @@ fn percentage(part: f32, total: f32) -> Option<f32> {
         None
     } else {
         Some((part / total * 100.0).clamp(0.0, 100.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_signal_summaries_are_deduplicated_for_five_seconds() {
+        let actor = SriActor::new(SriRegistry::new());
+        let state = actor.state();
+        let start = Instant::now();
+
+        assert!(should_emit_signal(&state, "focus: vscode / shell", start));
+        assert!(!should_emit_signal(
+            &state,
+            "focus: vscode / shell",
+            start + Duration::from_secs(4),
+        ));
+        assert!(should_emit_signal(
+            &state,
+            "focus: vscode / shell",
+            start + Duration::from_secs(6),
+        ));
+    }
+
+    #[test]
+    fn unavailable_function_stubs_are_deduplicated_for_sixty_seconds() {
+        let actor = SriActor::new(SriRegistry::new());
+        let state = actor.state();
+        let start = Instant::now();
+
+        assert!(should_emit_function_stub(
+            &state,
+            "perception.sight.analyze_scene",
+            FunctionStubStatus::Unavailable,
+            start,
+        ));
+        assert!(!should_emit_function_stub(
+            &state,
+            "perception.sight.analyze_scene",
+            FunctionStubStatus::Unavailable,
+            start + Duration::from_secs(30),
+        ));
+        assert!(should_emit_function_stub(
+            &state,
+            "perception.sight.analyze_scene",
+            FunctionStubStatus::Unavailable,
+            start + Duration::from_secs(61),
+        ));
     }
 }
