@@ -169,6 +169,8 @@ const HELP_OVERLAY_SECTIONS: &[HelpSection] = &[
 
 const HELP_LEFT_COLUMN_SECTION_INDEXES: &[usize] = &[0, 1, 2, 6];
 const HELP_RIGHT_COLUMN_SECTION_INDEXES: &[usize] = &[3, 4, 5];
+const RAM_WARNING_THRESHOLD_MB: u64 = 2 * 1024;
+const RAM_DANGER_THRESHOLD_MB: u64 = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandCategory {
@@ -2145,9 +2147,10 @@ impl Shell {
     fn resource_lines(snapshot: &SriResourceSnapshot) -> Vec<Line<'static>> {
         let mut lines = vec![Self::resource_line(
             "RAM",
-            (snapshot.total_ram_mb as f32 / 1024.0 * 100.0).clamp(0.0, 100.0),
+            Self::ram_bar_percent(snapshot.total_ram_mb),
             Self::format_mb(snapshot.total_ram_mb),
             Self::dominant_ram(snapshot),
+            Self::ram_resource_style(snapshot.total_ram_mb),
         )];
 
         lines.push(Self::resource_line(
@@ -2155,6 +2158,7 @@ impl Shell {
             snapshot.total_cpu_pct.clamp(0.0, 100.0),
             format!("{:.1}%", snapshot.total_cpu_pct),
             Self::dominant_cpu(snapshot),
+            Self::resource_style(snapshot.total_cpu_pct),
         ));
 
         if let (Some(used_mb), Some(total_mb)) = (snapshot.vram_used_mb, snapshot.vram_total_mb) {
@@ -2168,21 +2172,39 @@ impl Shell {
                 percent.clamp(0.0, 100.0),
                 format!("{} / {}", Self::format_mb(used_mb), Self::format_mb(total_mb)),
                 Self::dominant_vram(snapshot),
+                Self::resource_style(percent),
             ));
         }
 
         lines
     }
 
-    fn resource_line(label: &str, percent: f32, total: String, dominant: String) -> Line<'static> {
+    fn resource_line(
+        label: &str,
+        percent: f32,
+        total: String,
+        dominant: String,
+        style: Style,
+    ) -> Line<'static> {
         Line::from(vec![
             Span::styled(format!("{:<4}", label), theme::muted()),
-            Span::styled(
-                format!("[{}] {}", Self::resource_bar(percent, 10), total),
-                Self::resource_style(percent),
-            ),
-            Span::styled(format!("  top: {}", dominant), theme::muted()),
+            Span::styled(format!("[{}] {}", Self::resource_bar(percent, 10), total), style),
+            Span::styled(format!("  top est.: {}", dominant), theme::muted()),
         ])
+    }
+
+    fn ram_bar_percent(total_ram_mb: u64) -> f32 {
+        (total_ram_mb as f32 / RAM_DANGER_THRESHOLD_MB as f32 * 100.0).clamp(0.0, 100.0)
+    }
+
+    fn ram_resource_style(total_ram_mb: u64) -> Style {
+        if total_ram_mb < RAM_WARNING_THRESHOLD_MB {
+            theme::success()
+        } else if total_ram_mb <= RAM_DANGER_THRESHOLD_MB {
+            theme::warning()
+        } else {
+            theme::danger()
+        }
     }
 
     fn resource_bar(percent: f32, width: usize) -> String {
@@ -2513,6 +2535,7 @@ impl Drop for Shell {
 #[cfg(test)]
 mod tests {
     use super::{HELP_OVERLAY_SECTIONS, HelpOverlayState, SLASH_COMMANDS, Shell};
+    use crate::theme;
     use serde_json::json;
     use std::time::{Duration, Instant};
 
@@ -2668,5 +2691,20 @@ mod tests {
             Shell::format_push_event(&resumed).expect("wakeword resumed should format"),
             "[wakeword] resumed"
         );
+    }
+
+    #[test]
+    fn ram_bar_uses_four_gigabyte_scale() {
+        assert!((Shell::ram_bar_percent(1024) - 25.0).abs() < f32::EPSILON);
+        assert!((Shell::ram_bar_percent(2048) - 50.0).abs() < f32::EPSILON);
+        assert_eq!(Shell::ram_bar_percent(4096), 100.0);
+        assert_eq!(Shell::ram_bar_percent(5120), 100.0);
+    }
+
+    #[test]
+    fn ram_style_uses_absolute_thresholds() {
+        assert_eq!(Shell::ram_resource_style(1536), theme::success());
+        assert_eq!(Shell::ram_resource_style(3072), theme::warning());
+        assert_eq!(Shell::ram_resource_style(5120), theme::danger());
     }
 }

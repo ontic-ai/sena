@@ -496,124 +496,181 @@ fn estimate_actor_resources(
     activity: ActivitySnapshot,
 ) -> Vec<ActorResourceEstimate> {
     let memory_scale = (activity.memory_observation_count as f32 / 100.0).clamp(0.0, 3.0);
-
-    let ram_weights = vec![
-        (
-            "inference",
-            if activity.inference_active { 4.5 } else { 2.0 },
-            "weighted by recent language activity and GPU pressure".to_string(),
-        ),
-        (
-            "speech-stt",
-            if activity.transcription_active { 1.6 } else { 0.5 },
-            "weighted by recent transcription activity".to_string(),
-        ),
-        (
-            "speech-tts",
-            if activity.synthesis_active { 1.2 } else { 0.4 },
-            "weighted by recent voice playback".to_string(),
-        ),
-        (
-            "memory",
-            0.8 + memory_scale,
-            format!(
-                "estimated from {} observed memory chunks",
-                activity.memory_observation_count
-            ),
-        ),
-        (
-            "ctp",
-            if activity.thought_active { 1.1 } else { 0.5 },
-            "weighted by recent context assembly activity".to_string(),
-        ),
-        ("soul", 0.35, "steady identity metadata footprint".to_string()),
-        (
-            "platform",
-            0.4,
-            "steady OS observation and event routing".to_string(),
-        ),
-        ("sri", 0.3, "registry and visualization bookkeeping".to_string()),
-        (
-            "runtime",
-            0.6,
-            "bus, supervision, and daemon orchestration".to_string(),
-        ),
-    ];
-
-    let cpu_weights = vec![
-        (
-            "inference",
-            if activity.inference_active { 5.0 } else { 1.5 },
-            "weighted by recent language activity and GPU pressure".to_string(),
-        ),
-        (
-            "speech-stt",
-            if activity.transcription_active { 2.0 } else { 0.3 },
-            "weighted by recent transcription activity".to_string(),
-        ),
-        (
-            "speech-tts",
-            if activity.synthesis_active { 1.8 } else { 0.2 },
-            "weighted by recent voice playback".to_string(),
-        ),
-        (
-            "memory",
-            0.7 + memory_scale * 0.5,
-            format!(
-                "estimated from {} observed memory chunks",
-                activity.memory_observation_count
-            ),
-        ),
-        (
-            "ctp",
-            if activity.thought_active { 1.4 } else { 0.4 },
-            "weighted by recent context assembly activity".to_string(),
-        ),
-        ("soul", 0.2, "steady identity metadata footprint".to_string()),
-        (
-            "platform",
-            0.35,
-            "steady OS observation and event routing".to_string(),
-        ),
-        ("sri", 0.45, "registry and visualization bookkeeping".to_string()),
-        (
-            "runtime",
-            0.75,
-            "bus, supervision, and daemon orchestration".to_string(),
-        ),
-    ];
-
-    let total_ram_weight = ram_weights.iter().map(|(_, weight, _)| *weight).sum::<f32>();
-    let total_cpu_weight = cpu_weights.iter().map(|(_, weight, _)| *weight).sum::<f32>();
+    let ram_allocations = allocate_ram_estimates(total_ram_mb);
+    let total_cpu_weight = ram_allocations
+        .iter()
+        .map(|allocation| actor_cpu_weight(&allocation.actor_name, activity, memory_scale))
+        .sum::<f32>();
     let total_vram_pct = activity
         .vram
         .and_then(|vram| percentage(vram.used_mb as f32, vram.total_mb as f32));
 
-    ram_weights
-        .iter()
-        .zip(cpu_weights.iter())
-        .map(|((actor_name, ram_weight, ram_basis), (_, cpu_weight, _))| {
-            let ram_mb = if total_ram_mb == 0 || total_ram_weight == 0.0 {
-                0
-            } else {
-                ((total_ram_mb as f32) * (*ram_weight / total_ram_weight)).round() as u64
-            };
+    ram_allocations
+        .into_iter()
+        .map(|allocation| {
+            let cpu_weight = actor_cpu_weight(&allocation.actor_name, activity, memory_scale);
             let cpu_pct = if total_cpu_pct == 0.0 || total_cpu_weight == 0.0 {
                 0.0
             } else {
-                total_cpu_pct * (*cpu_weight / total_cpu_weight)
+                total_cpu_pct * (cpu_weight / total_cpu_weight)
             };
-            let vram_pct = total_vram_pct.map(|overall| actor_vram_pct(actor_name, overall, activity));
+            let vram_pct = total_vram_pct
+                .map(|overall| actor_vram_pct(&allocation.actor_name, overall, activity));
 
             ActorResourceEstimate {
-                actor_name: (*actor_name).to_string(),
-                ram_mb,
+                actor_name: allocation.actor_name,
+                ram_mb: allocation.ram_mb,
                 cpu_pct,
                 vram_pct,
-                basis: ram_basis.clone(),
+                basis: allocation.basis,
             }
         })
         .collect()
+}
+
+struct RamEstimateAllocation {
+    actor_name: String,
+    ram_mb: u64,
+    basis: String,
+}
+
+fn allocate_ram_estimates(total_ram_mb: u64) -> Vec<RamEstimateAllocation> {
+    let remaining_share = (1.0 - (0.55 + 0.15 + 0.10 + 0.05 + 0.03 + 0.02)) / 3.0;
+    let remaining_pct = remaining_share * 100.0;
+    let specs = vec![
+        (
+            "inference",
+            0.55_f64,
+            "est. 55% of real process RAM (model metadata, KV cache CPU-side, tokenizer)"
+                .to_string(),
+        ),
+        (
+            "speech-stt",
+            0.15_f64,
+            "est. 15% of real process RAM (Parakeet ONNX session, audio buffers)"
+                .to_string(),
+        ),
+        (
+            "speech-tts",
+            0.10_f64,
+            "est. 10% of real process RAM (Piper ONNX session, synthesis buffers)"
+                .to_string(),
+        ),
+        (
+            "memory",
+            0.05_f64,
+            "est. 5% of real process RAM (redb database, node cache)".to_string(),
+        ),
+        (
+            "ctp",
+            remaining_share,
+            format!(
+                "est. {:.1}% equal share of the remaining 10% of real process RAM",
+                remaining_pct
+            ),
+        ),
+        (
+            "soul",
+            remaining_share,
+            format!(
+                "est. {:.1}% equal share of the remaining 10% of real process RAM",
+                remaining_pct
+            ),
+        ),
+        (
+            "platform",
+            remaining_share,
+            format!(
+                "est. {:.1}% equal share of the remaining 10% of real process RAM",
+                remaining_pct
+            ),
+        ),
+        (
+            "sri",
+            0.03_f64,
+            "est. 3% of real process RAM".to_string(),
+        ),
+        (
+            "runtime",
+            0.02_f64,
+            "est. 2% of real process RAM".to_string(),
+        ),
+    ];
+
+    let mut allocations = specs
+        .into_iter()
+        .map(|(actor_name, share, basis)| {
+            let exact_mb = total_ram_mb as f64 * share;
+            let base_mb = exact_mb.floor() as u64;
+            (actor_name, base_mb, exact_mb - base_mb as f64, basis)
+        })
+        .collect::<Vec<_>>();
+
+    let assigned_mb = allocations.iter().map(|(_, ram_mb, _, _)| *ram_mb).sum::<u64>();
+    let remainder_mb = total_ram_mb.saturating_sub(assigned_mb) as usize;
+    let mut remainder_order = allocations
+        .iter()
+        .enumerate()
+        .map(|(index, (_, _, fraction, _))| (index, *fraction))
+        .collect::<Vec<_>>();
+    remainder_order.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    for (index, _) in remainder_order.into_iter().take(remainder_mb) {
+        allocations[index].1 += 1;
+    }
+
+    allocations
+        .into_iter()
+        .map(|(actor_name, ram_mb, _, basis)| RamEstimateAllocation {
+            actor_name: actor_name.to_string(),
+            ram_mb,
+            basis,
+        })
+        .collect()
+}
+
+fn actor_cpu_weight(actor_name: &str, activity: ActivitySnapshot, memory_scale: f32) -> f32 {
+    match actor_name {
+        "inference" => {
+            if activity.inference_active {
+                5.0
+            } else {
+                1.5
+            }
+        }
+        "speech-stt" => {
+            if activity.transcription_active {
+                2.0
+            } else {
+                0.3
+            }
+        }
+        "speech-tts" => {
+            if activity.synthesis_active {
+                1.8
+            } else {
+                0.2
+            }
+        }
+        "memory" => 0.7 + memory_scale * 0.5,
+        "ctp" => {
+            if activity.thought_active {
+                1.4
+            } else {
+                0.4
+            }
+        }
+        "soul" => 0.2,
+        "platform" => 0.35,
+        "sri" => 0.45,
+        "runtime" => 0.75,
+        _ => 0.0,
+    }
 }
 
 fn actor_vram_pct(actor_name: &str, overall_vram_pct: f32, activity: ActivitySnapshot) -> f32 {
@@ -954,5 +1011,82 @@ mod tests {
             FunctionStubStatus::Unavailable,
             start + Duration::from_secs(61),
         ));
+    }
+
+    #[test]
+    fn ram_estimates_follow_fixed_distribution_and_sum_to_total() {
+        let estimates = estimate_actor_resources(
+            1160,
+            24.0,
+            ActivitySnapshot {
+                inference_active: false,
+                transcription_active: false,
+                synthesis_active: false,
+                thought_active: false,
+                memory_observation_count: 0,
+                vram: None,
+            },
+        );
+
+        let total_ram = estimates.iter().map(|estimate| estimate.ram_mb).sum::<u64>();
+        assert_eq!(total_ram, 1160);
+
+        let ram_by_actor = estimates
+            .into_iter()
+            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(ram_by_actor.get("inference"), Some(&638));
+        assert_eq!(ram_by_actor.get("speech-stt"), Some(&174));
+        assert_eq!(ram_by_actor.get("speech-tts"), Some(&116));
+        assert_eq!(ram_by_actor.get("memory"), Some(&58));
+        assert_eq!(ram_by_actor.get("ctp"), Some(&39));
+        assert_eq!(ram_by_actor.get("soul"), Some(&39));
+        assert_eq!(ram_by_actor.get("platform"), Some(&38));
+        assert_eq!(ram_by_actor.get("sri"), Some(&35));
+        assert_eq!(ram_by_actor.get("runtime"), Some(&23));
+    }
+
+    #[test]
+    fn ram_estimates_ignore_vram_and_recent_activity() {
+        let idle = estimate_actor_resources(
+            1160,
+            12.0,
+            ActivitySnapshot {
+                inference_active: false,
+                transcription_active: false,
+                synthesis_active: false,
+                thought_active: false,
+                memory_observation_count: 0,
+                vram: None,
+            },
+        );
+        let active = estimate_actor_resources(
+            1160,
+            82.0,
+            ActivitySnapshot {
+                inference_active: true,
+                transcription_active: true,
+                synthesis_active: true,
+                thought_active: true,
+                memory_observation_count: 240,
+                vram: Some(VramTelemetry {
+                    used_mb: 7240,
+                    total_mb: 8192,
+                    updated_at: Instant::now(),
+                }),
+            },
+        );
+
+        let idle_ram = idle
+            .into_iter()
+            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
+            .collect::<HashMap<_, _>>();
+        let active_ram = active
+            .into_iter()
+            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(idle_ram, active_ram);
     }
 }
