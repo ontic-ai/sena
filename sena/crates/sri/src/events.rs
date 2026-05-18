@@ -27,21 +27,11 @@ pub enum ResourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ActorResourceEstimate {
-    pub actor_name: String,
-    pub ram_mb: u64,
-    pub cpu_pct: f32,
-    pub vram_pct: Option<f32>,
-    pub basis: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SriResourceSnapshot {
     pub total_ram_mb: u64,
     pub total_cpu_pct: f32,
     pub vram_used_mb: Option<u64>,
     pub vram_total_mb: Option<u64>,
-    pub actors: Vec<ActorResourceEstimate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

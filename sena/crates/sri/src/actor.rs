@@ -2,21 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use bus::{CTPEvent, Event, EventBus, InferenceEvent, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent};
+use crate::builtin_nodes::scaffold_builtin_nodes;
+use crate::{
+    FunctionStubStatus, HealthStatus, ResourceKind, SignalSource, SriEvent, SriRegistry,
+    SriResourceSnapshot, SriSnapshot, TreeAction,
+};
+use bus::{
+    CTPEvent, Event, EventBus, InferenceEvent, MemoryEvent, SoulEvent, SpeechEvent, SystemEvent,
+};
 use chrono::Utc;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 use tokio::sync::broadcast;
-use crate::builtin_nodes::scaffold_builtin_nodes;
-use crate::{
-    ActorResourceEstimate, FunctionStubStatus, HealthStatus, ResourceKind, SignalSource,
-    SriEvent, SriRegistry, SriResourceSnapshot, SriSnapshot, TreeAction,
-};
 
 const AUTO_CLOSE_AFTER: Duration = Duration::from_secs(10);
 const RESOURCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const ALERT_COOLDOWN: Duration = Duration::from_secs(10);
 const SIGNAL_DEDUP_WINDOW: Duration = Duration::from_secs(5);
 const UNAVAILABLE_STUB_DEDUP_WINDOW: Duration = Duration::from_secs(60);
+const VRAM_STALE_AFTER: Duration = Duration::from_secs(5);
 const MAX_SIGNAL_SUMMARY_CHARS: usize = 80;
 
 #[derive(Clone)]
@@ -31,14 +34,9 @@ struct SriRuntimeState {
     last_activity: HashMap<String, Instant>,
     latest_resources: Option<SriResourceSnapshot>,
     latest_vram: Option<VramTelemetry>,
-    last_alerts: HashMap<(String, ResourceKind), Instant>,
+    last_alerts: HashMap<ResourceKind, Instant>,
     last_signals: HashMap<String, Instant>,
     last_function_stubs: HashMap<String, FunctionStubEmission>,
-    memory_observation_count: usize,
-    inference_active_until: Option<Instant>,
-    transcription_active_until: Option<Instant>,
-    synthesis_active_until: Option<Instant>,
-    thought_active_until: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -46,16 +44,6 @@ struct VramTelemetry {
     used_mb: u64,
     total_mb: u64,
     updated_at: Instant,
-}
-
-#[derive(Clone, Copy)]
-struct ActivitySnapshot {
-    inference_active: bool,
-    transcription_active: bool,
-    synthesis_active: bool,
-    thought_active: bool,
-    memory_observation_count: usize,
-    vram: Option<VramTelemetry>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,14 +159,20 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
 
             if let Some(resource) = infer_failure_resource(&reason) {
-                let value = latest_resource_value(state, &actor, resource).unwrap_or(100.0);
                 let threshold = alert_threshold(resource);
-                emit_resource_alert(state, event_tx, actor, resource, value, threshold);
+                if let Some(value) = latest_resource_value(state, resource) {
+                    emit_resource_alert(state, event_tx, resource, value, threshold);
+                }
             }
         }
         Event::System(SystemEvent::BootComplete) => {
             mark_activity(state, "environment.system");
-            open_shelf(state, event_tx, "environment.system", "system.boot_complete");
+            open_shelf(
+                state,
+                event_tx,
+                "environment.system",
+                "system.boot_complete",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -187,22 +181,26 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::System(SystemEvent::VramUsageUpdated {
-            used_mb,
-            total_mb,
-            ..
+            used_mb, total_mb, ..
         }) => {
-            state.runtime.write().expect("sri runtime lock poisoned").latest_vram = Some(
-                VramTelemetry {
-                    used_mb: used_mb as u64,
-                    total_mb: total_mb as u64,
-                    updated_at: Instant::now(),
-                },
-            );
+            state
+                .runtime
+                .write()
+                .expect("sri runtime lock poisoned")
+                .latest_vram = Some(VramTelemetry {
+                used_mb: used_mb as u64,
+                total_mb: total_mb as u64,
+                updated_at: Instant::now(),
+            });
         }
         Event::Speech(SpeechEvent::TranscriptionCompleted { text, .. }) => {
-            set_until(state, ActivityKind::Transcription, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "perception.hearing");
-            open_shelf(state, event_tx, "perception.hearing", "speech.transcription_completed");
+            open_shelf(
+                state,
+                event_tx,
+                "perception.hearing",
+                "speech.transcription_completed",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -211,9 +209,13 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Speech(SpeechEvent::SpeakingStarted { .. }) => {
-            set_until(state, ActivityKind::Synthesis, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "expression.voice");
-            open_shelf(state, event_tx, "expression.voice", "speech.speaking_started");
+            open_shelf(
+                state,
+                event_tx,
+                "expression.voice",
+                "speech.speaking_started",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -222,11 +224,6 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Speech(SpeechEvent::SpeakingCompleted { .. }) => {
-            set_until(
-                state,
-                ActivityKind::Synthesis,
-                Instant::now() + Duration::from_secs(2),
-            );
             mark_activity(state, "expression.voice");
             emit_signal(
                 state,
@@ -236,7 +233,6 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Inference(InferenceEvent::InferenceSentenceReady { text, .. }) => {
-            set_until(state, ActivityKind::Inference, Instant::now() + AUTO_CLOSE_AFTER);
             mark_activity(state, "expression.language");
             open_shelf(
                 state,
@@ -244,10 +240,14 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
                 "expression.language",
                 "inference.sentence_ready",
             );
-            emit_signal(state, event_tx, SignalSource::Expression, clean_summary(&text));
+            emit_signal(
+                state,
+                event_tx,
+                SignalSource::Expression,
+                clean_summary(&text),
+            );
         }
         Event::Inference(InferenceEvent::InferenceStreamCompleted { token_count, .. }) => {
-            set_until(state, ActivityKind::Inference, Instant::now() + Duration::from_secs(4));
             mark_activity(state, "expression.language");
             emit_signal(
                 state,
@@ -258,9 +258,13 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         }
         Event::Memory(MemoryEvent::MemoryWriteCompleted { .. })
         | Event::Memory(MemoryEvent::IngestCompleted { .. }) => {
-            increment_memory_observation(state, 1);
             mark_activity(state, "cognition.memory");
-            open_shelf(state, event_tx, "cognition.memory", "memory.write_completed");
+            open_shelf(
+                state,
+                event_tx,
+                "cognition.memory",
+                "memory.write_completed",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -270,9 +274,13 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         }
         Event::Memory(MemoryEvent::MemoryQueryResponse { chunks, .. })
         | Event::Memory(MemoryEvent::QueryCompleted { chunks, .. }) => {
-            observe_memory_chunks(state, chunks.len());
             mark_activity(state, "cognition.memory");
-            open_shelf(state, event_tx, "cognition.memory", "memory.query_completed");
+            open_shelf(
+                state,
+                event_tx,
+                "cognition.memory",
+                "memory.query_completed",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -281,9 +289,13 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
             );
         }
         Event::Memory(MemoryEvent::ContextQueryCompleted(response)) => {
-            observe_memory_chunks(state, response.chunks.len());
             mark_activity(state, "cognition.memory");
-            open_shelf(state, event_tx, "cognition.memory", "memory.context_query_completed");
+            open_shelf(
+                state,
+                event_tx,
+                "cognition.memory",
+                "memory.context_query_completed",
+            );
             emit_signal(
                 state,
                 event_tx,
@@ -293,11 +305,19 @@ fn handle_bus_event(state: &SriState, event_tx: &broadcast::Sender<SriEvent>, ev
         }
         Event::CTP(ctp_event) => match ctp_event.as_ref() {
             CTPEvent::ThoughtEventTriggered(snapshot) => {
-                set_until(state, ActivityKind::Thought, Instant::now() + AUTO_CLOSE_AFTER);
                 mark_activity(state, "cognition.thought");
-                open_shelf(state, event_tx, "cognition.thought", "ctp.thought_triggered");
+                open_shelf(
+                    state,
+                    event_tx,
+                    "cognition.thought",
+                    "ctp.thought_triggered",
+                );
 
-                let title = snapshot.active_app.window_title.as_deref().unwrap_or("untitled");
+                let title = snapshot
+                    .active_app
+                    .window_title
+                    .as_deref()
+                    .unwrap_or("untitled");
                 emit_signal(
                     state,
                     event_tx,
@@ -414,14 +434,12 @@ async fn resource_monitor(state: SriState, event_tx: broadcast::Sender<SriEvent>
             (0, 0.0)
         };
 
-        let activity = snapshot_activity(&state);
-        let estimates = estimate_actor_resources(total_ram_mb, total_cpu_pct, activity);
+        let vram = current_vram_telemetry(&state);
         let resource_snapshot = SriResourceSnapshot {
             total_ram_mb,
             total_cpu_pct,
-            vram_used_mb: activity.vram.map(|vram| vram.used_mb),
-            vram_total_mb: activity.vram.map(|vram| vram.total_mb),
-            actors: estimates,
+            vram_used_mb: vram.map(|sample| sample.used_mb),
+            vram_total_mb: vram.map(|sample| sample.total_mb),
         };
 
         {
@@ -434,34 +452,34 @@ async fn resource_monitor(state: SriState, event_tx: broadcast::Sender<SriEvent>
 
         let _ = event_tx.send(SriEvent::ResourceSnapshot(resource_snapshot.clone()));
 
-        for estimate in &resource_snapshot.actors {
-            if estimate.ram_mb as f32 > alert_threshold(ResourceKind::Ram) {
+        if total_ram_mb as f32 > alert_threshold(ResourceKind::Ram) {
+            emit_resource_alert(
+                &state,
+                &event_tx,
+                ResourceKind::Ram,
+                total_ram_mb as f32,
+                alert_threshold(ResourceKind::Ram),
+            );
+        }
+        if total_cpu_pct > alert_threshold(ResourceKind::Cpu) {
+            emit_resource_alert(
+                &state,
+                &event_tx,
+                ResourceKind::Cpu,
+                total_cpu_pct,
+                alert_threshold(ResourceKind::Cpu),
+            );
+        }
+        if let (Some(used_mb), Some(total_mb)) = (
+            resource_snapshot.vram_used_mb,
+            resource_snapshot.vram_total_mb,
+        ) && total_mb > 0
+        {
+            let vram_pct = (used_mb as f32 / total_mb as f32 * 100.0).clamp(0.0, 100.0);
+            if vram_pct > alert_threshold(ResourceKind::Vram) {
                 emit_resource_alert(
                     &state,
                     &event_tx,
-                    estimate.actor_name.clone(),
-                    ResourceKind::Ram,
-                    estimate.ram_mb as f32,
-                    alert_threshold(ResourceKind::Ram),
-                );
-            }
-            if estimate.cpu_pct > alert_threshold(ResourceKind::Cpu) {
-                emit_resource_alert(
-                    &state,
-                    &event_tx,
-                    estimate.actor_name.clone(),
-                    ResourceKind::Cpu,
-                    estimate.cpu_pct,
-                    alert_threshold(ResourceKind::Cpu),
-                );
-            }
-            if let Some(vram_pct) = estimate.vram_pct
-                && vram_pct > alert_threshold(ResourceKind::Vram)
-            {
-                emit_resource_alert(
-                    &state,
-                    &event_tx,
-                    estimate.actor_name.clone(),
                     ResourceKind::Vram,
                     vram_pct,
                     alert_threshold(ResourceKind::Vram),
@@ -471,236 +489,12 @@ async fn resource_monitor(state: SriState, event_tx: broadcast::Sender<SriEvent>
     }
 }
 
-fn snapshot_activity(state: &SriState) -> ActivitySnapshot {
+fn current_vram_telemetry(state: &SriState) -> Option<VramTelemetry> {
     let runtime = state.runtime.read().expect("sri runtime lock poisoned");
     let now = Instant::now();
-    ActivitySnapshot {
-        inference_active: runtime
-            .inference_active_until
-            .is_some_and(|until| until > now),
-        transcription_active: runtime
-            .transcription_active_until
-            .is_some_and(|until| until > now),
-        synthesis_active: runtime
-            .synthesis_active_until
-            .is_some_and(|until| until > now),
-        thought_active: runtime.thought_active_until.is_some_and(|until| until > now),
-        memory_observation_count: runtime.memory_observation_count,
-        vram: runtime.latest_vram.filter(|vram| now.duration_since(vram.updated_at) <= Duration::from_secs(5)),
-    }
-}
-
-fn estimate_actor_resources(
-    total_ram_mb: u64,
-    total_cpu_pct: f32,
-    activity: ActivitySnapshot,
-) -> Vec<ActorResourceEstimate> {
-    let memory_scale = (activity.memory_observation_count as f32 / 100.0).clamp(0.0, 3.0);
-    let ram_allocations = allocate_ram_estimates(total_ram_mb);
-    let total_cpu_weight = ram_allocations
-        .iter()
-        .map(|allocation| actor_cpu_weight(&allocation.actor_name, activity, memory_scale))
-        .sum::<f32>();
-    let total_vram_pct = activity
-        .vram
-        .and_then(|vram| percentage(vram.used_mb as f32, vram.total_mb as f32));
-
-    ram_allocations
-        .into_iter()
-        .map(|allocation| {
-            let cpu_weight = actor_cpu_weight(&allocation.actor_name, activity, memory_scale);
-            let cpu_pct = if total_cpu_pct == 0.0 || total_cpu_weight == 0.0 {
-                0.0
-            } else {
-                total_cpu_pct * (cpu_weight / total_cpu_weight)
-            };
-            let vram_pct = total_vram_pct
-                .map(|overall| actor_vram_pct(&allocation.actor_name, overall, activity));
-
-            ActorResourceEstimate {
-                actor_name: allocation.actor_name,
-                ram_mb: allocation.ram_mb,
-                cpu_pct,
-                vram_pct,
-                basis: allocation.basis,
-            }
-        })
-        .collect()
-}
-
-struct RamEstimateAllocation {
-    actor_name: String,
-    ram_mb: u64,
-    basis: String,
-}
-
-fn allocate_ram_estimates(total_ram_mb: u64) -> Vec<RamEstimateAllocation> {
-    let remaining_share = (1.0 - (0.55 + 0.15 + 0.10 + 0.05 + 0.03 + 0.02)) / 3.0;
-    let remaining_pct = remaining_share * 100.0;
-    let specs = vec![
-        (
-            "inference",
-            0.55_f64,
-            "est. 55% of real process RAM (model metadata, KV cache CPU-side, tokenizer)"
-                .to_string(),
-        ),
-        (
-            "speech-stt",
-            0.15_f64,
-            "est. 15% of real process RAM (Parakeet ONNX session, audio buffers)"
-                .to_string(),
-        ),
-        (
-            "speech-tts",
-            0.10_f64,
-            "est. 10% of real process RAM (Piper ONNX session, synthesis buffers)"
-                .to_string(),
-        ),
-        (
-            "memory",
-            0.05_f64,
-            "est. 5% of real process RAM (redb database, node cache)".to_string(),
-        ),
-        (
-            "ctp",
-            remaining_share,
-            format!(
-                "est. {:.1}% equal share of the remaining 10% of real process RAM",
-                remaining_pct
-            ),
-        ),
-        (
-            "soul",
-            remaining_share,
-            format!(
-                "est. {:.1}% equal share of the remaining 10% of real process RAM",
-                remaining_pct
-            ),
-        ),
-        (
-            "platform",
-            remaining_share,
-            format!(
-                "est. {:.1}% equal share of the remaining 10% of real process RAM",
-                remaining_pct
-            ),
-        ),
-        (
-            "sri",
-            0.03_f64,
-            "est. 3% of real process RAM".to_string(),
-        ),
-        (
-            "runtime",
-            0.02_f64,
-            "est. 2% of real process RAM".to_string(),
-        ),
-    ];
-
-    let mut allocations = specs
-        .into_iter()
-        .map(|(actor_name, share, basis)| {
-            let exact_mb = total_ram_mb as f64 * share;
-            let base_mb = exact_mb.floor() as u64;
-            (actor_name, base_mb, exact_mb - base_mb as f64, basis)
-        })
-        .collect::<Vec<_>>();
-
-    let assigned_mb = allocations.iter().map(|(_, ram_mb, _, _)| *ram_mb).sum::<u64>();
-    let remainder_mb = total_ram_mb.saturating_sub(assigned_mb) as usize;
-    let mut remainder_order = allocations
-        .iter()
-        .enumerate()
-        .map(|(index, (_, _, fraction, _))| (index, *fraction))
-        .collect::<Vec<_>>();
-    remainder_order.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-
-    for (index, _) in remainder_order.into_iter().take(remainder_mb) {
-        allocations[index].1 += 1;
-    }
-
-    allocations
-        .into_iter()
-        .map(|(actor_name, ram_mb, _, basis)| RamEstimateAllocation {
-            actor_name: actor_name.to_string(),
-            ram_mb,
-            basis,
-        })
-        .collect()
-}
-
-fn actor_cpu_weight(actor_name: &str, activity: ActivitySnapshot, memory_scale: f32) -> f32 {
-    match actor_name {
-        "inference" => {
-            if activity.inference_active {
-                5.0
-            } else {
-                1.5
-            }
-        }
-        "speech-stt" => {
-            if activity.transcription_active {
-                2.0
-            } else {
-                0.3
-            }
-        }
-        "speech-tts" => {
-            if activity.synthesis_active {
-                1.8
-            } else {
-                0.2
-            }
-        }
-        "memory" => 0.7 + memory_scale * 0.5,
-        "ctp" => {
-            if activity.thought_active {
-                1.4
-            } else {
-                0.4
-            }
-        }
-        "soul" => 0.2,
-        "platform" => 0.35,
-        "sri" => 0.45,
-        "runtime" => 0.75,
-        _ => 0.0,
-    }
-}
-
-fn actor_vram_pct(actor_name: &str, overall_vram_pct: f32, activity: ActivitySnapshot) -> f32 {
-    let share = match actor_name {
-        "inference" => {
-            if activity.inference_active {
-                0.78
-            } else {
-                0.60
-            }
-        }
-        "speech-stt" => {
-            if activity.transcription_active {
-                0.12
-            } else {
-                0.04
-            }
-        }
-        "speech-tts" => {
-            if activity.synthesis_active {
-                0.08
-            } else {
-                0.03
-            }
-        }
-        "runtime" => 0.07,
-        _ => 0.0,
-    };
-
-    (overall_vram_pct * share).clamp(0.0, 100.0)
+    runtime
+        .latest_vram
+        .filter(|vram| now.duration_since(vram.updated_at) <= VRAM_STALE_AFTER)
 }
 
 fn actor_health_path(actor_name: &str) -> Option<&'static str> {
@@ -814,7 +608,9 @@ fn open_shelf(
 ) {
     let became_open = {
         let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
-        runtime.last_activity.insert(shelf_path.to_string(), Instant::now());
+        runtime
+            .last_activity
+            .insert(shelf_path.to_string(), Instant::now());
         runtime.open_shelves.insert(shelf_path.to_string())
     };
 
@@ -842,44 +638,31 @@ fn mark_activity(state: &SriState, shelf_path: &str) {
         .insert(shelf_path.to_string(), Instant::now());
 }
 
-fn increment_memory_observation(state: &SriState, amount: usize) {
-    let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
-    runtime.memory_observation_count = runtime.memory_observation_count.saturating_add(amount);
-}
-
-fn observe_memory_chunks(state: &SriState, chunk_count: usize) {
-    let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
-    runtime.memory_observation_count = runtime.memory_observation_count.max(chunk_count);
-}
-
 fn emit_resource_alert(
     state: &SriState,
     event_tx: &broadcast::Sender<SriEvent>,
-    actor: impl Into<String>,
     resource: ResourceKind,
     value: f32,
     threshold: f32,
 ) {
-    let actor = actor.into();
     let now = Instant::now();
     let should_emit = {
         let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
-        let key = (actor.clone(), resource);
         if runtime
             .last_alerts
-            .get(&key)
+            .get(&resource)
             .is_some_and(|last| now.duration_since(*last) < ALERT_COOLDOWN)
         {
             false
         } else {
-            runtime.last_alerts.insert(key, now);
+            runtime.last_alerts.insert(resource, now);
             true
         }
     };
 
     if should_emit {
         let _ = event_tx.send(SriEvent::ResourceAlert {
-            actor,
+            actor: "process".to_string(),
             resource,
             value,
             threshold,
@@ -887,14 +670,18 @@ fn emit_resource_alert(
     }
 }
 
-fn latest_resource_value(state: &SriState, actor: &str, resource: ResourceKind) -> Option<f32> {
+fn latest_resource_value(state: &SriState, resource: ResourceKind) -> Option<f32> {
     let runtime = state.runtime.read().expect("sri runtime lock poisoned");
     let latest = runtime.latest_resources.as_ref()?;
-    let estimate = latest.actors.iter().find(|estimate| estimate.actor_name == actor)?;
     match resource {
-        ResourceKind::Ram => Some(estimate.ram_mb as f32),
-        ResourceKind::Cpu => Some(estimate.cpu_pct),
-        ResourceKind::Vram => estimate.vram_pct,
+        ResourceKind::Ram => Some(latest.total_ram_mb as f32),
+        ResourceKind::Cpu => Some(latest.total_cpu_pct),
+        ResourceKind::Vram => match (latest.vram_used_mb, latest.vram_total_mb) {
+            (Some(used_mb), Some(total_mb)) if total_mb > 0 => {
+                Some((used_mb as f32 / total_mb as f32 * 100.0).clamp(0.0, 100.0))
+            }
+            _ => None,
+        },
     }
 }
 
@@ -913,27 +700,9 @@ fn infer_failure_resource(reason: &str) -> Option<ResourceKind> {
 
 fn alert_threshold(resource: ResourceKind) -> f32 {
     match resource {
-        ResourceKind::Ram => 768.0,
-        ResourceKind::Cpu => 65.0,
-        ResourceKind::Vram => 70.0,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ActivityKind {
-    Inference,
-    Transcription,
-    Synthesis,
-    Thought,
-}
-
-fn set_until(state: &SriState, kind: ActivityKind, until: Instant) {
-    let mut runtime = state.runtime.write().expect("sri runtime lock poisoned");
-    match kind {
-        ActivityKind::Inference => runtime.inference_active_until = Some(until),
-        ActivityKind::Transcription => runtime.transcription_active_until = Some(until),
-        ActivityKind::Synthesis => runtime.synthesis_active_until = Some(until),
-        ActivityKind::Thought => runtime.thought_active_until = Some(until),
+        ResourceKind::Ram => 3.0 * 1024.0,
+        ResourceKind::Cpu => 80.0,
+        ResourceKind::Vram => 90.0,
     }
 }
 
@@ -948,20 +717,15 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
 
-    let truncated = text.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     format!("{}…", truncated)
 }
 
 fn bytes_to_mb(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
-}
-
-fn percentage(part: f32, total: f32) -> Option<f32> {
-    if total <= 0.0 {
-        None
-    } else {
-        Some((part / total * 100.0).clamp(0.0, 100.0))
-    }
 }
 
 #[cfg(test)]
@@ -1011,82 +775,5 @@ mod tests {
             FunctionStubStatus::Unavailable,
             start + Duration::from_secs(61),
         ));
-    }
-
-    #[test]
-    fn ram_estimates_follow_fixed_distribution_and_sum_to_total() {
-        let estimates = estimate_actor_resources(
-            1160,
-            24.0,
-            ActivitySnapshot {
-                inference_active: false,
-                transcription_active: false,
-                synthesis_active: false,
-                thought_active: false,
-                memory_observation_count: 0,
-                vram: None,
-            },
-        );
-
-        let total_ram = estimates.iter().map(|estimate| estimate.ram_mb).sum::<u64>();
-        assert_eq!(total_ram, 1160);
-
-        let ram_by_actor = estimates
-            .into_iter()
-            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
-            .collect::<HashMap<_, _>>();
-
-        assert_eq!(ram_by_actor.get("inference"), Some(&638));
-        assert_eq!(ram_by_actor.get("speech-stt"), Some(&174));
-        assert_eq!(ram_by_actor.get("speech-tts"), Some(&116));
-        assert_eq!(ram_by_actor.get("memory"), Some(&58));
-        assert_eq!(ram_by_actor.get("ctp"), Some(&39));
-        assert_eq!(ram_by_actor.get("soul"), Some(&39));
-        assert_eq!(ram_by_actor.get("platform"), Some(&38));
-        assert_eq!(ram_by_actor.get("sri"), Some(&35));
-        assert_eq!(ram_by_actor.get("runtime"), Some(&23));
-    }
-
-    #[test]
-    fn ram_estimates_ignore_vram_and_recent_activity() {
-        let idle = estimate_actor_resources(
-            1160,
-            12.0,
-            ActivitySnapshot {
-                inference_active: false,
-                transcription_active: false,
-                synthesis_active: false,
-                thought_active: false,
-                memory_observation_count: 0,
-                vram: None,
-            },
-        );
-        let active = estimate_actor_resources(
-            1160,
-            82.0,
-            ActivitySnapshot {
-                inference_active: true,
-                transcription_active: true,
-                synthesis_active: true,
-                thought_active: true,
-                memory_observation_count: 240,
-                vram: Some(VramTelemetry {
-                    used_mb: 7240,
-                    total_mb: 8192,
-                    updated_at: Instant::now(),
-                }),
-            },
-        );
-
-        let idle_ram = idle
-            .into_iter()
-            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
-            .collect::<HashMap<_, _>>();
-        let active_ram = active
-            .into_iter()
-            .map(|estimate| (estimate.actor_name, estimate.ram_mb))
-            .collect::<HashMap<_, _>>();
-
-        assert_eq!(idle_ram, active_ram);
     }
 }

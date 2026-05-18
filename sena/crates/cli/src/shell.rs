@@ -16,7 +16,10 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
-use sri::{HealthStatus, RegisteredSriNode, ResourceKind, SignalSource, SriEvent, SriResourceSnapshot, SriSnapshot, SriTreeNode, TreeAction};
+use sri::{
+    HealthStatus, RegisteredSriNode, ResourceKind, SignalSource, SriEvent, SriResourceSnapshot,
+    SriSnapshot, SriTreeNode, TreeAction,
+};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,12 +132,10 @@ const HELP_DEBUG_COMMANDS: &[HelpCommand] = &[
     },
 ];
 
-const HELP_OTHER_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/help",
-        description: "Show this screen",
-    },
-];
+const HELP_OTHER_COMMANDS: &[HelpCommand] = &[HelpCommand {
+    command: "/help",
+    description: "Show this screen",
+}];
 
 const HELP_OVERLAY_SECTIONS: &[HelpSection] = &[
     HelpSection {
@@ -169,8 +170,6 @@ const HELP_OVERLAY_SECTIONS: &[HelpSection] = &[
 
 const HELP_LEFT_COLUMN_SECTION_INDEXES: &[usize] = &[0, 1, 2, 6];
 const HELP_RIGHT_COLUMN_SECTION_INDEXES: &[usize] = &[3, 4, 5];
-const RAM_WARNING_THRESHOLD_MB: u64 = 2 * 1024;
-const RAM_DANGER_THRESHOLD_MB: u64 = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandCategory {
@@ -572,10 +571,7 @@ impl Shell {
                     .get("enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                loops_map.insert(
-                    name.clone(),
-                    LoopInfo { enabled },
-                );
+                loops_map.insert(name.clone(), LoopInfo { enabled });
             }
         }
 
@@ -601,10 +597,9 @@ impl Shell {
 
                     match serde_json::from_value::<SriEvent>(event_value) {
                         Ok(sri_event) => {
-                            let maybe_signal = if let (Ok(mut panel), Ok(mut response_log)) = (
-                                push_sri_panel.lock(),
-                                push_response_log.lock(),
-                            ) {
+                            let maybe_signal = if let (Ok(mut panel), Ok(mut response_log)) =
+                                (push_sri_panel.lock(), push_response_log.lock())
+                            {
                                 Self::apply_sri_event(&mut panel, &mut response_log, sri_event)
                             } else {
                                 None
@@ -1433,10 +1428,7 @@ impl Shell {
                             loops_map.clear();
                             for (name, description, enabled) in updates {
                                 let _ = description;
-                                loops_map.insert(
-                                    name.clone(),
-                                    LoopInfo { enabled },
-                                );
+                                loops_map.insert(name.clone(), LoopInfo { enabled });
                             }
                         }
                     }
@@ -1629,7 +1621,8 @@ impl Shell {
             SriEvent::TreeSnapshot { tree } => {
                 if let Some(snapshot) = panel.snapshot.as_mut() {
                     snapshot.tree = tree;
-                    panel.active_shelf = Self::select_active_shelf(snapshot, panel.active_shelf.as_deref());
+                    panel.active_shelf =
+                        Self::select_active_shelf(snapshot, panel.active_shelf.as_deref());
                 } else {
                     panel.snapshot = Some(SriSnapshot {
                         tree,
@@ -1713,11 +1706,11 @@ impl Shell {
                 value,
                 threshold,
             } => Some(format!(
-                "[FAULT] {} {} {:.1} > {:.1}",
+                "[FAULT] {} {} {} > {}",
                 actor,
                 Self::resource_label(resource),
-                value,
-                threshold
+                Self::format_resource_alert_value(resource, value),
+                Self::format_resource_alert_value(resource, threshold)
             )),
         }
     }
@@ -1740,7 +1733,8 @@ impl Shell {
         }
 
         let own = if node.registered {
-            nodes.iter()
+            nodes
+                .iter()
                 .find(|registered| registered.shelf_path == node.shelf_path)
                 .map(|registered| registered.health_status)
                 .or(Some(node.health_status))
@@ -1910,7 +1904,11 @@ impl Shell {
         sri_panel: Option<&SriPanelState>,
         full_tree: bool,
     ) {
-        let title = if full_tree { "Capability Tree [ALL]" } else { "Capability Tree [LIVE]" };
+        let title = if full_tree {
+            "Capability Tree [ALL]"
+        } else {
+            "Capability Tree [LIVE]"
+        };
         let lines = if let Some(snapshot) = sri_panel.and_then(|panel| panel.snapshot.as_ref()) {
             let open_shelves = snapshot
                 .open_shelves
@@ -1973,10 +1971,17 @@ impl Shell {
         let show_description = (expanded || is_active) && !node.description.is_empty();
 
         let mut spans = vec![
-            Span::styled(format!("{}{}{} ", prefix, connector, marker), theme::muted()),
+            Span::styled(
+                format!("{}{}{} ", prefix, connector, marker),
+                theme::muted(),
+            ),
             Span::styled(
                 node.display_name.clone(),
-                if is_active { theme::title_style() } else { theme::text() },
+                if is_active {
+                    theme::title_style()
+                } else {
+                    theme::text()
+                },
             ),
             Span::styled(
                 format!(" {}", Self::health_badge(node.health_status)),
@@ -2145,20 +2150,19 @@ impl Shell {
     }
 
     fn resource_lines(snapshot: &SriResourceSnapshot) -> Vec<Line<'static>> {
+        let ram_gb = snapshot.total_ram_mb as f32 / 1024.0;
         let mut lines = vec![Self::resource_line(
             "RAM",
-            Self::ram_bar_percent(snapshot.total_ram_mb),
-            Self::format_mb(snapshot.total_ram_mb),
-            Self::dominant_ram(snapshot),
-            Self::ram_resource_style(snapshot.total_ram_mb),
+            ((ram_gb / 4.0) * 100.0).clamp(0.0, 100.0),
+            format!("{:.2} GB", ram_gb),
+            Self::ram_resource_style(ram_gb),
         )];
 
         lines.push(Self::resource_line(
             "CPU",
             snapshot.total_cpu_pct.clamp(0.0, 100.0),
             format!("{:.1}%", snapshot.total_cpu_pct),
-            Self::dominant_cpu(snapshot),
-            Self::resource_style(snapshot.total_cpu_pct),
+            Self::cpu_resource_style(snapshot.total_cpu_pct),
         ));
 
         if let (Some(used_mb), Some(total_mb)) = (snapshot.vram_used_mb, snapshot.vram_total_mb) {
@@ -2170,41 +2174,26 @@ impl Shell {
             lines.push(Self::resource_line(
                 "VRAM",
                 percent.clamp(0.0, 100.0),
-                format!("{} / {}", Self::format_mb(used_mb), Self::format_mb(total_mb)),
-                Self::dominant_vram(snapshot),
-                Self::resource_style(percent),
+                format!(
+                    "{:.2} GB / {:.2} GB",
+                    used_mb as f32 / 1024.0,
+                    total_mb as f32 / 1024.0
+                ),
+                Self::vram_resource_style(percent),
             ));
         }
 
         lines
     }
 
-    fn resource_line(
-        label: &str,
-        percent: f32,
-        total: String,
-        dominant: String,
-        style: Style,
-    ) -> Line<'static> {
+    fn resource_line(label: &str, percent: f32, total: String, style: Style) -> Line<'static> {
         Line::from(vec![
             Span::styled(format!("{:<4}", label), theme::muted()),
-            Span::styled(format!("[{}] {}", Self::resource_bar(percent, 10), total), style),
-            Span::styled(format!("  top est.: {}", dominant), theme::muted()),
+            Span::styled(
+                format!("[{}] {}", Self::resource_bar(percent, 10), total),
+                style,
+            ),
         ])
-    }
-
-    fn ram_bar_percent(total_ram_mb: u64) -> f32 {
-        (total_ram_mb as f32 / RAM_DANGER_THRESHOLD_MB as f32 * 100.0).clamp(0.0, 100.0)
-    }
-
-    fn ram_resource_style(total_ram_mb: u64) -> Style {
-        if total_ram_mb < RAM_WARNING_THRESHOLD_MB {
-            theme::success()
-        } else if total_ram_mb <= RAM_DANGER_THRESHOLD_MB {
-            theme::warning()
-        } else {
-            theme::danger()
-        }
     }
 
     fn resource_bar(percent: f32, width: usize) -> String {
@@ -2214,50 +2203,34 @@ impl Shell {
         format!("{}{}", "█".repeat(filled.min(width)), "░".repeat(empty))
     }
 
-    fn resource_style(percent: f32) -> Style {
-        if percent < 70.0 {
+    fn ram_resource_style(ram_gb: f32) -> Style {
+        if ram_gb < 2.0 {
             theme::success()
-        } else if percent < 90.0 {
+        } else if ram_gb <= 4.0 {
             theme::warning()
         } else {
             theme::danger()
         }
     }
 
-    fn format_mb(value_mb: u64) -> String {
-        if value_mb >= 1024 {
-            format!("{:.2} GB", value_mb as f64 / 1024.0)
+    fn cpu_resource_style(percent: f32) -> Style {
+        if percent < 40.0 {
+            theme::success()
+        } else if percent <= 70.0 {
+            theme::warning()
         } else {
-            format!("{} MB", value_mb)
+            theme::danger()
         }
     }
 
-    fn dominant_ram(snapshot: &SriResourceSnapshot) -> String {
-        snapshot
-            .actors
-            .iter()
-            .max_by_key(|actor| actor.ram_mb)
-            .map(|actor| format!("{} {}", actor.actor_name, Self::format_mb(actor.ram_mb)))
-            .unwrap_or_else(|| "n/a".to_string())
-    }
-
-    fn dominant_cpu(snapshot: &SriResourceSnapshot) -> String {
-        snapshot
-            .actors
-            .iter()
-            .max_by(|left, right| left.cpu_pct.total_cmp(&right.cpu_pct))
-            .map(|actor| format!("{} {:.1}%", actor.actor_name, actor.cpu_pct))
-            .unwrap_or_else(|| "n/a".to_string())
-    }
-
-    fn dominant_vram(snapshot: &SriResourceSnapshot) -> String {
-        snapshot
-            .actors
-            .iter()
-            .filter_map(|actor| actor.vram_pct.map(|value| (actor.actor_name.as_str(), value)))
-            .max_by(|left, right| left.1.total_cmp(&right.1))
-            .map(|(actor, value)| format!("{} {:.1}%", actor, value))
-            .unwrap_or_else(|| "n/a".to_string())
+    fn vram_resource_style(percent: f32) -> Style {
+        if percent < 70.0 {
+            theme::success()
+        } else if percent <= 90.0 {
+            theme::warning()
+        } else {
+            theme::danger()
+        }
     }
 
     fn response_style(line: &str) -> Style {
@@ -2279,6 +2252,13 @@ impl Shell {
             ResourceKind::Ram => "ram",
             ResourceKind::Cpu => "cpu",
             ResourceKind::Vram => "vram",
+        }
+    }
+
+    fn format_resource_alert_value(resource: ResourceKind, value: f32) -> String {
+        match resource {
+            ResourceKind::Ram => format!("{:.2} GB", value / 1024.0),
+            ResourceKind::Cpu | ResourceKind::Vram => format!("{:.1}%", value),
         }
     }
 
@@ -2399,10 +2379,7 @@ impl Shell {
                 "Sena Manual Controls",
                 theme::overlay_text().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  Full-screen command reference",
-                theme::overlay_muted(),
-            ),
+            Span::styled("  Full-screen command reference", theme::overlay_muted()),
         ]))
         .style(theme::overlay_text());
         frame.render_widget(title, sections[0]);
@@ -2412,14 +2389,18 @@ impl Shell {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(sections[1]);
 
-        let left = Paragraph::new(Self::help_overlay_column_lines(HELP_LEFT_COLUMN_SECTION_INDEXES))
-            .style(theme::overlay_text())
-            .wrap(Wrap { trim: false });
+        let left = Paragraph::new(Self::help_overlay_column_lines(
+            HELP_LEFT_COLUMN_SECTION_INDEXES,
+        ))
+        .style(theme::overlay_text())
+        .wrap(Wrap { trim: false });
         frame.render_widget(left, columns[0]);
 
-        let right = Paragraph::new(Self::help_overlay_column_lines(HELP_RIGHT_COLUMN_SECTION_INDEXES))
-            .style(theme::overlay_text())
-            .wrap(Wrap { trim: false });
+        let right = Paragraph::new(Self::help_overlay_column_lines(
+            HELP_RIGHT_COLUMN_SECTION_INDEXES,
+        ))
+        .style(theme::overlay_text())
+        .wrap(Wrap { trim: false });
         frame.render_widget(right, columns[1]);
 
         let footer_text = if help_overlay.confirmation_visible(Instant::now()) {
@@ -2535,7 +2516,6 @@ impl Drop for Shell {
 #[cfg(test)]
 mod tests {
     use super::{HELP_OVERLAY_SECTIONS, HelpOverlayState, SLASH_COMMANDS, Shell};
-    use crate::theme;
     use serde_json::json;
     use std::time::{Duration, Instant};
 
@@ -2551,10 +2531,7 @@ mod tests {
         );
 
         assert_eq!(Shell::parse_quoted_command_text("/say", "/say"), None);
-        assert_eq!(
-            Shell::parse_quoted_command_text("/say \"\"", "/say"),
-            None
-        );
+        assert_eq!(Shell::parse_quoted_command_text("/say \"\"", "/say"), None);
         assert_eq!(
             Shell::parse_quoted_command_text("/say hello world", "/say"),
             None
@@ -2579,8 +2556,16 @@ mod tests {
                     && command.description == "Run full inference pipeline as if spoken"
             })
         }));
-        assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/say"));
-        assert!(SLASH_COMMANDS.iter().any(|command| command.command == "/run"));
+        assert!(
+            SLASH_COMMANDS
+                .iter()
+                .any(|command| command.command == "/say")
+        );
+        assert!(
+            SLASH_COMMANDS
+                .iter()
+                .any(|command| command.command == "/run")
+        );
     }
 
     #[test]
@@ -2691,20 +2676,5 @@ mod tests {
             Shell::format_push_event(&resumed).expect("wakeword resumed should format"),
             "[wakeword] resumed"
         );
-    }
-
-    #[test]
-    fn ram_bar_uses_four_gigabyte_scale() {
-        assert!((Shell::ram_bar_percent(1024) - 25.0).abs() < f32::EPSILON);
-        assert!((Shell::ram_bar_percent(2048) - 50.0).abs() < f32::EPSILON);
-        assert_eq!(Shell::ram_bar_percent(4096), 100.0);
-        assert_eq!(Shell::ram_bar_percent(5120), 100.0);
-    }
-
-    #[test]
-    fn ram_style_uses_absolute_thresholds() {
-        assert_eq!(Shell::ram_resource_style(1536), theme::success());
-        assert_eq!(Shell::ram_resource_style(3072), theme::warning());
-        assert_eq!(Shell::ram_resource_style(5120), theme::danger());
     }
 }
