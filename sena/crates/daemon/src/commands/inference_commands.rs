@@ -1,5 +1,6 @@
 //! Inference-related IPC command handlers.
 
+use crate::commands::runtime_commands::RuntimeState;
 use async_trait::async_trait;
 use bus::{CausalId, Event, EventBus, InferenceEvent, SpeechEvent};
 use ipc::{CommandHandler, IpcError};
@@ -50,11 +51,12 @@ impl CommandHandler for ListModelsHandler {
 /// Handler for "inference.load_model" command.
 pub struct LoadModelHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl LoadModelHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -69,6 +71,8 @@ impl CommandHandler for LoadModelHandler {
     }
 
     async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["inference"]).await?;
+
         let model_path = payload
             .get("path")
             .and_then(|v| v.as_str())
@@ -181,11 +185,12 @@ impl CommandHandler for InferenceStatusHandler {
 /// Handler for "inference.run" command.
 pub struct RunInferenceHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl RunInferenceHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -200,6 +205,10 @@ impl CommandHandler for RunInferenceHandler {
     }
 
     async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        self.state
+            .ensure_actors_running(&["inference", "prompt"])
+            .await?;
+
         let text = payload
             .get("text")
             .or_else(|| payload.get("prompt"))

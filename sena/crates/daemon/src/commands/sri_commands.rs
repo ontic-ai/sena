@@ -1,11 +1,20 @@
 //! SRI visualization IPC command handlers.
 
+use crate::commands::runtime_commands::RuntimeState;
 use async_trait::async_trait;
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
 use sri::SriState;
 
-pub struct SriSubscribeHandler;
+pub struct SriSubscribeHandler {
+    state: RuntimeState,
+}
+
+impl SriSubscribeHandler {
+    pub fn new(state: RuntimeState) -> Self {
+        Self { state }
+    }
+}
 
 #[async_trait]
 impl CommandHandler for SriSubscribeHandler {
@@ -22,6 +31,8 @@ impl CommandHandler for SriSubscribeHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["sri"]).await?;
+
         Ok(json!({
             "subscribed": true,
             "stream": "sri"
@@ -29,7 +40,15 @@ impl CommandHandler for SriSubscribeHandler {
     }
 }
 
-pub struct SriUnsubscribeHandler;
+pub struct SriUnsubscribeHandler {
+    state: RuntimeState,
+}
+
+impl SriUnsubscribeHandler {
+    pub fn new(state: RuntimeState) -> Self {
+        Self { state }
+    }
+}
 
 #[async_trait]
 impl CommandHandler for SriUnsubscribeHandler {
@@ -46,6 +65,8 @@ impl CommandHandler for SriUnsubscribeHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["sri"]).await?;
+
         Ok(json!({
             "subscribed": false,
             "stream": "sri"
@@ -54,12 +75,16 @@ impl CommandHandler for SriUnsubscribeHandler {
 }
 
 pub struct SriSnapshotHandler {
-    state: SriState,
+    runtime_state: RuntimeState,
+    state: Option<SriState>,
 }
 
 impl SriSnapshotHandler {
-    pub fn new(state: SriState) -> Self {
-        Self { state }
+    pub fn new(runtime_state: RuntimeState, state: Option<SriState>) -> Self {
+        Self {
+            runtime_state,
+            state,
+        }
     }
 }
 
@@ -78,7 +103,12 @@ impl CommandHandler for SriSnapshotHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
-        let snapshot = self.state.snapshot();
+        self.runtime_state.ensure_actors_running(&["sri"]).await?;
+
+        let state = self.state.as_ref().ok_or_else(|| {
+            IpcError::CommandFailed("actor not running in this session: sri".to_string())
+        })?;
+        let snapshot = state.snapshot();
         let snapshot = serde_json::to_value(snapshot)
             .map_err(|error| IpcError::Internal(error.to_string()))?;
 

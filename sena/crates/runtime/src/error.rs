@@ -66,6 +66,10 @@ pub enum RuntimeError {
     #[error("another Sena instance is already running (lock file: {lock_path})")]
     InstanceAlreadyRunning { lock_path: String },
 
+    /// Actor selection is internally inconsistent.
+    #[error("invalid actor selection: {0}")]
+    InvalidActorSelection(String),
+
     /// Required model missing and download failed.
     #[error("required model missing: {model_name}. Boot cannot continue. Reason: {reason}")]
     RequiredModelMissing { model_name: String, reason: String },
@@ -100,5 +104,14 @@ mod tests {
         assert!(err.to_string().contains("test-model"));
         assert!(err.to_string().contains("download failed"));
         assert!(err.to_string().contains("Boot cannot continue"));
+    }
+
+    #[test]
+    fn invalid_actor_selection_displays_reason() {
+        let err = RuntimeError::InvalidActorSelection("missing inference".to_string());
+        assert_eq!(
+            err.to_string(),
+            "invalid actor selection: missing inference"
+        );
     }
 }

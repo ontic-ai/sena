@@ -1,5 +1,6 @@
 //! Boot sequence implementation.
 
+use crate::actor_registry::ActorSelection;
 use crate::builder;
 use crate::download_manager::{DownloadClient, ManagedModel, ModelCache};
 use crate::error::RuntimeError;
@@ -9,6 +10,7 @@ use crypto::EncryptionLayer;
 use memory::ModelManifest as MemoryModelManifest;
 use sha2::Digest;
 use speech::ModelManifest as SpeechModelManifest;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +33,8 @@ pub struct BootResult {
     pub actor_handles: Vec<(&'static str, JoinHandle<()>)>,
     /// List of actor names that should emit ActorReady before BootComplete.
     pub expected_actors: Vec<&'static str>,
+    /// Top-level actors intentionally started for this session.
+    pub selected_actors: BTreeSet<&'static str>,
     /// Pre-subscribed broadcast receiver for readiness gate.
     /// Subscribed BEFORE actors are spawned to avoid missing early ActorReady events.
     /// Should be taken (consumed) by the supervisor's readiness gate.
@@ -57,6 +61,19 @@ pub struct BootResult {
 ///
 /// Returns BootResult on success, RuntimeError on failure.
 pub async fn boot() -> Result<BootResult, RuntimeError> {
+    boot_with_optional_selection(None).await
+}
+
+pub async fn boot_with_selection(selection: &ActorSelection) -> Result<BootResult, RuntimeError> {
+    selection
+        .validate()
+        .map_err(|error| RuntimeError::InvalidActorSelection(error.to_string()))?;
+    boot_with_optional_selection(Some(selection)).await
+}
+
+async fn boot_with_optional_selection(
+    selection: Option<&ActorSelection>,
+) -> Result<BootResult, RuntimeError> {
     let boot_start = Instant::now();
     info!("BOOT START: Sena runtime initializing");
 
@@ -148,7 +165,8 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
     // Step 8: Core actors spawn
     let step_start = Instant::now();
     info!("Step 8/8: Spawning core actors");
-    let (actor_handles, expected_actors) = spawn_actors(bus.clone(), &config).await?;
+    let (actor_handles, expected_actors, selected_actors) =
+        spawn_actors(bus.clone(), &config, selection).await?;
     check_step_timing("actor spawn", step_start);
 
     let boot_elapsed = boot_start.elapsed();
@@ -164,6 +182,7 @@ pub async fn boot() -> Result<BootResult, RuntimeError> {
         encryption,
         actor_handles,
         expected_actors,
+        selected_actors,
         readiness_rx: Some(readiness_rx),
         instance_guard,
     })
@@ -288,7 +307,8 @@ async fn verify_and_repair_speech_models(bus: Arc<EventBus>) -> Result<(), Runti
             Err(e) => {
                 warn!(
                     "Model verification/repair failed for {}: {}. Runtime boot will fail later if assets remain unavailable.",
-                    model.name(), e
+                    model.name(),
+                    e
                 );
                 // Continue anyway — builder will fail fast if assets remain unavailable.
             }
@@ -416,7 +436,8 @@ async fn download_model(
         }
         Err(e) => Err(RuntimeError::ModelVerificationFailed(format!(
             "download failed for {}: {}",
-            model.name(), e
+            model.name(),
+            e
         ))),
     }
 }
@@ -491,6 +512,13 @@ async fn init_soul(
     Ok(())
 }
 
+fn actor_selected(selection: Option<&ActorSelection>, actor_id: &'static str) -> bool {
+    match selection {
+        Some(selection) => selection.contains(actor_id),
+        None => true,
+    }
+}
+
 /// Spawn all core actors.
 ///
 /// Order matches the boot sequence:
@@ -509,110 +537,140 @@ async fn init_soul(
 async fn spawn_actors(
     bus: std::sync::Arc<EventBus>,
     config: &crate::config::SenaConfig,
+    selection: Option<&ActorSelection>,
 ) -> Result<
     (
         Vec<(&'static str, tokio::task::JoinHandle<()>)>,
         Vec<&'static str>,
+        BTreeSet<&'static str>,
     ),
     RuntimeError,
 > {
     let data_dir = resolve_sena_dir()?;
-    spawn_actors_with_data_dir(bus, config, &data_dir).await
+    spawn_actors_with_data_dir(bus, config, selection, &data_dir).await
 }
 
 async fn spawn_actors_with_data_dir(
     bus: std::sync::Arc<EventBus>,
     config: &crate::config::SenaConfig,
+    selection: Option<&ActorSelection>,
     data_dir: &Path,
 ) -> Result<
     (
         Vec<(&'static str, tokio::task::JoinHandle<()>)>,
         Vec<&'static str>,
+        BTreeSet<&'static str>,
     ),
     RuntimeError,
 > {
     let mut handles = Vec::new();
     let mut expected = Vec::new();
+    let mut selected_actors = BTreeSet::new();
 
     // Resolve models directory for speech actor construction
     let models_dir = resolve_models_dir()?;
 
     // Step 4: Soul actor spawn
-    let soul_actor = builder::build_soul_actor(data_dir)?;
     let soul_name: &'static str = "soul";
-    expected.push(soul_name);
-    let soul_handle = spawn_soul_actor(soul_actor, bus.clone());
-    handles.push((soul_name, soul_handle));
+    if actor_selected(selection, soul_name) {
+        let soul_actor = builder::build_soul_actor(data_dir)?;
+        expected.push(soul_name);
+        selected_actors.insert(soul_name);
+        let soul_handle = spawn_soul_actor(soul_actor, bus.clone());
+        handles.push((soul_name, soul_handle));
+    }
 
     // Step 5: Inference actor spawn
     let (embed_tx, embed_rx) = tokio::sync::mpsc::channel(32);
-    let embed_models_dir = resolve_embed_models_dir()?;
-    let embed_model_info = MemoryModelManifest::required_embed_model();
-    let embed_model_path = ModelCache::cached_path(&embed_models_dir, &embed_model_info);
-    let inference_actor = builder::build_inference_actor(
-        config.inference_max_tokens,
-        embed_rx,
-        Some(embed_model_path),
-    )?;
     let inference_name: &'static str = "inference";
-    expected.push(inference_name);
-    let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
-    handles.push((inference_name, inference_handle));
+    if actor_selected(selection, inference_name) {
+        let embed_models_dir = resolve_embed_models_dir()?;
+        let embed_model_info = MemoryModelManifest::required_embed_model();
+        let embed_model_path = ModelCache::cached_path(&embed_models_dir, &embed_model_info);
+        let inference_actor = builder::build_inference_actor(
+            config.inference_max_tokens,
+            embed_rx,
+            Some(embed_model_path),
+        )?;
+        expected.push(inference_name);
+        selected_actors.insert(inference_name);
+        let inference_handle = spawn_inference_actor(inference_actor, bus.clone());
+        handles.push((inference_name, inference_handle));
+    }
 
     // Step 6: Memory actor spawn
-    let memory_actor = builder::build_memory_actor(data_dir, embed_tx)?;
     let memory_name: &'static str = "memory";
-    expected.push(memory_name);
-    let memory_handle = spawn_memory_actor(memory_actor, bus.clone());
-    handles.push((memory_name, memory_handle));
+    if actor_selected(selection, memory_name) {
+        let memory_actor = builder::build_memory_actor(data_dir, embed_tx)?;
+        expected.push(memory_name);
+        selected_actors.insert(memory_name);
+        let memory_handle = spawn_memory_actor(memory_actor, bus.clone());
+        handles.push((memory_name, memory_handle));
+    }
 
     // Step 7: Platform adapter spawn
-    let platform_actor = builder::build_platform_actor()?;
     let platform_name: &'static str = "platform";
-    expected.push(platform_name);
-    let platform_handle = spawn_platform_actor(
-        platform_actor,
-        bus.clone(),
-        config.clipboard_observation_enabled,
-        config.file_watch_paths.clone(),
-    );
-    handles.push((platform_name, platform_handle));
+    if actor_selected(selection, platform_name) {
+        let platform_actor = builder::build_platform_actor()?;
+        expected.push(platform_name);
+        selected_actors.insert(platform_name);
+        let platform_handle = spawn_platform_actor(
+            platform_actor,
+            bus.clone(),
+            config.clipboard_observation_enabled,
+            config.file_watch_paths.clone(),
+        );
+        handles.push((platform_name, platform_handle));
+    }
 
     // Step 8: CTP actor spawn
     // _ctp_signal_tx: kept alive for session duration so the channel endpoint
     // does not close prematurely. CTP uses the bus path in production; this
     // sender is available for future direct signal injection if needed.
-    let (ctp_actor, _ctp_signal_tx) = builder::build_ctp_actor()?;
     let ctp_name: &'static str = "ctp";
-    expected.push(ctp_name);
-    let ctp_handle = spawn_ctp_actor(ctp_actor, bus.clone());
-    handles.push((ctp_name, ctp_handle));
+    if actor_selected(selection, ctp_name) {
+        let (ctp_actor, _ctp_signal_tx) = builder::build_ctp_actor()?;
+        expected.push(ctp_name);
+        selected_actors.insert(ctp_name);
+        let ctp_handle = spawn_ctp_actor(ctp_actor, bus.clone());
+        handles.push((ctp_name, ctp_handle));
+    }
 
     // Step 9: Prompt actor spawn
-    let prompt_actor = builder::build_prompt_actor()?;
     let prompt_name: &'static str = "prompt";
-    expected.push(prompt_name);
-    let prompt_handle = spawn_prompt_actor(prompt_actor, bus.clone());
-    handles.push((prompt_name, prompt_handle));
+    if actor_selected(selection, prompt_name) {
+        let prompt_actor = builder::build_prompt_actor()?;
+        expected.push(prompt_name);
+        selected_actors.insert(prompt_name);
+        let prompt_handle = spawn_prompt_actor(prompt_actor, bus.clone());
+        handles.push((prompt_name, prompt_handle));
+    }
 
     // Speech actors are spawned conditionally (stub: always spawn for now)
     let speech_enabled = config.speech_enabled;
     if speech_enabled {
         // Step 10: STT actor spawn
-        let stt_actor = builder::build_stt_actor(&models_dir, config)?;
         let stt_name: &'static str = "stt";
-        expected.push(stt_name);
-        let stt_handle = spawn_stt_actor(stt_actor, bus.clone());
-        handles.push((stt_name, stt_handle));
+        if actor_selected(selection, stt_name) {
+            let stt_actor = builder::build_stt_actor(&models_dir, config)?;
+            expected.push(stt_name);
+            selected_actors.insert(stt_name);
+            let stt_handle = spawn_stt_actor(stt_actor, bus.clone());
+            handles.push((stt_name, stt_handle));
+        }
 
         // Step 11: TTS actor spawn
-        let tts_actor = builder::build_tts_actor(&models_dir)?;
         let tts_name: &'static str = "tts";
-        expected.push(tts_name);
-        let tts_handle = spawn_tts_actor(tts_actor, bus.clone());
-        handles.push((tts_name, tts_handle));
+        if actor_selected(selection, tts_name) {
+            let tts_actor = builder::build_tts_actor(&models_dir)?;
+            expected.push(tts_name);
+            selected_actors.insert(tts_name);
+            let tts_handle = spawn_tts_actor(tts_actor, bus.clone());
+            handles.push((tts_name, tts_handle));
+        }
 
-        if config.wakeword_enabled
+        if selection.is_none()
+            && config.wakeword_enabled
             && let Some(wakeword_actor) =
                 builder::build_wakeword_actor(&models_dir, config.wakeword_sensitivity)?
         {
@@ -623,7 +681,7 @@ async fn spawn_actors_with_data_dir(
         }
     }
 
-    Ok((handles, expected))
+    Ok((handles, expected, selected_actors))
 }
 
 /// Spawn soul actor in a tokio task.
@@ -1104,6 +1162,7 @@ mod tests {
         let boot_result = result.expect("boot should complete successfully with stub embed model");
         assert!(!boot_result.actor_handles.is_empty());
         assert!(!boot_result.expected_actors.is_empty());
+        assert!(boot_result.selected_actors.contains("soul"));
     }
 
     #[tokio::test]
@@ -1132,12 +1191,13 @@ mod tests {
             speech_enabled: false,
             ..Default::default()
         };
-        let result = spawn_actors_with_data_dir(bus, &config, data_dir.path()).await;
+        let result = spawn_actors_with_data_dir(bus, &config, None, data_dir.path()).await;
         assert!(result.is_ok());
 
-        let (handles, expected) =
+        let (handles, expected, selected_actors) =
             result.expect("spawn_actors should create handles and expected list");
         assert_eq!(handles.len(), expected.len());
+        assert_eq!(selected_actors.len(), expected.len());
         assert!(expected.contains(&"soul"));
         assert!(expected.contains(&"inference"));
         assert!(expected.contains(&"memory"));
@@ -1160,12 +1220,38 @@ mod tests {
             ..Default::default()
         };
 
-        let (_handles, expected) = spawn_actors_with_data_dir(bus, &config, data_dir.path())
-            .await
-            .expect("spawn_actors should succeed when speech is disabled");
+        let (_handles, expected, selected_actors) =
+            spawn_actors_with_data_dir(bus, &config, None, data_dir.path())
+                .await
+                .expect("spawn_actors should succeed when speech is disabled");
 
         assert!(!expected.contains(&"stt"));
         assert!(!expected.contains(&"tts"));
+        assert!(!selected_actors.contains("stt"));
+        assert!(!selected_actors.contains("tts"));
+    }
+
+    #[tokio::test]
+    async fn spawn_actors_respects_explicit_selection() {
+        let _env_lock = env_test_lock();
+        let temp_dir = tempdir().expect("create tempdir");
+        let _env = TestEnvGuard::set(temp_dir.path());
+        let bus = Arc::new(EventBus::new());
+        let data_dir = tempdir().expect("create tempdir");
+        let config = crate::config::SenaConfig {
+            speech_enabled: false,
+            ..Default::default()
+        };
+        let selection = ActorSelection::try_from_ids(["soul", "inference"])
+            .expect("selection should parse");
+
+        let (_handles, expected, selected_actors) =
+            spawn_actors_with_data_dir(bus, &config, Some(&selection), data_dir.path())
+                .await
+                .expect("spawn_actors should honor the explicit selection");
+
+        assert_eq!(expected, vec!["soul", "inference"]);
+        assert_eq!(selected_actors.into_iter().collect::<Vec<_>>(), vec!["inference", "soul"]);
     }
 
     #[tokio::test]

@@ -25,6 +25,7 @@
 
 mod analytics;
 
+pub mod actor_registry;
 pub mod boot;
 pub mod builder;
 pub mod config;
@@ -35,7 +36,11 @@ pub mod llama_backend;
 pub mod single_instance;
 pub mod supervisor;
 
-pub use boot::{BootResult, boot};
+pub use actor_registry::{
+    ActorSelection, ActorSelectionError, ActorSpec, actor_spec, actor_specs, dependents_of,
+    first_missing_dependency,
+};
+pub use boot::{BootResult, boot, boot_with_selection};
 pub use config::{SenaConfig, load_or_create_config, save_config};
 pub use download_manager::{DownloadClient, DownloadError, ModelCache};
 pub use error::RuntimeError;

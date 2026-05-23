@@ -1,5 +1,6 @@
 //! Transparency command handlers.
 
+use crate::commands::runtime_commands::RuntimeState;
 use async_trait::async_trait;
 use bus::{Event, TransparencyEvent, TransparencyQuery};
 use ipc::{CommandHandler, IpcError};
@@ -14,6 +15,7 @@ use tracing::warn;
 /// waits for the corresponding response event, and returns it to the client.
 pub struct TransparencyQueryHandler {
     bus: Arc<bus::EventBus>,
+    state: RuntimeState,
 }
 
 #[cfg(test)]
@@ -26,7 +28,9 @@ mod tests {
     #[tokio::test]
     async fn transparency_handler_returns_matching_query_response() {
         let bus = Arc::new(EventBus::new());
-        let handler = TransparencyQueryHandler::new(bus.clone());
+        let state = RuntimeState::new();
+        state.set_selected_actors(["ctp"]).await;
+        let handler = TransparencyQueryHandler::new(bus.clone(), state);
         let responder_bus = bus.clone();
         let mut rx = responder_bus.subscribe_broadcast();
 
@@ -66,8 +70,8 @@ mod tests {
 }
 
 impl TransparencyQueryHandler {
-    pub fn new(bus: Arc<bus::EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<bus::EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -86,6 +90,13 @@ impl CommandHandler for TransparencyQueryHandler {
         let query: TransparencyQuery = serde_json::from_value(payload).map_err(|e| {
             IpcError::InvalidRequest(format!("failed to parse transparency query: {}", e))
         })?;
+
+        let required_actors: &[&str] = match &query {
+            TransparencyQuery::CurrentObservation => &["ctp"],
+            TransparencyQuery::UserMemory => &["memory"],
+            TransparencyQuery::ReasoningChain { .. } => &["inference"],
+        };
+        self.state.ensure_actors_running(required_actors).await?;
 
         // Subscribe to the bus to catch the response
         let mut rx = self.bus.subscribe_broadcast();

@@ -3,16 +3,27 @@
 use async_trait::async_trait;
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use tokio::sync::{Mutex, RwLock, oneshot};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonControlMessage {
+    Shutdown,
+    RestartInTestMode,
+}
 
 /// Shared daemon state for runtime commands.
 #[derive(Clone)]
 pub struct RuntimeState {
     pub boot_time: Instant,
     pub is_ready: Arc<AtomicBool>,
+    pending_test_mode: Arc<AtomicBool>,
+    selected_actors: Arc<RwLock<BTreeSet<String>>>,
+    boot_selection_tx: Arc<Mutex<Option<oneshot::Sender<runtime::ActorSelection>>>>,
 }
 
 impl RuntimeState {
@@ -20,11 +31,87 @@ impl RuntimeState {
         Self {
             boot_time: Instant::now(),
             is_ready: Arc::new(AtomicBool::new(false)),
+            pending_test_mode: Arc::new(AtomicBool::new(false)),
+            selected_actors: Arc::new(RwLock::new(BTreeSet::new())),
+            boot_selection_tx: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn mark_ready(&self) {
         self.is_ready.store(true, Ordering::SeqCst);
+    }
+
+    pub fn set_test_mode_pending(&self, pending: bool) {
+        self.pending_test_mode.store(pending, Ordering::SeqCst);
+    }
+
+    pub fn test_mode_pending(&self) -> bool {
+        self.pending_test_mode.load(Ordering::SeqCst)
+    }
+
+    pub async fn set_selected_actors<I, S>(&self, actors: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut selected = self.selected_actors.write().await;
+        selected.clear();
+        selected.extend(actors.into_iter().map(|actor| actor.as_ref().to_string()));
+    }
+
+    pub async fn selected_actor_ids(&self) -> Vec<String> {
+        self.selected_actors.read().await.iter().cloned().collect()
+    }
+
+    pub async fn ensure_actors_running(&self, required_actors: &[&str]) -> Result<(), IpcError> {
+        let selected = self.selected_actors.read().await;
+        let missing = required_actors
+            .iter()
+            .copied()
+            .filter(|actor| !selected.contains(*actor))
+            .collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let label = if missing.len() == 1 { "actor" } else { "actors" };
+        Err(IpcError::CommandFailed(format!(
+            "{} not running in this session: {}",
+            label,
+            missing.join(", ")
+        )))
+    }
+
+    pub async fn install_boot_selection_sender(
+        &self,
+        sender: oneshot::Sender<runtime::ActorSelection>,
+    ) {
+        let mut slot = self.boot_selection_tx.lock().await;
+        *slot = Some(sender);
+    }
+
+    pub async fn clear_boot_selection_sender(&self) {
+        let mut slot = self.boot_selection_tx.lock().await;
+        slot.take();
+    }
+
+    pub async fn submit_boot_selection(
+        &self,
+        selection: runtime::ActorSelection,
+    ) -> Result<(), IpcError> {
+        let mut slot = self.boot_selection_tx.lock().await;
+        let Some(sender) = slot.take() else {
+            return Err(IpcError::CommandFailed(
+                "test mode selection is not currently pending".to_string(),
+            ));
+        };
+
+        sender.send(selection).map_err(|_| {
+            IpcError::CommandFailed("test mode selection receiver dropped".to_string())
+        })?;
+        self.set_test_mode_pending(false);
+        Ok(())
     }
 }
 
@@ -73,11 +160,11 @@ impl CommandHandler for PingHandler {
 /// Handler for "runtime.status" command.
 pub struct StatusHandler {
     state: RuntimeState,
-    bus: std::sync::Arc<bus::EventBus>,
+    bus: Option<std::sync::Arc<bus::EventBus>>,
 }
 
 impl StatusHandler {
-    pub fn new(state: RuntimeState, bus: std::sync::Arc<bus::EventBus>) -> Self {
+    pub fn new(state: RuntimeState, bus: Option<std::sync::Arc<bus::EventBus>>) -> Self {
         Self { state, bus }
     }
 }
@@ -99,10 +186,20 @@ impl CommandHandler for StatusHandler {
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
         let uptime_secs = self.state.boot_time.elapsed().as_secs();
         let is_ready = self.state.is_ready.load(Ordering::SeqCst);
+        let selected_actors = self.state.selected_actor_ids().await;
+
+        let Some(bus) = &self.bus else {
+            return Ok(json!({
+                "status": if is_ready { "ready" } else { "booting" },
+                "uptime_seconds": uptime_secs,
+                "actors": [],
+                "selected_actors": selected_actors,
+                "test_mode_pending": self.state.test_mode_pending(),
+            }));
+        };
 
         // Query supervisor for actor health
-        let _ = self
-            .bus
+        let _ = bus
             .broadcast(bus::Event::System(bus::SystemEvent::HealthCheckRequest {
                 target: None,
             }))
@@ -110,7 +207,7 @@ impl CommandHandler for StatusHandler {
 
         // Wait for HealthCheckResponse (with 1s timeout)
         let health_future = async {
-            let mut rx = self.bus.subscribe_broadcast();
+            let mut rx = bus.subscribe_broadcast();
             while let Ok(event) = rx.recv().await {
                 if let bus::Event::System(bus::SystemEvent::HealthCheckResponse {
                     actors,
@@ -132,6 +229,8 @@ impl CommandHandler for StatusHandler {
                 "uptime_seconds": uptime_secs,
                 "supervisor_uptime_seconds": supervisor_uptime,
                 "actors": actors,
+                "selected_actors": selected_actors,
+                "test_mode_pending": self.state.test_mode_pending(),
             })),
             Ok(None) | Err(_) => {
                 // Timeout or channel error — return basic status without actor details
@@ -139,6 +238,8 @@ impl CommandHandler for StatusHandler {
                     "status": if is_ready { "ready" } else { "booting" },
                     "uptime_seconds": uptime_secs,
                     "actors": [],
+                    "selected_actors": selected_actors,
+                    "test_mode_pending": self.state.test_mode_pending(),
                 }))
             }
         }
@@ -147,16 +248,149 @@ impl CommandHandler for StatusHandler {
 
 /// Handler for "runtime.shutdown" command.
 pub struct ShutdownHandler {
-    shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    bus: std::sync::Arc<bus::EventBus>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
+    bus: Option<std::sync::Arc<bus::EventBus>>,
 }
 
 impl ShutdownHandler {
     pub fn new(
-        shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
-        bus: std::sync::Arc<bus::EventBus>,
+        control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
+        bus: Option<std::sync::Arc<bus::EventBus>>,
     ) -> Self {
-        Self { shutdown_tx, bus }
+        Self { control_tx, bus }
+    }
+}
+
+pub struct TestModeStatusHandler {
+    state: RuntimeState,
+}
+
+impl TestModeStatusHandler {
+    pub fn new(state: RuntimeState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for TestModeStatusHandler {
+    fn name(&self) -> &'static str {
+        "runtime.test_mode_status"
+    }
+
+    fn description(&self) -> &'static str {
+        "Report whether test-mode actor selection is pending"
+    }
+
+    fn requires_boot(&self) -> bool {
+        false
+    }
+
+    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        let selected_actors = self.state.selected_actor_ids().await;
+        let actors = runtime::actor_specs()
+            .iter()
+            .map(|actor| {
+                json!({
+                    "id": actor.id,
+                    "display_name": actor.display_name,
+                    "description": actor.description,
+                    "dependencies": actor.dependencies,
+                    "can_start_without_dependencies": actor.can_start_without_dependencies,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(json!({
+            "pending": self.state.test_mode_pending(),
+            "actors": actors,
+            "selected_actors": selected_actors,
+        }))
+    }
+}
+
+pub struct BootWithSelectionHandler {
+    state: RuntimeState,
+}
+
+impl BootWithSelectionHandler {
+    pub fn new(state: RuntimeState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for BootWithSelectionHandler {
+    fn name(&self) -> &'static str {
+        "runtime.boot_with_selection"
+    }
+
+    fn description(&self) -> &'static str {
+        "Submit test-mode actor selection and continue runtime boot"
+    }
+
+    fn requires_boot(&self) -> bool {
+        false
+    }
+
+    async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        let actor_ids = payload
+            .get("actors")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| IpcError::InvalidPayload("missing 'actors' array".to_string()))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| IpcError::InvalidPayload("actor ids must be strings".to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let selection = runtime::ActorSelection::try_from_ids(actor_ids.iter())
+            .map_err(|error| IpcError::InvalidPayload(error.to_string()))?;
+        selection
+            .validate()
+            .map_err(|error| IpcError::InvalidPayload(error.to_string()))?;
+
+        let selected_ids = selection.selected_ids();
+        self.state.submit_boot_selection(selection).await?;
+
+        Ok(json!({
+            "accepted": true,
+            "actors": selected_ids,
+        }))
+    }
+}
+
+pub struct TestModeRestartHandler {
+    control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
+}
+
+impl TestModeRestartHandler {
+    pub fn new(control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>) -> Self {
+        Self { control_tx }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for TestModeRestartHandler {
+    fn name(&self) -> &'static str {
+        "runtime.test_mode_restart"
+    }
+
+    fn description(&self) -> &'static str {
+        "Restart the daemon and re-enter test mode actor selection"
+    }
+
+    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.control_tx
+            .send(DaemonControlMessage::RestartInTestMode)
+            .map_err(|_| IpcError::Internal("control channel closed".to_string()))?;
+
+        Ok(json!({
+            "restart_requested": true,
+            "mode": "test_mode"
+        }))
     }
 }
 
@@ -209,15 +443,16 @@ impl CommandHandler for ShutdownHandler {
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
         // Broadcast ShutdownRequested on the bus for observability
-        let _ = self
-            .bus
-            .broadcast(bus::Event::System(bus::SystemEvent::ShutdownRequested))
-            .await;
+        if let Some(bus) = &self.bus {
+            let _ = bus
+                .broadcast(bus::Event::System(bus::SystemEvent::ShutdownRequested))
+                .await;
+        }
 
         // Send to private shutdown channel to trigger daemon shutdown
-        self.shutdown_tx
-            .send(())
-            .map_err(|_| IpcError::Internal("shutdown channel closed".to_string()))?;
+        self.control_tx
+            .send(DaemonControlMessage::Shutdown)
+            .map_err(|_| IpcError::Internal("control channel closed".to_string()))?;
 
         Ok(json!({ "status": "shutdown initiated" }))
     }

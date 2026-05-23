@@ -1,5 +1,6 @@
 //! Speech-related IPC command handlers.
 
+use crate::commands::runtime_commands::RuntimeState;
 use async_trait::async_trait;
 use bus::{CausalId, Event, EventBus, SpeechEvent, SystemEvent};
 use ipc::{CommandHandler, IpcError};
@@ -9,11 +10,12 @@ use std::sync::Arc;
 /// Handler for "speech.listen_start" command.
 pub struct SpeechListenStartHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl SpeechListenStartHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -28,6 +30,8 @@ impl CommandHandler for SpeechListenStartHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["stt"]).await?;
+
         let causal_id = CausalId::new();
 
         self.bus
@@ -56,11 +60,12 @@ impl CommandHandler for SpeechListenStartHandler {
 /// Handler for "speech.listen_stop" command.
 pub struct SpeechListenStopHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl SpeechListenStopHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -75,6 +80,8 @@ impl CommandHandler for SpeechListenStopHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["stt"]).await?;
+
         let causal_id = CausalId::new();
         let mut rx = self.bus.subscribe_broadcast();
 
@@ -140,11 +147,12 @@ impl CommandHandler for SpeechListenStopHandler {
 /// Handler for "speech.say" command.
 pub struct SpeechSayHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl SpeechSayHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -159,6 +167,8 @@ impl CommandHandler for SpeechSayHandler {
     }
 
     async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["tts"]).await?;
+
         let text = payload
             .get("text")
             .and_then(|v| v.as_str())

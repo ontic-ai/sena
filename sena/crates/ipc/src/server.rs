@@ -11,6 +11,7 @@ use tracing::error;
 /// The server listens on `PIPE_NAME` and spawns a task for each connected client.
 /// Requests are dispatched to registered command handlers via `CommandRegistry`.
 /// Push events can be broadcast to all connected clients via the push channel.
+#[derive(Clone)]
 pub struct IpcServer {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     registry: Arc<RwLock<CommandRegistry>>,
@@ -30,6 +31,12 @@ impl IpcServer {
             push_tx: push_tx.clone(),
         };
         (server, push_tx)
+    }
+
+    /// Replace the active command registry.
+    pub async fn replace_registry(&self, registry: CommandRegistry) {
+        let mut current = self.registry.write().await;
+        *current = registry;
     }
 
     /// Start the IPC server and run until shutdown.

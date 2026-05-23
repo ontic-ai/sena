@@ -8,18 +8,21 @@ mod commands {
     pub mod loops_commands;
     pub mod memory_commands;
     pub mod runtime_commands;
-    pub mod sri_commands;
     pub mod speech_commands;
+    pub mod sri_commands;
     pub mod transparency_commands;
 }
 mod error;
 mod tray;
 
 use commands::runtime_commands::RuntimeState;
+use commands::runtime_commands::DaemonControlMessage;
 use error::DaemonError;
 use ipc::{CommandRegistry, IpcServer};
 use sri::SriActor;
+use std::path::PathBuf;
 use std::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -28,10 +31,11 @@ fn main() -> Result<(), DaemonError> {
     init_logging()?;
 
     info!("Sena daemon starting");
+    let test_mode_requested = std::env::args().any(|arg| arg == "--test-mode");
 
     // Create shared shutdown channel up front so the tray is available while the
     // runtime boots on a background worker.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Create tray channels for the main-thread loop.
     let (tray_action_tx, tray_action_rx) = mpsc::channel();
@@ -45,30 +49,28 @@ fn main() -> Result<(), DaemonError> {
         .ok();
 
     // Spawn tray action handler task.
-    let action_handler_shutdown_tx = shutdown_tx.clone();
+    let action_handler_shutdown_tx = control_tx.clone();
     let tray_action_handle = std::thread::spawn(move || {
         handle_tray_actions(tray_action_rx, action_handler_shutdown_tx);
     });
 
     let daemon_tooltip_tx = tooltip_tx.clone();
-    let daemon_shutdown_tx = shutdown_tx.clone();
+    let daemon_control_tx = control_tx.clone();
     let daemon_tray_shutdown_tx = tray_shutdown_tx.clone();
     let daemon_thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| {
-                DaemonError::SupervisionError(format!(
-                    "failed to build daemon runtime: {}",
-                    e
-                ))
+                DaemonError::SupervisionError(format!("failed to build daemon runtime: {}", e))
             })?;
 
         runtime.block_on(run_daemon_services(
             daemon_tooltip_tx,
-            shutdown_rx,
-            daemon_shutdown_tx,
+            control_rx,
+            daemon_control_tx,
             daemon_tray_shutdown_tx,
+            test_mode_requested,
         ))
     });
 
@@ -81,17 +83,17 @@ fn main() -> Result<(), DaemonError> {
     let tray_error = match tray_result {
         tray::TrayLoopResult::Shutdown => {
             info!("Tray loop requested shutdown");
-            let _ = shutdown_tx.send(());
+            let _ = control_tx.send(DaemonControlMessage::Shutdown);
             None
         }
         tray::TrayLoopResult::Error(e) => {
             warn!("Tray loop error: {}", e);
-            let _ = shutdown_tx.send(());
+            let _ = control_tx.send(DaemonControlMessage::Shutdown);
             Some(e)
         }
     };
 
-    drop(shutdown_tx);
+    drop(control_tx);
     drop(tooltip_tx);
     drop(tray_shutdown_tx);
 
@@ -117,13 +119,51 @@ fn main() -> Result<(), DaemonError> {
 
 async fn run_daemon_services(
     tooltip_tx: mpsc::Sender<tray::TooltipUpdate>,
-    mut shutdown_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonControlMessage>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
     tray_shutdown_tx: mpsc::Sender<()>,
+    test_mode_requested: bool,
 ) -> Result<(), DaemonError> {
-    // Boot runtime
+    // Create runtime state for command handlers
+    let runtime_state = RuntimeState::new();
+
+    // Start IPC server before runtime boot so test mode can submit a selection.
+    let mut preboot_registry = CommandRegistry::new();
+    commands::handlers::register_preboot(&mut preboot_registry, runtime_state.clone(), control_tx.clone());
+    let (ipc_server, push_tx) = IpcServer::new(preboot_registry);
+    let ipc_server_handle = ipc_server.clone();
+    let ipc_handle = tokio::spawn(async move {
+        if let Err(e) = ipc_server.run().await {
+            error!("IPC server error: {}", e);
+        }
+    });
+
+    info!("IPC server started");
+
+    if test_mode_requested {
+        runtime_state.set_test_mode_pending(true);
+        create_test_mode_marker().await?;
+        tooltip_tx
+            .send(tray::TooltipUpdate {
+                text: "Sena — Waiting for test mode selection".to_string(),
+            })
+            .ok();
+    }
+
+    let explicit_selection = if test_mode_requested {
+        Some(wait_for_test_mode_selection(&runtime_state).await?)
+    } else {
+        None
+    };
+
+    clear_test_mode_marker().await.ok();
+
     info!("Booting runtime...");
-    let boot_result = match runtime::boot().await {
+    let boot_result = match explicit_selection.as_ref() {
+        Some(selection) => runtime::boot_with_selection(selection).await,
+        None => runtime::boot().await,
+    };
+    let mut boot_result = match boot_result {
         Ok(boot_result) => boot_result,
         Err(e) => {
             tooltip_tx
@@ -136,37 +176,54 @@ async fn run_daemon_services(
         }
     };
 
-    info!("Runtime boot complete, starting supervision and IPC server");
+    let sri_enabled = explicit_selection
+        .as_ref()
+        .map(|selection| selection.contains("sri"))
+        .unwrap_or(true);
+    let (sri_state, sri_events) = if sri_enabled {
+        let sri_actor = SriActor::new(sri::SriRegistry::new());
+        let sri_state = sri_actor.state();
+        let sri_events = sri_actor.event_sender();
+        sri_actor.start(boot_result.bus.clone());
+        boot_result.expected_actors.push("sri");
+        boot_result.selected_actors.insert("sri");
+        let _ = boot_result
+            .bus
+            .broadcast(bus::Event::System(bus::SystemEvent::ActorReady {
+                actor_name: "sri".to_string(),
+            }))
+            .await;
+        (Some(sri_state), Some(sri_events))
+    } else {
+        (None, None)
+    };
 
-    let sri_actor = SriActor::new(sri::SriRegistry::new());
-    let sri_state = sri_actor.state();
-    let sri_events = sri_actor.event_sender();
-    sri_actor.start(boot_result.bus.clone());
+    runtime_state
+        .set_selected_actors(boot_result.selected_actors.iter().copied())
+        .await;
 
-    // Create runtime state for command handlers
-    let runtime_state = RuntimeState::new();
+    if let Some(selection) = explicit_selection.as_ref() {
+        info!(
+            actors = ?selection.selected_ids(),
+            "test mode: running with actors"
+        );
+        info!(
+            actors = ?selection.skipped_ids(),
+            "test mode: skipped actors"
+        );
+    }
 
-    // Create command registry and register all handlers
+    info!("Runtime boot complete, starting supervision and full IPC registry");
+
     let mut registry = CommandRegistry::new();
     let loop_registry = commands::handlers::register_all(
         &mut registry,
         &boot_result,
         runtime_state.clone(),
-        sri_state,
-        shutdown_tx.clone(),
+        sri_state.clone(),
+        control_tx.clone(),
     );
-
-    info!("Registered {} IPC commands", registry.list().len());
-
-    // Start IPC server
-    let (ipc_server, push_tx) = IpcServer::new(registry);
-    let ipc_handle = tokio::spawn(async move {
-        if let Err(e) = ipc_server.run().await {
-            error!("IPC server error: {}", e);
-        }
-    });
-
-    info!("IPC server started");
+    ipc_server_handle.replace_registry(registry).await;
 
     // Spawn event forwarding task — forwards bus events to IPC clients
     let event_forwarding_bus = boot_result.bus.clone();
@@ -175,10 +232,12 @@ async fn run_daemon_services(
         forward_bus_events_to_ipc(event_forwarding_bus, push_tx_events).await;
     });
 
-    let push_tx_sri = push_tx.clone();
-    tokio::spawn(async move {
-        forward_sri_events_to_ipc(sri_events.subscribe(), push_tx_sri).await;
-    });
+    if let Some(sri_events) = sri_events {
+        let push_tx_sri = push_tx.clone();
+        tokio::spawn(async move {
+            forward_sri_events_to_ipc(sri_events.subscribe(), push_tx_sri).await;
+        });
+    }
 
     // Spawn loop status tracking task — updates loop registry when actors report status changes
     let loop_status_bus = boot_result.bus.clone();
@@ -218,10 +277,12 @@ async fn run_daemon_services(
     });
 
     // Wait for shutdown signal or supervision loop exit
-    let shutdown_requested = tokio::select! {
-        _ = shutdown_rx.recv() => {
-            info!("Shutdown signal received");
-            true
+    let control_message = tokio::select! {
+        message = control_rx.recv() => {
+            if let Some(message) = message {
+                info!(?message, "Control message received");
+            }
+            message
         }
         result = &mut supervision_handle => {
             if let Err(e) = result {
@@ -229,11 +290,11 @@ async fn run_daemon_services(
             } else {
                 info!("Supervision loop exited");
             }
-            false
+            None
         }
     };
 
-    if shutdown_requested {
+    if let Some(_message) = control_message {
         let _ = supervision_bus
             .broadcast(bus::Event::System(bus::SystemEvent::ShutdownRequested))
             .await;
@@ -549,7 +610,7 @@ fn init_logging() -> Result<(), DaemonError> {
 /// Handle tray action events from the tray loop.
 fn handle_tray_actions(
     rx: mpsc::Receiver<tray::TrayAction>,
-    shutdown_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    shutdown_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
 ) {
     while let Ok(action) = rx.recv() {
         match action {
@@ -573,11 +634,68 @@ fn handle_tray_actions(
             }
             tray::TrayAction::Shutdown => {
                 info!("Tray action: Shutdown");
-                shutdown_tx.send(()).ok();
+                shutdown_tx.send(DaemonControlMessage::Shutdown).ok();
                 break;
             }
         }
     }
+}
+
+fn test_mode_marker_path() -> Result<PathBuf, DaemonError> {
+    Ok(runtime::config::config_path()
+        .map_err(|e| DaemonError::BootFailed(format!("failed to resolve config path: {}", e)))?
+        .parent()
+        .ok_or_else(|| DaemonError::BootFailed("config path has no parent".to_string()))?
+        .join("test_mode_pending"))
+}
+
+async fn create_test_mode_marker() -> Result<(), DaemonError> {
+    let marker_path = test_mode_marker_path()?;
+    if let Some(parent) = marker_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| DaemonError::BootFailed(format!("failed to create marker dir: {}", e)))?;
+    }
+    tokio::fs::write(&marker_path, b"pending")
+        .await
+        .map_err(|e| DaemonError::BootFailed(format!("failed to write test mode marker: {}", e)))
+}
+
+async fn clear_test_mode_marker() -> Result<(), DaemonError> {
+    let marker_path = test_mode_marker_path()?;
+    match tokio::fs::remove_file(marker_path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DaemonError::BootFailed(format!(
+            "failed to clear test mode marker: {}",
+            error
+        ))),
+    }
+}
+
+async fn wait_for_test_mode_selection(
+    runtime_state: &RuntimeState,
+) -> Result<runtime::ActorSelection, DaemonError> {
+    let (selection_tx, selection_rx) = oneshot::channel();
+    runtime_state.install_boot_selection_sender(selection_tx).await;
+
+    let selection = match tokio::time::timeout(std::time::Duration::from_secs(60), selection_rx).await {
+        Ok(Ok(selection)) => selection,
+        Ok(Err(_)) => {
+            runtime_state.clear_boot_selection_sender().await;
+            return Err(DaemonError::BootFailed(
+                "test mode selection channel closed before a selection arrived".to_string(),
+            ));
+        }
+        Err(_) => {
+            runtime_state.clear_boot_selection_sender().await;
+            return Err(DaemonError::BootFailed(
+                "timed out waiting for test mode actor selection".to_string(),
+            ));
+        }
+    };
+
+    Ok(selection)
 }
 
 /// Launch CLI in a new terminal window.

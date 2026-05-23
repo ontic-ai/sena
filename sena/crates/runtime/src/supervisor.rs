@@ -359,6 +359,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            selected_actors: Default::default(),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };
@@ -390,6 +391,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec![],
+            selected_actors: Default::default(),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };
@@ -413,6 +415,7 @@ mod tests {
             encryption: Arc::new(crypto::StubEncryptionLayer),
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],
+            selected_actors: Default::default(),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };

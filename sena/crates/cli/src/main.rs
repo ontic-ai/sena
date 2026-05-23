@@ -7,19 +7,20 @@
 //! 3. Connects to daemon via IPC
 //! 4. Runs the TUI shell with IPC connection
 
+mod daemon_client;
 mod config_editor;
 mod error;
 mod onboarding;
 mod shell;
+mod test_mode;
 mod theme;
 mod transparency_format;
 
+use daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_ready};
 use error::CliError;
 use ipc::IpcClient;
 use shell::Shell;
-#[cfg(target_os = "windows")]
-use std::process::Command;
-use tokio::time::{Duration, sleep};
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -45,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to daemon
     let mut ipc_client = connect_to_daemon().await?;
+
+    test_mode::complete_pending_selection(&mut ipc_client).await?;
+    wait_for_runtime_ready(&mut ipc_client).await?;
 
     let onboarding_required = check_onboarding_status(&mut ipc_client).await?;
 
@@ -74,86 +78,6 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Sena CLI exiting");
     Ok(())
-}
-
-/// Ensure daemon is running, auto-starting if necessary.
-async fn ensure_daemon_running() -> Result<(), CliError> {
-    if IpcClient::daemon_running().await {
-        info!("Daemon already running");
-        return Ok(());
-    }
-
-    info!("Daemon not running, auto-starting...");
-    start_daemon()?;
-
-    // Wait for daemon to become ready (max 10 seconds)
-    for attempt in 1..=50 {
-        sleep(Duration::from_millis(200)).await;
-        if IpcClient::daemon_running().await {
-            info!("Daemon ready after {} attempts", attempt);
-            return Ok(());
-        }
-    }
-
-    Err(CliError::DaemonStartTimeout)
-}
-
-/// Start the daemon as a background process.
-#[cfg(target_os = "windows")]
-fn start_daemon() -> Result<(), CliError> {
-    use std::os::windows::process::CommandExt;
-
-    // Find daemon binary relative to CLI binary
-    let cli_exe =
-        std::env::current_exe().map_err(|e| CliError::DaemonStartFailed(e.to_string()))?;
-    let cli_dir = cli_exe
-        .parent()
-        .ok_or_else(|| CliError::DaemonStartFailed("cannot determine CLI directory".to_string()))?;
-    let daemon_exe = cli_dir.join("sena.exe");
-
-    if !daemon_exe.exists() {
-        return Err(CliError::DaemonStartFailed(format!(
-            "daemon binary not found at {}",
-            daemon_exe.display()
-        )));
-    }
-
-    // Spawn daemon in detached mode
-    Command::new(daemon_exe)
-        .creation_flags(0x00000008)
-        .spawn()
-        .map_err(|e| CliError::DaemonStartFailed(e.to_string()))?;
-
-    info!("Daemon process spawned");
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn start_daemon() -> Result<(), CliError> {
-    Err(CliError::PlatformNotSupported)
-}
-
-/// Connect to daemon with retries.
-async fn connect_to_daemon() -> Result<IpcClient, CliError> {
-    for attempt in 1..=5 {
-        match IpcClient::connect().await {
-            Ok(client) => {
-                info!("Connected to daemon on attempt {}", attempt);
-                return Ok(client);
-            }
-            Err(e) if attempt < 5 => {
-                warn!("Connection attempt {} failed: {}, retrying...", attempt, e);
-                sleep(Duration::from_millis(500)).await;
-            }
-            Err(e) => {
-                return Err(CliError::IpcConnectionFailed(e.to_string()));
-            }
-        }
-    }
-
-    Err(CliError::IpcConnectionFailed(
-        "exhausted retries".to_string(),
-    ))
 }
 
 /// Check whether onboarding is required through the daemon-owned runtime state.

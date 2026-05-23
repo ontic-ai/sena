@@ -1,5 +1,6 @@
 //! Memory-related IPC command handlers.
 
+use crate::commands::runtime_commands::RuntimeState;
 use async_trait::async_trait;
 use bus::{CausalId, Event, EventBus, MemoryEvent};
 use ipc::{CommandHandler, IpcError};
@@ -9,11 +10,12 @@ use std::sync::Arc;
 /// Handler for "memory.stats" command.
 pub struct MemoryStatsHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl MemoryStatsHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -28,6 +30,8 @@ impl CommandHandler for MemoryStatsHandler {
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["memory"]).await?;
+
         let causal_id = CausalId::new();
         let mut rx = self.bus.subscribe_broadcast();
 
@@ -74,11 +78,12 @@ impl CommandHandler for MemoryStatsHandler {
 /// Handler for "memory.query" command.
 pub struct MemoryQueryHandler {
     bus: Arc<EventBus>,
+    state: RuntimeState,
 }
 
 impl MemoryQueryHandler {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
     }
 }
 
@@ -93,6 +98,8 @@ impl CommandHandler for MemoryQueryHandler {
     }
 
     async fn handle(&self, payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["memory"]).await?;
+
         let query = payload
             .get("query")
             .and_then(|v| v.as_str())

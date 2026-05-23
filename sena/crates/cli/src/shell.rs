@@ -1,5 +1,7 @@
 use crate::config_editor::ConfigEditor;
+use crate::daemon_client::{connect_to_daemon, start_daemon, wait_for_runtime_ready};
 use crate::error::CliError;
+use crate::test_mode;
 use crate::theme;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -80,6 +82,10 @@ const HELP_SYSTEM_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         command: "/shutdown",
         description: "Gracefully shut down the Sena daemon",
+    },
+    HelpCommand {
+        command: "/test-mode",
+        description: "Restart the daemon into actor selection mode",
     },
     HelpCommand {
         command: "/listen",
@@ -307,6 +313,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         command: "/shutdown",
         description: "Shut down the daemon",
+        category: CommandCategory::Runtime,
+    },
+    SlashCommand {
+        command: "/test-mode",
+        description: "Restart into actor selection mode",
         category: CommandCategory::Runtime,
     },
 ];
@@ -1091,6 +1102,7 @@ impl Shell {
             "/status" | "/health" => self.cmd_status().await?,
             "/ping" | "/uptime" => self.cmd_ping().await?,
             "/shutdown" => self.cmd_shutdown().await?,
+            "/test-mode" => self.cmd_test_mode().await?,
             "/models" => self.cmd_open_model_modal().await?,
             "/model" => match parts.get(1).copied() {
                 Some("load") => self.cmd_load_model(parts.get(2).copied()).await?,
@@ -1206,6 +1218,20 @@ impl Shell {
                 self.log_message(format!("Shutdown command failed: {}", e));
             }
         }
+        Ok(())
+    }
+
+    async fn cmd_test_mode(&mut self) -> Result<(), CliError> {
+        match self.ipc.send("runtime.test_mode_restart", json!({})).await {
+            Ok(_) => {
+                self.log_message("Restarting daemon into test mode...".to_string());
+                self.restart_into_test_mode().await?;
+            }
+            Err(e) => {
+                self.log_message(format!("Could not restart into test mode: {}", e));
+            }
+        }
+
         Ok(())
     }
 
@@ -1565,6 +1591,26 @@ impl Shell {
             Terminal::new(backend).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
 
         self.log_message("Config editor closed".to_string());
+        Ok(())
+    }
+
+    async fn restart_into_test_mode(&mut self) -> Result<(), CliError> {
+        self.cleanup_terminal()?;
+
+        for _ in 0..100 {
+            if !IpcClient::daemon_running().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        start_daemon(true)?;
+        let mut ipc_client = connect_to_daemon().await?;
+        test_mode::complete_pending_selection(&mut ipc_client).await?;
+        wait_for_runtime_ready(&mut ipc_client).await?;
+
+        let replacement = Shell::new(ipc_client).await?;
+        *self = replacement;
         Ok(())
     }
 
