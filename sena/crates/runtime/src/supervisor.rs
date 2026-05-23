@@ -11,6 +11,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+#[cfg(test)]
+use std::sync::RwLock;
+
 /// Readiness gate timeout (30 seconds).
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -192,7 +195,7 @@ async fn await_shutdown_or_health_checks(
         boot_result.config.auto_tune_max_tokens,
     );
     let auto_tune_enabled = boot_result.config.auto_tune_tokens;
-    let mut current_max_tokens = boot_result.config.inference_max_tokens;
+    let mut current_max_tokens = boot_result.config.conversation.max_tokens as usize;
 
     loop {
         tokio::select! {
@@ -236,6 +239,12 @@ async fn await_shutdown_or_health_checks(
                     if let Some(recommendation) = token_tuner.record(token_count, current_max_tokens) {
                         let old_max_tokens = current_max_tokens;
                         boot_result.config.inference_max_tokens = recommendation.recommended_tokens;
+                        boot_result.config.conversation.max_tokens = recommendation.recommended_tokens as u32;
+                        boot_result
+                            .conversation_config
+                            .write()
+                            .expect("conversation config lock poisoned")
+                            .max_tokens = recommendation.recommended_tokens as u32;
 
                         match crate::save_config(&boot_result.config).await {
                             Ok(()) => {
@@ -257,6 +266,12 @@ async fn await_shutdown_or_health_checks(
                             }
                             Err(e) => {
                                 boot_result.config.inference_max_tokens = old_max_tokens;
+                                boot_result.config.conversation.max_tokens = old_max_tokens as u32;
+                                boot_result
+                                    .conversation_config
+                                    .write()
+                                    .expect("conversation config lock poisoned")
+                                    .max_tokens = old_max_tokens as u32;
                                 warn!(error = %e, "SUPERVISOR: failed to persist auto-tuned token budget");
                             }
                         }
@@ -360,6 +375,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec![],
             selected_actors: Default::default(),
+            conversation_config: Arc::new(RwLock::new(inference::ConversationConfig::default())),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };
@@ -392,6 +408,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec![],
             selected_actors: Default::default(),
+            conversation_config: Arc::new(RwLock::new(inference::ConversationConfig::default())),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };
@@ -416,6 +433,7 @@ mod tests {
             actor_handles: vec![],
             expected_actors: vec!["test_actor"],
             selected_actors: Default::default(),
+            conversation_config: Arc::new(RwLock::new(inference::ConversationConfig::default())),
             readiness_rx: Some(readiness_rx),
             instance_guard,
         };

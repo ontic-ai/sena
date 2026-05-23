@@ -45,6 +45,7 @@ pub use config::{SenaConfig, load_or_create_config, save_config};
 pub use download_manager::{DownloadClient, DownloadError, ModelCache};
 pub use error::RuntimeError;
 pub use health::{ActorEntry, ActorRegistry};
+pub use inference::ConversationConfig;
 pub use single_instance::InstanceGuard;
 pub use supervisor::supervision_loop;
 

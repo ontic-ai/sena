@@ -1,5 +1,6 @@
 //! Configuration system for Sena (nested workspace).
 
+use inference::ConversationConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -59,9 +60,13 @@ pub struct SenaConfig {
     #[serde(default = "default_wakeword_sensitivity")]
     pub wakeword_sensitivity: f32,
 
-    /// Maximum number of tokens to generate per inference response.
-    #[serde(default = "default_inference_max_tokens")]
+    /// Backward-compatible mirror of conversation.max_tokens while older configs migrate.
+    #[serde(default = "default_inference_max_tokens", skip_serializing)]
     pub inference_max_tokens: usize,
+
+    /// Live-tunable conversation sampling parameters.
+    #[serde(default)]
+    pub conversation: ConversationConfig,
 
     /// Whether local token-usage auto-tuning is enabled.
     #[serde(default = "default_auto_tune_tokens")]
@@ -91,6 +96,7 @@ impl Default for SenaConfig {
             wakeword_enabled: default_wakeword_enabled(),
             wakeword_sensitivity: default_wakeword_sensitivity(),
             inference_max_tokens: default_inference_max_tokens(),
+            conversation: ConversationConfig::default(),
             auto_tune_tokens: default_auto_tune_tokens(),
             auto_tune_min_tokens: default_auto_tune_min_tokens(),
             auto_tune_max_tokens: default_auto_tune_max_tokens(),
@@ -135,7 +141,7 @@ fn default_wakeword_sensitivity() -> f32 {
 }
 
 fn default_inference_max_tokens() -> usize {
-    512
+    ConversationConfig::default().max_tokens as usize
 }
 
 fn default_auto_tune_tokens() -> bool {
@@ -225,7 +231,8 @@ pub async fn apply_config_set(key: &str, value: &str) -> Result<(), String> {
 pub(crate) async fn load_or_create_config_at(path: &Path) -> Result<SenaConfig, ConfigError> {
     if tokio::fs::metadata(path).await.is_ok() {
         let contents = tokio::fs::read_to_string(path).await?;
-        let config: SenaConfig = toml::from_str(&contents)?;
+        let mut config: SenaConfig = toml::from_str(&contents)?;
+        sync_conversation_aliases(&mut config);
         Ok(config)
     } else {
         let config = SenaConfig::default();
@@ -328,10 +335,44 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
             }
             config.wakeword_sensitivity = parsed;
         }
-        "inference_max_tokens" => {
-            config.inference_max_tokens = value
+        "inference_max_tokens" | "max_tokens" | "conversation.max_tokens" => {
+            let parsed = value
                 .parse::<usize>()
                 .map_err(|_| "expected a positive integer".to_string())?;
+            config.inference_max_tokens = parsed;
+            config.conversation.max_tokens = parsed as u32;
+        }
+        "temperature" | "conversation.temperature" => {
+            config.conversation.temperature = value
+                .parse::<f32>()
+                .map_err(|_| "expected a decimal value".to_string())?;
+        }
+        "repeat_penalty" | "conversation.repeat_penalty" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a decimal value".to_string())?;
+            if parsed <= 0.0 {
+                return Err("repeat_penalty must be greater than 0".to_string());
+            }
+            config.conversation.repeat_penalty = parsed;
+        }
+        "top_k" | "conversation.top_k" => {
+            let parsed = value
+                .parse::<u32>()
+                .map_err(|_| "expected a positive integer".to_string())?;
+            if parsed == 0 {
+                return Err("top_k must be greater than 0".to_string());
+            }
+            config.conversation.top_k = parsed;
+        }
+        "top_p" | "conversation.top_p" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a decimal value".to_string())?;
+            if !(0.0..=1.0).contains(&parsed) {
+                return Err("top_p must be between 0.0 and 1.0".to_string());
+            }
+            config.conversation.top_p = parsed;
         }
         "auto_tune_tokens" => {
             config.auto_tune_tokens = value
@@ -350,17 +391,29 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
         }
         _ => {
             return Err(format!(
-                "unknown key '{}'. Supported keys: file_watch_paths, clipboard_observation_enabled, speech_enabled, always_listen, microphone_device, stt_sample_rate_hz, stt_buffer_duration_secs, stt_energy_threshold, stt_silence_duration_secs, wakeword_enabled, wakeword_sensitivity, inference_max_tokens, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
+                "unknown key '{}'. Supported keys: file_watch_paths, clipboard_observation_enabled, speech_enabled, always_listen, microphone_device, stt_sample_rate_hz, stt_buffer_duration_secs, stt_energy_threshold, stt_silence_duration_secs, wakeword_enabled, wakeword_sensitivity, max_tokens, temperature, repeat_penalty, top_k, top_p, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
                 key
             ));
         }
     }
+
+    sync_conversation_aliases(config);
 
     if config.auto_tune_min_tokens > config.auto_tune_max_tokens {
         return Err("auto_tune_min_tokens cannot exceed auto_tune_max_tokens".to_string());
     }
 
     Ok(())
+}
+
+fn sync_conversation_aliases(config: &mut SenaConfig) {
+    if config.conversation.max_tokens == ConversationConfig::default().max_tokens
+        && config.inference_max_tokens != default_inference_max_tokens()
+    {
+        config.conversation.max_tokens = config.inference_max_tokens as u32;
+    }
+
+    config.inference_max_tokens = config.conversation.max_tokens as usize;
 }
 
 #[cfg(test)]
@@ -382,7 +435,12 @@ mod tests {
         assert_eq!(config.stt_silence_duration_secs, 0.5);
         assert!(!config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.5);
-        assert_eq!(config.inference_max_tokens, 512);
+        assert_eq!(config.inference_max_tokens, 150);
+        assert_eq!(config.conversation.max_tokens, 150);
+        assert_eq!(config.conversation.temperature, 0.7);
+        assert_eq!(config.conversation.repeat_penalty, 1.15);
+        assert_eq!(config.conversation.top_k, 40);
+        assert_eq!(config.conversation.top_p, 0.9);
         assert!(config.auto_tune_tokens);
         assert_eq!(config.auto_tune_min_tokens, 256);
         assert_eq!(config.auto_tune_max_tokens, 4096);
@@ -416,7 +474,14 @@ mod tests {
             stt_silence_duration_secs: 0.8,
             wakeword_enabled: true,
             wakeword_sensitivity: 0.75,
-            inference_max_tokens: 1024,
+            inference_max_tokens: 200,
+            conversation: ConversationConfig {
+                max_tokens: 200,
+                temperature: 0.9,
+                repeat_penalty: 1.2,
+                top_k: 55,
+                top_p: 0.92,
+            },
             auto_tune_tokens: false,
             auto_tune_min_tokens: 300,
             auto_tune_max_tokens: 2048,
@@ -457,8 +522,13 @@ mod tests {
             .expect("wakeword_enabled should parse");
         apply_config_value(&mut config, "wakeword_sensitivity", "0.7")
             .expect("wakeword_sensitivity should parse");
-        apply_config_value(&mut config, "inference_max_tokens", "768")
-            .expect("inference_max_tokens should parse");
+        apply_config_value(&mut config, "max_tokens", "180").expect("max_tokens should parse");
+        apply_config_value(&mut config, "temperature", "0.9")
+            .expect("temperature should parse");
+        apply_config_value(&mut config, "repeat_penalty", "1.2")
+            .expect("repeat_penalty should parse");
+        apply_config_value(&mut config, "top_k", "60").expect("top_k should parse");
+        apply_config_value(&mut config, "top_p", "0.95").expect("top_p should parse");
         apply_config_value(&mut config, "auto_tune_tokens", "false")
             .expect("auto_tune_tokens should parse");
 
@@ -475,7 +545,12 @@ mod tests {
         assert_eq!(config.stt_silence_duration_secs, 0.8);
         assert!(config.wakeword_enabled);
         assert_eq!(config.wakeword_sensitivity, 0.7);
-        assert_eq!(config.inference_max_tokens, 768);
+        assert_eq!(config.inference_max_tokens, 180);
+        assert_eq!(config.conversation.max_tokens, 180);
+        assert_eq!(config.conversation.temperature, 0.9);
+        assert_eq!(config.conversation.repeat_penalty, 1.2);
+        assert_eq!(config.conversation.top_k, 60);
+        assert_eq!(config.conversation.top_p, 0.95);
         assert!(!config.auto_tune_tokens);
     }
 

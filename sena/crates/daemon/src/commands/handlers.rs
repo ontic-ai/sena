@@ -117,7 +117,10 @@ pub fn register_all(
 
     // Config commands
     registry.register(Arc::new(ConfigGetHandler));
-    registry.register(Arc::new(ConfigSetHandler::new(boot_result.bus.clone())));
+    registry.register(Arc::new(ConfigSetHandler::new(
+        boot_result.bus.clone(),
+        boot_result.conversation_config.clone(),
+    )));
 
     // Event commands
     registry.register(Arc::new(EventsSubscribeHandler));

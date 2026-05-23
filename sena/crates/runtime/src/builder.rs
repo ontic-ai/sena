@@ -3,9 +3,11 @@
 use crate::error::RuntimeError;
 #[cfg(test)]
 use inference::MockBackend;
+use inference::ConversationConfig;
 use platform::PlatformError;
 use speech::{AudioInputConfig, ModelCache, ModelManifest};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 /// Stub platform backend implementation.
@@ -108,7 +110,7 @@ pub fn build_memory_actor(
 /// When `embed_model_path` is `Some`, a dedicated embedding backend is also
 /// loaded and injected into the actor.
 pub fn build_inference_actor(
-    inference_max_tokens: usize,
+    conversation_config: Arc<RwLock<ConversationConfig>>,
     embed_rx: tokio::sync::mpsc::Receiver<inference::EmbedRequest>,
     embed_model_path: Option<std::path::PathBuf>,
 ) -> Result<inference::InferenceActor, RuntimeError> {
@@ -116,7 +118,7 @@ pub fn build_inference_actor(
     tracing::info!("inference actor: using loaded LlamaBackend");
 
     let actor = inference::InferenceActor::with_embed_requests(backend, 100, embed_rx)
-        .with_inference_max_tokens(inference_max_tokens);
+        .with_shared_conversation_config(conversation_config);
 
     if let Some(path) = embed_model_path {
         match load_embed_backend(&path) {
@@ -348,7 +350,8 @@ mod tests {
     #[test]
     fn inference_actor_builds() {
         let (_embed_tx, embed_rx) = tokio::sync::mpsc::channel(1);
-        let result = build_inference_actor(512, embed_rx, None);
+        let conversation_config = Arc::new(RwLock::new(ConversationConfig::default()));
+        let result = build_inference_actor(conversation_config, embed_rx, None);
         assert!(result.is_ok());
     }
 
@@ -363,7 +366,10 @@ mod tests {
         let models_dir = tempdir().expect("failed to create tempdir");
         let config = crate::config::SenaConfig::default();
         let result = build_stt_actor(models_dir.path(), &config);
-        assert!(matches!(result, Err(RuntimeError::RequiredModelMissing { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RequiredModelMissing { .. })
+        ));
     }
 
     #[test]
@@ -391,7 +397,10 @@ mod tests {
     fn tts_actor_fails_when_assets_missing() {
         let models_dir = tempdir().expect("failed to create tempdir");
         let result = build_tts_actor(models_dir.path());
-        assert!(matches!(result, Err(RuntimeError::RequiredModelMissing { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RequiredModelMissing { .. })
+        ));
     }
 
     #[test]

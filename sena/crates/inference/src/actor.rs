@@ -5,7 +5,7 @@ use crate::build_loaded_llama_backend;
 use crate::error::InferenceError;
 use crate::filter::OutputFilter;
 use crate::queue::{InferenceQueue, WorkItem, WorkKind};
-use crate::types::InferenceParams;
+use crate::types::{ConversationConfig, InferenceParams};
 #[cfg(test)]
 use bus::ContextSnapshot;
 use bus::events::MemoryKind;
@@ -22,7 +22,7 @@ use std::future::pending;
 use std::process::Command;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    RwLock,
 };
 use std::time::Duration;
 use text::SentenceBoundaryIterator;
@@ -74,7 +74,7 @@ pub struct InferenceActor {
     embed_rx: Option<mpsc::Receiver<EmbedRequest>>,
     embed_tx_guard: Option<mpsc::Sender<EmbedRequest>>,
     work_tx: Option<mpsc::Sender<()>>,
-    inference_max_tokens: Arc<AtomicUsize>,
+    conversation_config: Arc<RwLock<ConversationConfig>>,
     pending_user_inputs: HashMap<bus::CausalId, String>,
     pending_reasoning: HashMap<bus::CausalId, InferenceSource>,
     reasoning_history: VecDeque<LastReasoningState>,
@@ -128,7 +128,7 @@ impl InferenceActor {
             embed_rx: Some(embed_rx),
             embed_tx_guard,
             work_tx: None,
-            inference_max_tokens: Arc::new(AtomicUsize::new(InferenceParams::default().max_tokens)),
+            conversation_config: Arc::new(RwLock::new(ConversationConfig::default())),
             pending_user_inputs: HashMap::new(),
             pending_reasoning: HashMap::new(),
             reasoning_history: VecDeque::new(),
@@ -137,8 +137,22 @@ impl InferenceActor {
 
     /// Override the default inference token budget.
     pub fn with_inference_max_tokens(self, max_tokens: usize) -> Self {
-        self.inference_max_tokens
-            .store(max_tokens, Ordering::Relaxed);
+        self.conversation_config
+            .write()
+            .expect("conversation config lock poisoned")
+            .max_tokens = max_tokens as u32;
+        self
+    }
+
+    pub fn with_conversation_config(self, conversation_config: ConversationConfig) -> Self {
+        self.with_shared_conversation_config(Arc::new(RwLock::new(conversation_config)))
+    }
+
+    pub fn with_shared_conversation_config(
+        mut self,
+        conversation_config: Arc<RwLock<ConversationConfig>>,
+    ) -> Self {
+        self.conversation_config = conversation_config;
         self
     }
 
@@ -243,7 +257,10 @@ impl InferenceActor {
         response_text: &str,
         causal_id: bus::CausalId,
     ) -> Result<(), InferenceError> {
-        if !matches!(source, InferenceSource::UserVoice | InferenceSource::UserText) {
+        if !matches!(
+            source,
+            InferenceSource::UserVoice | InferenceSource::UserText
+        ) {
             return Ok(());
         }
 
@@ -259,7 +276,10 @@ impl InferenceActor {
                 .await?;
             }
         } else {
-            warn!(?causal_id, "missing cached user input for completed exchange");
+            warn!(
+                ?causal_id,
+                "missing cached user input for completed exchange"
+            );
         }
 
         let trimmed_response = response_text.trim();
@@ -637,7 +657,7 @@ impl InferenceActor {
         backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
         embed_backend: Option<Arc<Mutex<Box<dyn InferenceBackend>>>>,
         queue: Arc<Mutex<InferenceQueue>>,
-        inference_max_tokens: Arc<AtomicUsize>,
+        conversation_config: Arc<RwLock<ConversationConfig>>,
         mut work_signal: mpsc::Receiver<()>,
     ) {
         loop {
@@ -668,7 +688,7 @@ impl InferenceActor {
                         let result = Self::execute_inference(
                             bus.clone(),
                             backend.clone(),
-                            inference_max_tokens.clone(),
+                            conversation_config.clone(),
                             prompt,
                             source,
                             causal_id,
@@ -684,11 +704,9 @@ impl InferenceActor {
                         causal_id,
                         response_tx,
                     } => {
-                        let active_backend = embed_backend
-                            .clone()
-                            .unwrap_or_else(|| backend.clone());
-                        let result =
-                            Self::execute_embed(active_backend, text, causal_id).await;
+                        let active_backend =
+                            embed_backend.clone().unwrap_or_else(|| backend.clone());
+                        let result = Self::execute_embed(active_backend, text, causal_id).await;
                         let _ = response_tx.send(result.map_err(|e| e.to_string()));
                     }
                     WorkKind::Extract {
@@ -721,7 +739,7 @@ impl InferenceActor {
     async fn execute_inference(
         bus: Arc<EventBus>,
         backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
-        inference_max_tokens: Arc<AtomicUsize>,
+        conversation_config: Arc<RwLock<ConversationConfig>>,
         prompt: String,
         source: InferenceSource,
         causal_id: bus::CausalId,
@@ -744,10 +762,11 @@ impl InferenceActor {
             return Err(InferenceError::ModelNotLoaded);
         }
 
-        let params = InferenceParams {
-            max_tokens: inference_max_tokens.load(Ordering::Relaxed),
-            ..InferenceParams::default()
-        };
+        let params = conversation_config
+            .read()
+            .expect("conversation config lock poisoned")
+            .clone()
+            .to_inference_params();
 
         debug!(?params, "running inference");
 
@@ -1404,7 +1423,7 @@ impl Actor for InferenceActor {
         let worker_backend = self.backend.clone();
         let worker_embed_backend = self.embed_backend.clone();
         let worker_queue = self.queue.clone();
-        let worker_inference_max_tokens = self.inference_max_tokens.clone();
+        let worker_conversation_config = self.conversation_config.clone();
 
         tokio::spawn(async move {
             Self::worker_loop(
@@ -1412,7 +1431,7 @@ impl Actor for InferenceActor {
                 worker_backend,
                 worker_embed_backend,
                 worker_queue,
-                worker_inference_max_tokens,
+                worker_conversation_config,
                 work_rx,
             )
             .await;
@@ -1463,8 +1482,10 @@ impl Actor for InferenceActor {
                             new_max_tokens,
                             ..
                         })) => {
-                            self.inference_max_tokens
-                                .store(new_max_tokens, Ordering::Relaxed);
+                            self.conversation_config
+                                .write()
+                                .expect("conversation config lock poisoned")
+                                .max_tokens = new_max_tokens as u32;
                             info!(new_max_tokens, "inference actor updated token budget");
                         }
                         Ok(Event::Inference(InferenceEvent::InferenceRequested {
@@ -1755,7 +1776,14 @@ mod tests {
         let backend = Box::new(MockBackend::default_loaded());
         let actor = InferenceActor::new(backend).with_inference_max_tokens(768);
 
-        assert_eq!(actor.inference_max_tokens.load(Ordering::Relaxed), 768);
+        assert_eq!(
+            actor
+                .conversation_config
+                .read()
+                .expect("conversation config lock poisoned")
+                .max_tokens,
+            768
+        );
     }
 
     #[tokio::test]
@@ -2099,7 +2127,7 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let backend = Box::new(MockBackend::default_loaded());
         let mut actor = InferenceActor::new(backend);
-        let shared_budget = actor.inference_max_tokens.clone();
+        let shared_config = actor.conversation_config.clone();
 
         actor.start(bus.clone()).await.unwrap();
         tokio::spawn(async move {
@@ -2115,18 +2143,156 @@ mod tests {
         .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        assert_eq!(shared_budget.load(Ordering::Relaxed), 896);
+        assert_eq!(
+            shared_config
+                .read()
+                .expect("conversation config lock poisoned")
+                .max_tokens,
+            896
+        );
+    }
+
+    struct ParamsCaptureBackend {
+        response: String,
+        observed_params: Arc<StdMutex<Vec<InferenceParams>>>,
+    }
+
+    impl ParamsCaptureBackend {
+        fn new(
+            response: impl Into<String>,
+            observed_params: Arc<StdMutex<Vec<InferenceParams>>>,
+        ) -> Self {
+            Self {
+                response: response.into(),
+                observed_params,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl InferenceBackend for ParamsCaptureBackend {
+        fn backend_type(&self) -> BackendType {
+            BackendType::Mock
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        async fn infer(
+            &self,
+            _prompt: String,
+            _params: InferenceParams,
+        ) -> Result<InferenceStream, InferenceError> {
+            Err(InferenceError::ExecutionFailed(
+                "streaming not used in params capture test".to_string(),
+            ))
+        }
+
+        fn complete(
+            &self,
+            _prompt: &str,
+            params: &InferenceParams,
+        ) -> Result<String, InferenceError> {
+            self.observed_params
+                .lock()
+                .expect("params capture mutex should not be poisoned")
+                .push(params.clone());
+            Ok(self.response.clone())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), InferenceError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn inference_uses_updated_conversation_config_on_next_call() {
+        let bus = Arc::new(EventBus::new());
+        let observed_params = Arc::new(StdMutex::new(Vec::new()));
+        let shared_config = Arc::new(RwLock::new(ConversationConfig::default()));
+        let backend = Box::new(ParamsCaptureBackend::new(
+            "iterative response",
+            observed_params.clone(),
+        ));
+        let mut actor =
+            InferenceActor::new(backend).with_shared_conversation_config(shared_config.clone());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let first_causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "first".to_string(),
+            priority: bus::Priority::Normal,
+            source: InferenceSource::Iterative,
+            causal_id: first_causal_id,
+        }))
+        .await
+        .unwrap();
+
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { causal_id, .. }))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                && causal_id == first_causal_id
+            {
+                break;
+            }
+        }
+
+        {
+            let mut config = shared_config
+                .write()
+                .expect("conversation config lock poisoned");
+            config.temperature = 0.9;
+            config.max_tokens = 222;
+            config.repeat_penalty = 1.25;
+        }
+
+        let second_causal_id = bus::CausalId::new();
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {
+            prompt: "second".to_string(),
+            priority: bus::Priority::Normal,
+            source: InferenceSource::Iterative,
+            causal_id: second_causal_id,
+        }))
+        .await
+        .unwrap();
+
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Inference(InferenceEvent::InferenceCompleted { causal_id, .. }))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                && causal_id == second_causal_id
+            {
+                break;
+            }
+        }
+
+        let observed = observed_params
+            .lock()
+            .expect("params capture mutex should not be poisoned")
+            .clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].max_tokens, 150);
+        assert_eq!(observed[0].temperature, 0.7);
+        assert_eq!(observed[0].repeat_penalty, 1.15);
+        assert_eq!(observed[1].max_tokens, 222);
+        assert_eq!(observed[1].temperature, 0.9);
+        assert_eq!(observed[1].repeat_penalty, 1.25);
     }
 
     #[tokio::test]
     async fn execute_embed_falls_back_to_zero_vector() {
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> = Arc::new(Mutex::new(Box::new(
-            MockBackend::unloaded(),
-        )));
+        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
+            Arc::new(Mutex::new(Box::new(MockBackend::unloaded())));
 
-        let vector = InferenceActor::execute_embed(backend, "hello".to_string(), bus::CausalId::new())
-            .await
-            .expect("embed fallback should succeed");
+        let vector =
+            InferenceActor::execute_embed(backend, "hello".to_string(), bus::CausalId::new())
+                .await
+                .expect("embed fallback should succeed");
 
         assert_eq!(vector.len(), EMBEDDING_FALLBACK_DIMENSIONS);
         assert!(vector.iter().all(|value| *value == 0.0));
@@ -2144,7 +2310,9 @@ mod tests {
 
         let (ready_rx, responder) =
             spawn_memory_ack_responder(bus.clone(), 2, Some(observed_writes.clone())).await;
-        ready_rx.await.expect("memory ack responder should initialize");
+        ready_rx
+            .await
+            .expect("memory ack responder should initialize");
 
         actor
             .persist_completed_exchange(
@@ -2156,7 +2324,9 @@ mod tests {
             .await
             .expect("completed exchange should persist");
 
-        responder.await.expect("memory write responder should finish");
+        responder
+            .await
+            .expect("memory write responder should finish");
 
         let writes = observed_writes
             .lock()
@@ -2189,7 +2359,9 @@ mod tests {
         });
 
         let (ready_rx, responder) = spawn_memory_ack_responder(bus.clone(), 2, None).await;
-        ready_rx.await.expect("memory ack responder should initialize");
+        ready_rx
+            .await
+            .expect("memory ack responder should initialize");
 
         let causal_id = bus::CausalId::new();
         bus.broadcast(Event::Inference(InferenceEvent::InferenceRequested {

@@ -12,6 +12,7 @@ use sha2::Digest;
 use speech::ModelManifest as SpeechModelManifest;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
@@ -35,6 +36,8 @@ pub struct BootResult {
     pub expected_actors: Vec<&'static str>,
     /// Top-level actors intentionally started for this session.
     pub selected_actors: BTreeSet<&'static str>,
+    /// Live conversation settings shared with the inference actor.
+    pub conversation_config: Arc<RwLock<inference::ConversationConfig>>,
     /// Pre-subscribed broadcast receiver for readiness gate.
     /// Subscribed BEFORE actors are spawned to avoid missing early ActorReady events.
     /// Should be taken (consumed) by the supervisor's readiness gate.
@@ -165,8 +168,9 @@ async fn boot_with_optional_selection(
     // Step 8: Core actors spawn
     let step_start = Instant::now();
     info!("Step 8/8: Spawning core actors");
+    let conversation_config = Arc::new(RwLock::new(config.conversation.clone()));
     let (actor_handles, expected_actors, selected_actors) =
-        spawn_actors(bus.clone(), &config, selection).await?;
+        spawn_actors(bus.clone(), &config, conversation_config.clone(), selection).await?;
     check_step_timing("actor spawn", step_start);
 
     let boot_elapsed = boot_start.elapsed();
@@ -183,6 +187,7 @@ async fn boot_with_optional_selection(
         actor_handles,
         expected_actors,
         selected_actors,
+        conversation_config,
         readiness_rx: Some(readiness_rx),
         instance_guard,
     })
@@ -537,6 +542,7 @@ fn actor_selected(selection: Option<&ActorSelection>, actor_id: &'static str) ->
 async fn spawn_actors(
     bus: std::sync::Arc<EventBus>,
     config: &crate::config::SenaConfig,
+    conversation_config: Arc<RwLock<inference::ConversationConfig>>,
     selection: Option<&ActorSelection>,
 ) -> Result<
     (
@@ -547,12 +553,13 @@ async fn spawn_actors(
     RuntimeError,
 > {
     let data_dir = resolve_sena_dir()?;
-    spawn_actors_with_data_dir(bus, config, selection, &data_dir).await
+    spawn_actors_with_data_dir(bus, config, conversation_config, selection, &data_dir).await
 }
 
 async fn spawn_actors_with_data_dir(
     bus: std::sync::Arc<EventBus>,
     config: &crate::config::SenaConfig,
+    conversation_config: Arc<RwLock<inference::ConversationConfig>>,
     selection: Option<&ActorSelection>,
     data_dir: &Path,
 ) -> Result<
@@ -588,7 +595,7 @@ async fn spawn_actors_with_data_dir(
         let embed_model_info = MemoryModelManifest::required_embed_model();
         let embed_model_path = ModelCache::cached_path(&embed_models_dir, &embed_model_info);
         let inference_actor = builder::build_inference_actor(
-            config.inference_max_tokens,
+            conversation_config.clone(),
             embed_rx,
             Some(embed_model_path),
         )?;
@@ -1163,6 +1170,14 @@ mod tests {
         assert!(!boot_result.actor_handles.is_empty());
         assert!(!boot_result.expected_actors.is_empty());
         assert!(boot_result.selected_actors.contains("soul"));
+        assert_eq!(
+            boot_result
+                .conversation_config
+                .read()
+                .expect("conversation config lock poisoned")
+                .max_tokens,
+            150
+        );
     }
 
     #[tokio::test]
@@ -1191,7 +1206,10 @@ mod tests {
             speech_enabled: false,
             ..Default::default()
         };
-        let result = spawn_actors_with_data_dir(bus, &config, None, data_dir.path()).await;
+        let conversation_config = Arc::new(RwLock::new(config.conversation.clone()));
+        let result =
+            spawn_actors_with_data_dir(bus, &config, conversation_config, None, data_dir.path())
+                .await;
         assert!(result.is_ok());
 
         let (handles, expected, selected_actors) =
@@ -1219,9 +1237,10 @@ mod tests {
             speech_enabled: false,
             ..Default::default()
         };
+        let conversation_config = Arc::new(RwLock::new(config.conversation.clone()));
 
         let (_handles, expected, selected_actors) =
-            spawn_actors_with_data_dir(bus, &config, None, data_dir.path())
+            spawn_actors_with_data_dir(bus, &config, conversation_config, None, data_dir.path())
                 .await
                 .expect("spawn_actors should succeed when speech is disabled");
 
@@ -1244,11 +1263,18 @@ mod tests {
         };
         let selection = ActorSelection::try_from_ids(["soul", "inference"])
             .expect("selection should parse");
+        let conversation_config = Arc::new(RwLock::new(config.conversation.clone()));
 
         let (_handles, expected, selected_actors) =
-            spawn_actors_with_data_dir(bus, &config, Some(&selection), data_dir.path())
-                .await
-                .expect("spawn_actors should honor the explicit selection");
+            spawn_actors_with_data_dir(
+                bus,
+                &config,
+                conversation_config,
+                Some(&selection),
+                data_dir.path(),
+            )
+            .await
+            .expect("spawn_actors should honor the explicit selection");
 
         assert_eq!(expected, vec!["soul", "inference"]);
         assert_eq!(selected_actors.into_iter().collect::<Vec<_>>(), vec!["inference", "soul"]);

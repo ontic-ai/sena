@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
+use std::sync::{Arc, RwLock};
 
 /// Handler for "config.get" command.
 pub struct ConfigGetHandler;
@@ -30,7 +31,11 @@ impl CommandHandler for ConfigGetHandler {
                 .collect::<Vec<_>>(),
             "clipboard_observation_enabled": config.clipboard_observation_enabled,
             "speech_enabled": config.speech_enabled,
-            "inference_max_tokens": config.inference_max_tokens,
+            "max_tokens": config.conversation.max_tokens,
+            "temperature": config.conversation.temperature,
+            "repeat_penalty": config.conversation.repeat_penalty,
+            "top_k": config.conversation.top_k,
+            "top_p": config.conversation.top_p,
             "auto_tune_tokens": config.auto_tune_tokens,
             "auto_tune_min_tokens": config.auto_tune_min_tokens,
             "auto_tune_max_tokens": config.auto_tune_max_tokens,
@@ -41,11 +46,18 @@ impl CommandHandler for ConfigGetHandler {
 /// Handler for "config.set" command.
 pub struct ConfigSetHandler {
     bus: std::sync::Arc<bus::EventBus>,
+    conversation_config: Arc<RwLock<runtime::ConversationConfig>>,
 }
 
 impl ConfigSetHandler {
-    pub fn new(bus: std::sync::Arc<bus::EventBus>) -> Self {
-        Self { bus }
+    pub fn new(
+        bus: std::sync::Arc<bus::EventBus>,
+        conversation_config: Arc<RwLock<runtime::ConversationConfig>>,
+    ) -> Self {
+        Self {
+            bus,
+            conversation_config,
+        }
     }
 }
 
@@ -98,6 +110,14 @@ impl CommandHandler for ConfigSetHandler {
         runtime::config::apply_config_set(path, &value_string)
             .await
             .map_err(IpcError::CommandFailed)?;
+
+        let updated_config = runtime::load_or_create_config()
+            .await
+            .map_err(|e| IpcError::Internal(format!("failed to refresh config: {}", e)))?;
+        *self
+            .conversation_config
+            .write()
+            .expect("conversation config lock poisoned") = updated_config.conversation.clone();
 
         let _ = self
             .bus

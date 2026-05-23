@@ -124,10 +124,24 @@ impl<'a> ConfigEditor<'a> {
         );
         self.push_field_from_json(
             &mut fields,
-            "inference_max_tokens",
-            response.get("inference_max_tokens"),
+            "max_tokens",
+            response.get("max_tokens"),
             true,
         );
+        self.push_field_from_json(
+            &mut fields,
+            "temperature",
+            response.get("temperature"),
+            true,
+        );
+        self.push_field_from_json(
+            &mut fields,
+            "repeat_penalty",
+            response.get("repeat_penalty"),
+            true,
+        );
+        self.push_field_from_json(&mut fields, "top_k", response.get("top_k"), true);
+        self.push_field_from_json(&mut fields, "top_p", response.get("top_p"), true);
         self.push_field_from_json(
             &mut fields,
             "auto_tune_tokens",
