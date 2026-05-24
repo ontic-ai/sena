@@ -8,8 +8,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig, SupportedBufferSize};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-    Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
-    SincInterpolationType, WindowFunction, calculate_cutoff,
+    Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction, calculate_cutoff,
 };
 use std::collections::VecDeque;
 use std::convert::TryFrom;
@@ -251,7 +251,8 @@ impl SincFormatResampler {
         if !interleaved_samples.len().is_multiple_of(self.channels) {
             return Err(TtsError::BackendError(format!(
                 "interleaved sample count {} is not divisible by channel count {}",
-                interleaved_samples.len(), self.channels,
+                interleaved_samples.len(),
+                self.channels,
             )));
         }
 
@@ -324,8 +325,8 @@ impl SincFormatResampler {
         output: &mut Vec<f32>,
     ) -> Result<(), TtsError> {
         let input_frames = input_chunk.first().map_or(0, Vec::len);
-        let input = SequentialSliceOfVecs::new(&input_chunk, self.channels, input_frames)
-            .map_err(|e| {
+        let input =
+            SequentialSliceOfVecs::new(&input_chunk, self.channels, input_frames).map_err(|e| {
                 TtsError::BackendError(format!(
                     "rubato input adapter init failed for {} frames: {}",
                     input_frames, e,
@@ -526,11 +527,7 @@ fn run_playback_loop(
         }
     };
 
-    let stream = match build_output_stream(
-        &device,
-        &negotiated,
-        Arc::clone(&playback_state),
-    ) {
+    let stream = match build_output_stream(&device, &negotiated, Arc::clone(&playback_state)) {
         Ok(s) => s,
         Err(e) => {
             let _ = ready_tx.send(Err(e));
@@ -570,38 +567,36 @@ fn run_playback_loop(
             PlaybackCommand::Enqueue {
                 buffer,
                 completion_tx,
-            } => {
-                match format_adapter.adapt_buffer(&buffer) {
-                    Ok(adapted) => {
-                        let sample_count = adapted.samples.len();
-                        let mut state = playback_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state
-                            .queue
-                            .push_back(PendingPlayback::new(adapted.samples, completion_tx));
-                        tracing::trace!(
-                            device = %negotiated.device_name,
-                            queued_samples = sample_count,
-                            input_sample_rate = buffer.sample_rate,
-                            input_channels = buffer.channels,
-                            output_sample_rate = negotiated.format.sample_rate,
-                            output_channels = negotiated.format.channels,
-                            "queued audio buffer for playback"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            device = %negotiated.device_name,
-                            input_sample_rate = buffer.sample_rate,
-                            input_channels = buffer.channels,
-                            error = %error,
-                            "failed to adapt audio buffer for playback"
-                        );
-                        let _ = completion_tx.send(Err(error));
-                    }
+            } => match format_adapter.adapt_buffer(&buffer) {
+                Ok(adapted) => {
+                    let sample_count = adapted.samples.len();
+                    let mut state = playback_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state
+                        .queue
+                        .push_back(PendingPlayback::new(adapted.samples, completion_tx));
+                    tracing::trace!(
+                        device = %negotiated.device_name,
+                        queued_samples = sample_count,
+                        input_sample_rate = buffer.sample_rate,
+                        input_channels = buffer.channels,
+                        output_sample_rate = negotiated.format.sample_rate,
+                        output_channels = negotiated.format.channels,
+                        "queued audio buffer for playback"
+                    );
                 }
-            }
+                Err(error) => {
+                    tracing::error!(
+                        device = %negotiated.device_name,
+                        input_sample_rate = buffer.sample_rate,
+                        input_channels = buffer.channels,
+                        error = %error,
+                        "failed to adapt audio buffer for playback"
+                    );
+                    let _ = completion_tx.send(Err(error));
+                }
+            },
             PlaybackCommand::Clear => {
                 clear_playback_state(&playback_state, "playback interrupted");
                 format_adapter.reset();
@@ -633,7 +628,11 @@ fn build_planar_input(
     let mut planar = vec![vec![0.0; chunk_frames]; channels];
 
     for (channel_index, channel_samples) in planar.iter_mut().enumerate().take(channels) {
-        for (frame_index, sample) in channel_samples.iter_mut().enumerate().take(available_frames) {
+        for (frame_index, sample) in channel_samples
+            .iter_mut()
+            .enumerate()
+            .take(available_frames)
+        {
             let input_frame_index = frame_offset + frame_index;
             let input_offset = input_frame_index * channels;
             *sample = interleaved_samples[input_offset + channel_index];
@@ -659,10 +658,9 @@ fn negotiate_output_config(
     })?;
 
     let mut stream_config = supported_config.config();
-    if let Some(buffer_size_frames) = select_buffer_size_frames(
-        supported_config.buffer_size(),
-        preferred.buffer_size_frames,
-    ) {
+    if let Some(buffer_size_frames) =
+        select_buffer_size_frames(supported_config.buffer_size(), preferred.buffer_size_frames)
+    {
         stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size_frames);
     }
 
@@ -821,15 +819,12 @@ fn clear_playback_state(state: &Arc<Mutex<PlaybackState>>, reason: &str) -> usiz
     cleared
 }
 
-fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, channels: usize) {
+fn write_output_data(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>, _channels: usize) {
     let mut state = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for frame in data.chunks_mut(channels) {
-        let source_sample = next_output_sample(&mut state).unwrap_or(0.0).clamp(-1.0, 1.0);
-        for sample in frame.iter_mut() {
-            *sample = source_sample;
-        }
+    for sample in data.iter_mut() {
+        *sample = next_output_sample(&mut state).unwrap_or(0.0).clamp(-1.0, 1.0);
     }
 }
 
@@ -959,7 +954,10 @@ mod tests {
             .adapt_buffer(&source)
             .expect("mono -> multichannel adaptation should succeed");
         assert_eq!(adapted.channels, 4);
-        assert_eq!(adapted.samples, vec![0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2]);
+        assert_eq!(
+            adapted.samples,
+            vec![0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.2]
+        );
     }
 
     #[test]
@@ -1017,8 +1015,8 @@ mod tests {
             .map(|frame| frame[0].abs())
             .sum::<f32>()
             / center_frames.len() as f32;
-        let right_avg = center_frames.iter().map(|frame| frame[1]).sum::<f32>()
-            / center_frames.len() as f32;
+        let right_avg =
+            center_frames.iter().map(|frame| frame[1]).sum::<f32>() / center_frames.len() as f32;
 
         assert!(left_avg < 0.02);
         assert!((right_avg - 1.0).abs() < 0.02);
@@ -1077,6 +1075,30 @@ mod tests {
         write_output_data(&mut output, &state, 1);
 
         assert_eq!(output, vec![0.1, 0.2]);
+        completion_rx
+            .await
+            .expect("completion should be sent")
+            .expect("playback should complete successfully");
+        assert!(state.lock().expect("state mutex").queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_output_data_preserves_interleaved_multichannel_samples() {
+        let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        {
+            let mut guard = state.lock().expect("state mutex should not be poisoned");
+            guard.queue.push_back(PendingPlayback::new(
+                vec![0.1, 0.1, 0.2, 0.2],
+                completion_tx,
+            ));
+        }
+
+        let mut output = vec![0.0; 4];
+        write_output_data(&mut output, &state, 2);
+
+        assert_eq!(output, vec![0.1, 0.1, 0.2, 0.2]);
         completion_rx
             .await
             .expect("completion should be sent")
