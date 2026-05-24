@@ -1,4 +1,4 @@
-use crate::error::CliError;
+use crate::{error::CliError, terminal_window};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
+use tracing::debug;
 
 #[derive(Clone, Debug, Deserialize)]
 struct TestModeStatusResponse {
@@ -58,6 +59,10 @@ impl TestModeApp {
     }
 
     fn run(mut self) -> Result<Vec<String>, CliError> {
+        if let Err(error) = terminal_window::try_resize_default_console() {
+            debug!(%error, "Skipping console resize for test mode");
+        }
+
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen)

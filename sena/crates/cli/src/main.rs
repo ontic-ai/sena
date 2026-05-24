@@ -10,8 +10,10 @@
 mod daemon_client;
 mod config_editor;
 mod error;
+mod logging;
 mod onboarding;
 mod shell;
+mod terminal_window;
 mod test_mode;
 mod theme;
 mod transparency_format;
@@ -20,26 +22,17 @@ use daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_r
 use error::CliError;
 use ipc::IpcClient;
 use shell::Shell;
-use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let config_mode = args.iter().any(|arg| arg == "--config");
 
-    // Route INFO-level (and above) logs to stdout by default.
-    // RUST_LOG overrides the level when set.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .with_writer(std::io::stdout)
-        .init();
+    let log_path = logging::init_tracing()?;
 
-    info!("Sena CLI starting");
+    info!(log_path = %log_path.display(), "Sena CLI starting");
+    debug!(config_mode, "CLI arguments parsed");
 
     // Ensure daemon is running
     ensure_daemon_running().await?;

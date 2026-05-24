@@ -1,5 +1,8 @@
 //! CLI library components.
 
+mod logging;
+mod terminal_window;
+
 pub mod daemon_client;
 pub mod config_editor;
 pub mod error;

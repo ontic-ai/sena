@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use crate::terminal_window;
 use crate::theme;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -15,7 +16,7 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::io;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 enum ConfigFieldKind {
@@ -62,6 +63,10 @@ impl<'a> ConfigEditor<'a> {
         info!("Config editor starting");
 
         self.load_fields().await?;
+
+        if let Err(error) = terminal_window::try_resize_default_console() {
+            debug!(%error, "Skipping console resize for config editor");
+        }
 
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let mut stdout = std::io::stdout();

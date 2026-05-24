@@ -1,6 +1,7 @@
 use crate::config_editor::ConfigEditor;
 use crate::daemon_client::{connect_to_daemon, start_daemon, wait_for_runtime_ready};
 use crate::error::CliError;
+use crate::terminal_window;
 use crate::test_mode;
 use crate::theme;
 use crossterm::{
@@ -27,7 +28,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone, Debug)]
 struct LoopInfo {
@@ -489,6 +490,10 @@ pub struct Shell {
 
 impl Shell {
     pub async fn new(mut ipc: IpcClient) -> Result<Self, CliError> {
+        if let Err(error) = terminal_window::try_resize_default_console() {
+            debug!(%error, "Skipping console resize for shell");
+        }
+
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen)
