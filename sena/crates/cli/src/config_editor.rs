@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use crate::tab_chrome;
 use crate::terminal_window;
 use crate::theme;
 use crossterm::{
@@ -43,6 +44,7 @@ pub struct ConfigEditor<'a> {
     status_line: String,
     should_exit: bool,
     exit_armed: bool,
+    show_tab_header: bool,
 }
 
 impl<'a> ConfigEditor<'a> {
@@ -56,7 +58,13 @@ impl<'a> ConfigEditor<'a> {
             status_line: "Loading config...".to_string(),
             should_exit: false,
             exit_armed: false,
+            show_tab_header: false,
         }
+    }
+
+    pub fn tabbed(mut self) -> Self {
+        self.show_tab_header = true;
+        self
     }
 
     pub async fn run(&mut self) -> Result<(), CliError> {
@@ -387,16 +395,25 @@ impl<'a> ConfigEditor<'a> {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
+                        Constraint::Length(if self.show_tab_header { 1 } else { 0 }),
                         Constraint::Length(3),
                         Constraint::Min(8),
                         Constraint::Length(2),
                     ])
                     .split(frame.area());
 
+                if self.show_tab_header {
+                    tab_chrome::render_header(frame, chunks[0], "CONFIG", "Connected", 0, None);
+                }
+
+                let header_index = if self.show_tab_header { 1 } else { 0 };
+                let body_index = if self.show_tab_header { 2 } else { 1 };
+                let footer_index = if self.show_tab_header { 3 } else { 2 };
+
                 let body_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-                    .split(chunks[1]);
+                    .split(chunks[body_index]);
 
                 let header = Paragraph::new(Line::from(vec![
                     Span::styled("SENA CONFIG", theme::title_style()),
@@ -404,7 +421,7 @@ impl<'a> ConfigEditor<'a> {
                     Span::styled("  [Esc] Back", theme::muted()),
                 ]))
                 .block(theme::panel("Config Editor"));
-                frame.render_widget(header, chunks[0]);
+                frame.render_widget(header, chunks[header_index]);
 
                 let items: Vec<ListItem> = self
                     .fields
@@ -521,7 +538,7 @@ impl<'a> ConfigEditor<'a> {
                 let footer = Paragraph::new(self.status_line.as_str())
                     .style(theme::warning())
                     .block(theme::focused_panel("Status"));
-                frame.render_widget(footer, chunks[2]);
+                frame.render_widget(footer, chunks[footer_index]);
             })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
 

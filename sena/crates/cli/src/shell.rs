@@ -3,11 +3,15 @@ use crate::commands::{
     HELP_RIGHT_COLUMN_GROUPS,
 };
 use crate::config_editor::ConfigEditor;
-use crate::daemon_client::{connect_to_daemon, start_daemon, wait_for_runtime_ready};
+use crate::daemon_client::{
+    connect_to_daemon, launch_cli_tab, start_daemon, wait_for_runtime_ready,
+};
 use crate::error::CliError;
+use crate::tab_chrome;
 use crate::terminal_window;
 use crate::test_mode;
 use crate::theme;
+use crate::tabs::CliTabKind;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -1044,10 +1048,18 @@ impl Shell {
             return Ok(());
         }
 
-        self.log_message(format!(
-            "Tab '{}' is staged for separate-window launch in the next phase.",
-            name
-        ));
+        let Some(tab) = CliTabKind::parse(name) else {
+            self.log_message(format!(
+                "Unknown tab '{}'. Use diag, config, actors, or resources.",
+                name
+            ));
+            return Ok(());
+        };
+
+        match launch_cli_tab(tab) {
+            Ok(()) => self.log_message(format!("Opening '{}' tab window...", name)),
+            Err(error) => self.log_message(format!("Could not open '{}' tab: {}", name, error)),
+        }
         Ok(())
     }
 
@@ -1824,11 +1836,21 @@ impl Shell {
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Length(1),
                     Constraint::Min(0),
                     Constraint::Length(6),
                     Constraint::Length(3),
                 ])
                 .split(frame.area());
+
+            tab_chrome::render_header(
+                frame,
+                vertical[0],
+                "LIVE",
+                render.daemon_status,
+                render.daemon_uptime_secs,
+                None,
+            );
 
             let top = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1837,28 +1859,28 @@ impl Shell {
                     Constraint::Percentage(37),
                     Constraint::Percentage(32),
                 ])
-                .split(vertical[0]);
+                .split(vertical[1]);
 
             Self::render_tree_panel(frame, top[0], render.sri_panel, render.full_tree);
             Self::render_signal_panel(frame, top[1], render.message_log, render.log_scroll);
             Self::render_response_panel(frame, top[2], render.response_log);
             Self::render_resources_panel(
                 frame,
-                vertical[1],
+                vertical[2],
                 render.sri_panel,
                 render.daemon_status,
                 render.daemon_uptime_secs,
             );
             Self::render_input(
                 frame,
-                vertical[2],
+                vertical[3],
                 render.input_buffer,
                 render.daemon_status,
                 render.daemon_uptime_secs,
             );
 
             if render.modal.is_none() {
-                Self::render_autocomplete(frame, vertical[2], render.autocomplete);
+                Self::render_autocomplete(frame, vertical[3], render.autocomplete);
             }
             if let Some(modal_state) = render.modal {
                 Self::render_modal(frame, modal_state);

@@ -52,6 +52,24 @@ pub struct ContextInterpretationInput {
     pub memory_relevance: f64,
 }
 
+/// Snapshot of the most recent completed inference call for diagnostics surfaces.
+#[derive(Debug, Clone)]
+pub struct InferenceDiagnosticsSnapshot {
+    pub prompt: String,
+    pub source: InferenceSource,
+    pub full_text: String,
+    pub generated_token_count: usize,
+    pub stop_condition: String,
+    pub raw_generated_text: String,
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub repeat_penalty: f32,
+    pub top_k: u32,
+    pub top_p: f32,
+    pub stop_sequences: Vec<String>,
+    pub causal_id: CausalId,
+}
+
 /// Inference-layer events.
 #[derive(Debug, Clone)]
 // allowed: boxing the large context-interpretation payload would change the
@@ -142,6 +160,11 @@ pub enum InferenceEvent {
         causal_id: CausalId,
     },
 
+    /// Full diagnostics snapshot for the last completed inference call.
+    InferenceDiagnosticsReady {
+        snapshot: InferenceDiagnosticsSnapshot,
+    },
+
     /// Exploration phase of inference completed (multi-step reasoning).
     InferenceExplorationCompleted {
         steps_completed: usize,
@@ -193,6 +216,7 @@ impl InferenceEvent {
             | Self::InferenceTokenGenerated { causal_id, .. }
             | Self::InferenceSentenceReady { causal_id, .. }
             | Self::InferenceStreamCompleted { causal_id, .. }
+            | Self::InferenceDiagnosticsReady { snapshot: InferenceDiagnosticsSnapshot { causal_id, .. } }
             | Self::InferenceExplorationCompleted { causal_id, .. }
             | Self::ContextInterpretationRequested { causal_id, .. }
             | Self::ContextInterpretationCompleted { causal_id, .. }
@@ -278,6 +302,30 @@ mod tests {
             confidence: Some(0.95),
             causal_id: cid,
         };
+        assert_eq!(event.causal_id(), Some(cid));
+    }
+
+    #[test]
+    fn inference_diagnostics_ready_carries_causal_id() {
+        let cid = CausalId::new();
+        let event = InferenceEvent::InferenceDiagnosticsReady {
+            snapshot: InferenceDiagnosticsSnapshot {
+                prompt: "prompt".to_string(),
+                source: InferenceSource::UserText,
+                full_text: "response".to_string(),
+                generated_token_count: 12,
+                stop_condition: "natural_end".to_string(),
+                raw_generated_text: "response".to_string(),
+                max_tokens: 128,
+                temperature: 0.7,
+                repeat_penalty: 1.1,
+                top_k: 40,
+                top_p: 0.9,
+                stop_sequences: vec!["<END>".to_string()],
+                causal_id: cid,
+            },
+        };
+
         assert_eq!(event.causal_id(), Some(cid));
     }
 

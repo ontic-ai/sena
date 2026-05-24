@@ -4,7 +4,8 @@ use crate::commands::{
     config_commands::{ConfigGetHandler, ConfigSetHandler},
     events_commands::{EventsSubscribeHandler, EventsUnsubscribeHandler},
     inference_commands::{
-        InferenceStatusHandler, ListModelsHandler, LoadModelHandler, RunInferenceHandler,
+        InferenceDiagnosticsHandler, InferenceDiagnosticsState, InferenceStatusHandler,
+        ListModelsHandler, LoadModelHandler, RunInferenceHandler,
     },
     loops_commands::{LoopRegistry, LoopsListHandler, LoopsSetHandler},
     memory_commands::{MemoryQueryHandler, MemoryStatsHandler},
@@ -55,6 +56,7 @@ pub fn register_all(
     boot_result: &BootResult,
     state: RuntimeState,
     sri_state: Option<sri::SriState>,
+    inference_diagnostics: InferenceDiagnosticsState,
     control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
 ) -> LoopRegistry {
     // Runtime commands
@@ -85,6 +87,9 @@ pub fn register_all(
         state.clone(),
     )));
     registry.register(Arc::new(InferenceStatusHandler));
+    registry.register(Arc::new(InferenceDiagnosticsHandler::new(
+        inference_diagnostics,
+    )));
     registry.register(Arc::new(RunInferenceHandler::new(
         boot_result.bus.clone(),
         state.clone(),

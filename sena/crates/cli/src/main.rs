@@ -9,11 +9,16 @@
 
 mod commands;
 mod daemon_client;
+mod actors_tab;
 mod config_editor;
+mod diagnostics_tab;
 mod error;
 mod logging;
 mod onboarding;
+mod resources_tab;
 mod shell;
+mod tab_chrome;
+mod tabs;
 mod terminal_window;
 mod test_mode;
 mod theme;
@@ -23,17 +28,18 @@ use daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_r
 use error::CliError;
 use ipc::IpcClient;
 use shell::Shell;
+use tabs::{CliTabKind, CliWindowMode};
 use tracing::{debug, error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let config_mode = args.iter().any(|arg| arg == "--config");
+    let window_mode = tabs::parse_window_mode(&args).map_err(anyhow::Error::msg)?;
 
     let log_path = logging::init_tracing()?;
 
     info!(log_path = %log_path.display(), "Sena CLI starting");
-    debug!(config_mode, "CLI arguments parsed");
+    debug!(?window_mode, "CLI arguments parsed");
 
     // Ensure daemon is running
     ensure_daemon_running().await?;
@@ -54,19 +60,47 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if config_mode {
-        let mut ipc_client = ipc_client;
-        let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client);
-        if let Err(e) = editor.run().await {
-            error!("Config editor error: {}", e);
-            return Err(anyhow::anyhow!("Config editor failed: {}", e));
+    match window_mode {
+        CliWindowMode::LegacyConfig => {
+            let mut ipc_client = ipc_client;
+            let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client);
+            if let Err(e) = editor.run().await {
+                error!("Config editor error: {}", e);
+                return Err(anyhow::anyhow!("Config editor failed: {}", e));
+            }
         }
-    } else {
-        // Run shell
-        let shell = Shell::new(ipc_client).await?;
-        if let Err(e) = shell.run().await {
-            error!("Shell error: {}", e);
-            return Err(anyhow::anyhow!("Shell failed: {}", e));
+        CliWindowMode::Tab(CliTabKind::Config) => {
+            let mut ipc_client = ipc_client;
+            let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client).tabbed();
+            if let Err(e) = editor.run().await {
+                error!("Config tab error: {}", e);
+                return Err(anyhow::anyhow!("Config tab failed: {}", e));
+            }
+        }
+        CliWindowMode::Tab(CliTabKind::Diag) => {
+            if let Err(e) = diagnostics_tab::run(ipc_client).await {
+                error!("Diagnostics tab error: {}", e);
+                return Err(anyhow::anyhow!("Diagnostics tab failed: {}", e));
+            }
+        }
+        CliWindowMode::Tab(CliTabKind::Resources) => {
+            if let Err(e) = resources_tab::run(ipc_client).await {
+                error!("Resources tab error: {}", e);
+                return Err(anyhow::anyhow!("Resources tab failed: {}", e));
+            }
+        }
+        CliWindowMode::Tab(CliTabKind::Actors) => {
+            if let Err(e) = actors_tab::run(ipc_client).await {
+                error!("Actors tab error: {}", e);
+                return Err(anyhow::anyhow!("Actors tab failed: {}", e));
+            }
+        }
+        CliWindowMode::Live => {
+            let shell = Shell::new(ipc_client).await?;
+            if let Err(e) = shell.run().await {
+                error!("Shell error: {}", e);
+                return Err(anyhow::anyhow!("Shell failed: {}", e));
+            }
         }
     }
 

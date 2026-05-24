@@ -161,6 +161,42 @@ impl InferenceActor {
         );
     }
 
+    fn build_diagnostics_snapshot(
+        prompt: &str,
+        source: InferenceSource,
+        params: &InferenceParams,
+        diagnostics: Option<&GenerationDiagnostics>,
+        fallback_token_count: usize,
+        full_text: &str,
+        causal_id: bus::CausalId,
+    ) -> bus::events::inference::InferenceDiagnosticsSnapshot {
+        let generated_token_count = diagnostics
+            .map(|details| details.generated_token_count)
+            .unwrap_or(fallback_token_count);
+        let stop_condition = diagnostics
+            .map(|details| details.stop_reason.as_log_value())
+            .unwrap_or_else(|| Self::fallback_stop_reason(fallback_token_count, params).as_log_value());
+        let raw_generated_text = diagnostics
+            .map(|details| details.raw_generated_text.clone())
+            .unwrap_or_else(|| full_text.to_string());
+
+        bus::events::inference::InferenceDiagnosticsSnapshot {
+            prompt: prompt.to_string(),
+            source,
+            full_text: full_text.to_string(),
+            generated_token_count,
+            stop_condition,
+            raw_generated_text,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            repeat_penalty: params.repeat_penalty,
+            top_k: params.top_k,
+            top_p: params.top_p,
+            stop_sequences: params.stop_sequences.clone(),
+            causal_id,
+        }
+    }
+
     fn failure_origin_for_source(source: InferenceSource) -> InferenceFailureOrigin {
         match source {
             InferenceSource::UserVoice | InferenceSource::UserText => {
@@ -896,6 +932,7 @@ impl InferenceActor {
         causal_id: bus::CausalId,
         params: InferenceParams,
     ) -> Result<String, InferenceError> {
+        let prompt_for_diagnostics = prompt.clone();
         let mut stream = {
             let backend_guard = backend.lock().await;
             backend_guard.infer(prompt, params.clone()).await?
@@ -961,6 +998,15 @@ impl InferenceActor {
             .as_ref()
             .map(|details| details.generated_token_count as u64)
             .unwrap_or(token_count);
+        let diagnostics_snapshot = Self::build_diagnostics_snapshot(
+            &prompt_for_diagnostics,
+            source,
+            &params,
+            diagnostics.as_ref(),
+            token_count as usize,
+            &full_text,
+            causal_id,
+        );
         Self::log_generation_finish(
             source,
             causal_id,
@@ -969,6 +1015,11 @@ impl InferenceActor {
             &params,
             &full_text,
         );
+
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceDiagnosticsReady {
+            snapshot: diagnostics_snapshot,
+        }))
+        .await?;
 
         // Flush any remaining incomplete sentence
         if let Some(remaining) = sentence_iter.flush()
@@ -1032,7 +1083,21 @@ impl InferenceActor {
         };
 
         let token_count = full_text.len() / 4;
+        let diagnostics_snapshot = Self::build_diagnostics_snapshot(
+            &prompt,
+            source,
+            &params,
+            None,
+            token_count,
+            &full_text,
+            causal_id,
+        );
         Self::log_generation_finish(source, causal_id, None, token_count, &params, &full_text);
+
+        bus.broadcast(Event::Inference(InferenceEvent::InferenceDiagnosticsReady {
+            snapshot: diagnostics_snapshot,
+        }))
+        .await?;
 
         if source == InferenceSource::ProactiveCTP {
             return Self::route_proactive_batch_output(bus, full_text, causal_id, token_count)

@@ -26,6 +26,15 @@ use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+fn inference_source_label(source: bus::InferenceSource) -> &'static str {
+    match source {
+        bus::InferenceSource::UserVoice => "user_voice",
+        bus::InferenceSource::UserText => "user_text",
+        bus::InferenceSource::ProactiveCTP => "proactive_ctp",
+        bus::InferenceSource::Iterative => "iterative",
+    }
+}
+
 fn main() -> Result<(), DaemonError> {
     // Initialize logging
     init_logging()?;
@@ -126,6 +135,8 @@ async fn run_daemon_services(
 ) -> Result<(), DaemonError> {
     // Create runtime state for command handlers
     let runtime_state = RuntimeState::new();
+    let inference_diagnostics: commands::inference_commands::InferenceDiagnosticsState =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
     // Start IPC server before runtime boot so test mode can submit a selection.
     let mut preboot_registry = CommandRegistry::new();
@@ -221,6 +232,7 @@ async fn run_daemon_services(
         &boot_result,
         runtime_state.clone(),
         sri_state.clone(),
+        inference_diagnostics.clone(),
         control_tx.clone(),
     );
     ipc_server_handle.replace_registry(registry).await;
@@ -228,8 +240,9 @@ async fn run_daemon_services(
     // Spawn event forwarding task — forwards bus events to IPC clients
     let event_forwarding_bus = boot_result.bus.clone();
     let push_tx_events = push_tx.clone();
+    let diagnostics_state = inference_diagnostics.clone();
     tokio::spawn(async move {
-        forward_bus_events_to_ipc(event_forwarding_bus, push_tx_events).await;
+        forward_bus_events_to_ipc(event_forwarding_bus, push_tx_events, diagnostics_state).await;
     });
 
     if let Some(sri_events) = sri_events {
@@ -319,6 +332,7 @@ async fn run_daemon_services(
 async fn forward_bus_events_to_ipc(
     bus: std::sync::Arc<bus::EventBus>,
     push_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    inference_diagnostics: commands::inference_commands::InferenceDiagnosticsState,
 ) {
     use bus::Event;
     use serde_json::json;
@@ -418,6 +432,28 @@ async fn forward_bus_events_to_ipc(
                     "causal_id": causal_id.as_u64(),
                 }
             })),
+            Event::Inference(bus::InferenceEvent::InferenceDiagnosticsReady { snapshot }) => {
+                let payload = json!({
+                    "type": "InferenceDiagnosticsUpdated",
+                    "data": {
+                        "prompt": snapshot.prompt,
+                        "source": inference_source_label(snapshot.source),
+                        "full_text": snapshot.full_text,
+                        "generated_token_count": snapshot.generated_token_count,
+                        "stop_condition": snapshot.stop_condition,
+                        "raw_generated_text": snapshot.raw_generated_text,
+                        "max_tokens": snapshot.max_tokens,
+                        "temperature": snapshot.temperature,
+                        "repeat_penalty": snapshot.repeat_penalty,
+                        "top_k": snapshot.top_k,
+                        "top_p": snapshot.top_p,
+                        "stop_sequences": snapshot.stop_sequences,
+                        "causal_id": snapshot.causal_id.as_u64(),
+                    }
+                });
+                *inference_diagnostics.lock().await = payload.get("data").cloned();
+                Some(payload)
+            }
             Event::Inference(bus::InferenceEvent::ModelLoaded {
                 model_path,
                 model_name,

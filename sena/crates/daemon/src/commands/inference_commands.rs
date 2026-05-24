@@ -7,6 +7,8 @@ use ipc::{CommandHandler, IpcError};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub type InferenceDiagnosticsState = Arc<tokio::sync::Mutex<Option<Value>>>;
+
 /// Handler for "inference.list_models" command.
 pub struct ListModelsHandler;
 
@@ -178,6 +180,35 @@ impl CommandHandler for InferenceStatusHandler {
             "model_name": model_name,
             "backend": backend,
             "models_dir": models_dir,
+        }))
+    }
+}
+
+/// Handler for "inference.diagnostics" command.
+pub struct InferenceDiagnosticsHandler {
+    state: InferenceDiagnosticsState,
+}
+
+impl InferenceDiagnosticsHandler {
+    pub fn new(state: InferenceDiagnosticsState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for InferenceDiagnosticsHandler {
+    fn name(&self) -> &'static str {
+        "inference.diagnostics"
+    }
+
+    fn description(&self) -> &'static str {
+        "Get the latest completed inference diagnostics snapshot"
+    }
+
+    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        let snapshot = self.state.lock().await.clone();
+        Ok(json!({
+            "snapshot": snapshot,
         }))
     }
 }
