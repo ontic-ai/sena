@@ -39,6 +39,7 @@ struct DiagnosticsTab {
     connection_alive: Arc<AtomicBool>,
     daemon_uptime_secs: u64,
     daemon_uptime_anchor: Instant,
+    close_armed_at: Option<Instant>,
 }
 
 pub async fn run(mut ipc: IpcClient) -> Result<(), CliError> {
@@ -97,6 +98,7 @@ impl DiagnosticsTab {
             connection_alive,
             daemon_uptime_secs,
             daemon_uptime_anchor: Instant::now(),
+            close_armed_at: None,
         })
     }
 
@@ -110,12 +112,12 @@ impl DiagnosticsTab {
                     event::read().map_err(|e| CliError::TuiRenderError(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(());
-                    }
-                    _ => {}
+                if tab_chrome::handle_double_ctrl_x(
+                    key.code,
+                    key.modifiers,
+                    &mut self.close_armed_at,
+                ) {
+                    return Ok(());
                 }
             }
         }
@@ -136,7 +138,15 @@ impl DiagnosticsTab {
             tab_chrome::elapsed_uptime(self.daemon_uptime_secs, self.daemon_uptime_anchor);
 
         self.terminal
-            .draw(|frame| Self::render_frame(frame, snapshot.as_ref(), daemon_status, daemon_uptime_secs))
+            .draw(|frame| {
+                Self::render_frame(
+                    frame,
+                    snapshot.as_ref(),
+                    daemon_status,
+                    daemon_uptime_secs,
+                    self.close_armed_at,
+                )
+            })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
 
         Ok(())
@@ -147,6 +157,7 @@ impl DiagnosticsTab {
         snapshot: Option<&DiagnosticsSnapshot>,
         daemon_status: &str,
         daemon_uptime_secs: u64,
+        close_armed_at: Option<Instant>,
     ) {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -163,7 +174,7 @@ impl DiagnosticsTab {
             "DIAGNOSTICS",
             daemon_status,
             daemon_uptime_secs,
-            None,
+            Some(tab_chrome::close_hint(close_armed_at)),
         );
 
         let prompt_text = snapshot
@@ -211,7 +222,7 @@ impl DiagnosticsTab {
             columns[1],
         );
         frame.render_widget(
-            Paragraph::new(Line::from("Esc or q closes this tab window."))
+            Paragraph::new(Line::from(tab_chrome::close_hint(close_armed_at)))
                 .block(theme::panel("Status")),
             vertical[2],
         );

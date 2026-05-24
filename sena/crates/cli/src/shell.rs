@@ -299,7 +299,7 @@ pub struct Shell {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     connection_alive: Arc<AtomicBool>,
     log_scroll: usize,
-    quit_armed: bool,
+    close_armed_at: Option<Instant>,
     full_tree: bool,
     autocomplete: Option<AutocompleteState>,
     modal: Option<ModalState>,
@@ -493,7 +493,7 @@ impl Shell {
             terminal,
             connection_alive,
             log_scroll: 0,
-            quit_armed: false,
+            close_armed_at: None,
             full_tree: false,
             autocomplete: None,
             modal: None,
@@ -775,31 +775,17 @@ impl Shell {
             }
         }
 
-        if !matches!(code, KeyCode::Char('q') if modifiers.is_empty()) {
-            self.quit_armed = false;
+        if tab_chrome::handle_double_ctrl_x(code, modifiers, &mut self.close_armed_at) {
+            self.should_quit = true;
+            return Ok(());
+        }
+
+        if tab_chrome::is_close_armed(self.close_armed_at) {
+            self.log_message("Press Ctrl+X again to close Sena.".to_string());
+            return Ok(());
         }
 
         match code {
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('q') if modifiers.is_empty() => {
-                if self.input_buffer.starts_with('/') {
-                    self.input_buffer.push('q');
-                } else if self.input_buffer.is_empty() {
-                    if self.quit_armed {
-                        self.should_quit = true;
-                    } else {
-                        self.quit_armed = true;
-                        self.log_message("Press q again to quit, or start a /command.".to_string());
-                    }
-                } else {
-                    self.input_buffer.push('q');
-                }
-            }
             KeyCode::Char(c) => {
                 self.input_buffer.push(c);
                 self.refresh_autocomplete();

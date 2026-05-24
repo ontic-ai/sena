@@ -64,6 +64,7 @@ struct ActorsTab {
     status_line: String,
     daemon_uptime_secs: u64,
     daemon_uptime_anchor: Instant,
+    close_armed_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -136,6 +137,7 @@ impl ActorsTab {
             },
             daemon_uptime_secs: runtime_status.uptime_seconds,
             daemon_uptime_anchor: Instant::now(),
+            close_armed_at: None,
         })
     }
 
@@ -149,6 +151,14 @@ impl ActorsTab {
                     event::read().map_err(|e| CliError::TuiRenderError(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
+                if tab_chrome::handle_double_ctrl_x(
+                    key.code,
+                    key.modifiers,
+                    &mut self.close_armed_at,
+                ) {
+                    return Ok(ActorsOutcome::Close);
+                }
+
                 match key.code {
                     KeyCode::Up => self.move_up(),
                     KeyCode::Down => self.move_down(),
@@ -159,10 +169,6 @@ impl ActorsTab {
                             return Ok(ActorsOutcome::Restart(self.selected_ids_in_order()));
                         }
                         self.toggle_current_actor();
-                    }
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(ActorsOutcome::Close),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(ActorsOutcome::Close);
                     }
                     _ => {}
                 }
@@ -183,16 +189,32 @@ impl ActorsTab {
             health_by_id: self.health_by_id.clone(),
             cursor: self.cursor,
             focus: self.focus,
-            status_line: self.status_line.clone(),
+            status_line: if tab_chrome::is_close_armed(self.close_armed_at) {
+                "Press Ctrl+X again to close this tab.".to_string()
+            } else {
+                self.status_line.clone()
+            },
         };
 
         self.terminal
-            .draw(|frame| Self::render_frame(frame, &render_state, daemon_uptime_secs))
+            .draw(|frame| {
+                Self::render_frame(
+                    frame,
+                    &render_state,
+                    daemon_uptime_secs,
+                    self.close_armed_at,
+                )
+            })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         Ok(())
     }
 
-    fn render_frame(frame: &mut Frame, state: &ActorsRenderState, daemon_uptime_secs: u64) {
+    fn render_frame(
+        frame: &mut Frame,
+        state: &ActorsRenderState,
+        daemon_uptime_secs: u64,
+        close_armed_at: Option<Instant>,
+    ) {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)])
@@ -202,7 +224,14 @@ impl ActorsTab {
             .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
             .split(vertical[1]);
 
-        tab_chrome::render_header(frame, vertical[0], "ACTORS", "Connected", daemon_uptime_secs, None);
+        tab_chrome::render_header(
+            frame,
+            vertical[0],
+            "ACTORS",
+            "Connected",
+            daemon_uptime_secs,
+            Some(tab_chrome::close_hint(close_armed_at)),
+        );
 
         let items: Vec<ListItem> = state
             .actors

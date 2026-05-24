@@ -48,6 +48,7 @@ struct ResourcesTab {
     connection_alive: Arc<AtomicBool>,
     daemon_uptime_secs: u64,
     daemon_uptime_anchor: Instant,
+    close_armed_at: Option<Instant>,
 }
 
 pub async fn run(mut ipc: IpcClient) -> Result<(), CliError> {
@@ -152,6 +153,7 @@ impl ResourcesTab {
             connection_alive,
             daemon_uptime_secs,
             daemon_uptime_anchor: Instant::now(),
+            close_armed_at: None,
         })
     }
 
@@ -165,12 +167,12 @@ impl ResourcesTab {
                     event::read().map_err(|e| CliError::TuiRenderError(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(());
-                    }
-                    _ => {}
+                if tab_chrome::handle_double_ctrl_x(
+                    key.code,
+                    key.modifiers,
+                    &mut self.close_armed_at,
+                ) {
+                    return Ok(());
                 }
             }
         }
@@ -196,7 +198,15 @@ impl ResourcesTab {
             tab_chrome::elapsed_uptime(self.daemon_uptime_secs, self.daemon_uptime_anchor);
 
         self.terminal
-            .draw(|frame| Self::render_frame(frame, &state, daemon_status, daemon_uptime_secs))
+            .draw(|frame| {
+                Self::render_frame(
+                    frame,
+                    &state,
+                    daemon_status,
+                    daemon_uptime_secs,
+                    self.close_armed_at,
+                )
+            })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
 
         Ok(())
@@ -207,6 +217,7 @@ impl ResourcesTab {
         state: &ResourceState,
         daemon_status: &str,
         daemon_uptime_secs: u64,
+        close_armed_at: Option<Instant>,
     ) {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -216,6 +227,10 @@ impl ResourcesTab {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(vertical[2]);
+        let lower_right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .split(lower[1]);
 
         tab_chrome::render_header(
             frame,
@@ -223,7 +238,7 @@ impl ResourcesTab {
             "RESOURCES",
             daemon_status,
             daemon_uptime_secs,
-            None,
+            Some(tab_chrome::close_hint(close_armed_at)),
         );
 
         frame.render_widget(
@@ -242,7 +257,12 @@ impl ResourcesTab {
             Paragraph::new(health_lines(&state.nodes, &state.alerts))
                 .block(theme::panel("Actor Health Summary"))
                 .wrap(Wrap { trim: false }),
-            lower[1],
+            lower_right[0],
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(tab_chrome::close_hint(close_armed_at)))
+                .block(theme::panel("Status")),
+            lower_right[1],
         );
     }
 }

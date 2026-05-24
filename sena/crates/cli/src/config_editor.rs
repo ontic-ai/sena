@@ -17,6 +17,7 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::io;
+use std::time::Instant;
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ pub struct ConfigEditor<'a> {
     status_line: String,
     should_exit: bool,
     exit_armed: bool,
+    close_armed_at: Option<Instant>,
     show_tab_header: bool,
 }
 
@@ -58,6 +60,7 @@ impl<'a> ConfigEditor<'a> {
             status_line: "Loading config...".to_string(),
             should_exit: false,
             exit_armed: false,
+            close_armed_at: None,
             show_tab_header: false,
         }
     }
@@ -242,6 +245,18 @@ impl<'a> ConfigEditor<'a> {
     }
 
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<(), CliError> {
+        if self.show_tab_header {
+            if tab_chrome::handle_double_ctrl_x(code, modifiers, &mut self.close_armed_at) {
+                self.should_exit = true;
+                return Ok(());
+            }
+
+            if tab_chrome::is_close_armed(self.close_armed_at) {
+                self.status_line = "Press Ctrl+X again to close this tab.".to_string();
+                return Ok(());
+            }
+        }
+
         if !matches!(code, KeyCode::Esc) {
             self.exit_armed = false;
         }
@@ -332,7 +347,9 @@ impl<'a> ConfigEditor<'a> {
                 self.save_changes().await?;
             }
             KeyCode::Esc => {
-                if self.exit_armed {
+                if self.show_tab_header {
+                    self.status_line = "Use Ctrl+X twice to close this tab window.".to_string();
+                } else if self.exit_armed {
                     self.should_exit = true;
                 } else {
                     self.exit_armed = true;
@@ -403,7 +420,14 @@ impl<'a> ConfigEditor<'a> {
                     .split(frame.area());
 
                 if self.show_tab_header {
-                    tab_chrome::render_header(frame, chunks[0], "CONFIG", "Connected", 0, None);
+                    tab_chrome::render_header(
+                        frame,
+                        chunks[0],
+                        "CONFIG",
+                        "Connected",
+                        0,
+                        Some(tab_chrome::close_hint(self.close_armed_at)),
+                    );
                 }
 
                 let header_index = if self.show_tab_header { 1 } else { 0 };
