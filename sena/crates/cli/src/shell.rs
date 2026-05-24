@@ -2196,20 +2196,12 @@ impl Shell {
     }
 
     fn resource_lines(snapshot: &SriResourceSnapshot) -> Vec<Line<'static>> {
-        let ram_gb = snapshot.total_ram_mb as f32 / 1024.0;
         let mut lines = vec![Self::resource_line(
-            "RAM",
-            ((ram_gb / 4.0) * 100.0).clamp(0.0, 100.0),
-            format!("{:.2} GB", ram_gb),
-            Self::ram_resource_style(ram_gb),
-        )];
-
-        lines.push(Self::resource_line(
             "CPU",
             snapshot.total_cpu_pct.clamp(0.0, 100.0),
             format!("{:.1}%", snapshot.total_cpu_pct),
             Self::cpu_resource_style(snapshot.total_cpu_pct),
-        ));
+        )];
 
         if let (Some(used_mb), Some(total_mb)) = (snapshot.vram_used_mb, snapshot.vram_total_mb) {
             let percent = if total_mb == 0 {
@@ -2247,16 +2239,6 @@ impl Shell {
         let filled = ((clamped / 100.0) * width as f32).round() as usize;
         let empty = width.saturating_sub(filled.min(width));
         format!("{}{}", "█".repeat(filled.min(width)), "░".repeat(empty))
-    }
-
-    fn ram_resource_style(ram_gb: f32) -> Style {
-        if ram_gb < 2.0 {
-            theme::success()
-        } else if ram_gb <= 4.0 {
-            theme::warning()
-        } else {
-            theme::danger()
-        }
     }
 
     fn cpu_resource_style(percent: f32) -> Style {
@@ -2563,6 +2545,7 @@ impl Drop for Shell {
 mod tests {
     use super::{HELP_OVERLAY_SECTIONS, HelpOverlayState, SLASH_COMMANDS, Shell};
     use serde_json::json;
+    use sri::SriResourceSnapshot;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -2689,6 +2672,32 @@ mod tests {
         let line = Shell::format_push_event(&event).expect("low confidence event should format");
 
         assert_eq!(line, "[unclear] \"maybe hello\" (conf: 0.41)");
+    }
+
+    #[test]
+    fn resource_lines_omit_ram_and_keep_cpu_and_vram() {
+        let snapshot = SriResourceSnapshot {
+            total_ram_mb: 8 * 1024,
+            total_cpu_pct: 37.5,
+            vram_used_mb: Some(3 * 1024),
+            vram_total_mb: Some(8 * 1024),
+        };
+
+        let lines = Shell::resource_lines(&snapshot);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("CPU"));
+        assert!(rendered[1].contains("VRAM"));
+        assert!(rendered.iter().all(|line| !line.trim_start().starts_with("RAM")));
     }
 
     #[test]
