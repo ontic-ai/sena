@@ -2,7 +2,7 @@
 
 use crate::error::InferenceError;
 use crate::stream::InferenceStream;
-use crate::types::{BackendType, InferenceParams};
+use crate::types::{BackendType, GenerationDiagnostics, InferenceParams};
 use async_trait::async_trait;
 
 /// Trait for inference backend implementations.
@@ -18,6 +18,11 @@ pub trait InferenceBackend: Send + Sync {
 
     /// Check if a model is currently loaded.
     fn is_loaded(&self) -> bool;
+
+    /// Return the loaded model name when the backend can expose it.
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
 
     /// Run inference with the given prompt and parameters, returning a token stream.
     async fn infer(
@@ -54,6 +59,11 @@ pub trait InferenceBackend: Send + Sync {
 
     /// Shutdown the backend gracefully.
     async fn shutdown(&mut self) -> Result<(), InferenceError>;
+
+    /// Return generation diagnostics from the most recent streamed inference call.
+    fn take_generation_diagnostics(&self) -> Option<GenerationDiagnostics> {
+        None
+    }
 
     /// Get current VRAM usage in megabytes.
     ///

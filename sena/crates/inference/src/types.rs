@@ -2,7 +2,41 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_STOP_SEQUENCES: [&str; 3] = ["\nUser:", "\nAssistant:", "\nSena:"];
+pub const DEFAULT_STOP_SEQUENCES: [&str; 0] = [];
+pub const QWEN_CHATML_STOP_SEQUENCES: [&str; 2] = ["<|im_end|>", "<|endoftext|>"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferenceStopReason {
+    MaxTokensReached,
+    StopSequence(String),
+    EosToken,
+    NaturalEnd,
+}
+
+impl InferenceStopReason {
+    pub fn as_log_value(&self) -> String {
+        match self {
+            Self::MaxTokensReached => "max_tokens reached".to_string(),
+            Self::StopSequence(sequence) => format!("stop_sequence: {}", sequence),
+            Self::EosToken => "eos_token".to_string(),
+            Self::NaturalEnd => "natural_end".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedInferenceRequest {
+    pub prompt: String,
+    pub params: InferenceParams,
+    pub prompt_template: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationDiagnostics {
+    pub generated_token_count: usize,
+    pub stop_reason: InferenceStopReason,
+    pub raw_generated_text: String,
+}
 
 /// Live-tunable conversation settings for user-facing inference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,10 +136,13 @@ use std::fmt;
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationConfig, DEFAULT_STOP_SEQUENCES, InferenceParams};
+    use super::{
+        ConversationConfig, DEFAULT_STOP_SEQUENCES, InferenceParams, InferenceStopReason,
+        QWEN_CHATML_STOP_SEQUENCES,
+    };
 
     #[test]
-    fn default_stop_sequences_match_dialogue_contract() {
+    fn default_stop_sequences_are_empty_until_backend_preparation() {
         let params = InferenceParams::default();
         let expected: Vec<String> = DEFAULT_STOP_SEQUENCES
             .iter()
@@ -124,5 +161,31 @@ mod tests {
         assert_eq!(params.repeat_penalty, 1.15);
         assert_eq!(params.top_k, 40);
         assert_eq!(params.top_p, 0.9);
+        assert!(params.stop_sequences.is_empty());
+    }
+
+    #[test]
+    fn qwen_stop_sequences_match_chatml_contract() {
+        assert_eq!(
+            QWEN_CHATML_STOP_SEQUENCES,
+            ["<|im_end|>", "<|endoftext|>"]
+        );
+    }
+
+    #[test]
+    fn stop_reason_log_values_match_expected_strings() {
+        assert_eq!(
+            InferenceStopReason::MaxTokensReached.as_log_value(),
+            "max_tokens reached"
+        );
+        assert_eq!(
+            InferenceStopReason::StopSequence("<|im_end|>".to_string()).as_log_value(),
+            "stop_sequence: <|im_end|>"
+        );
+        assert_eq!(InferenceStopReason::EosToken.as_log_value(), "eos_token");
+        assert_eq!(
+            InferenceStopReason::NaturalEnd.as_log_value(),
+            "natural_end"
+        );
     }
 }

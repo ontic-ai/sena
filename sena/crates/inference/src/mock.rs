@@ -6,8 +6,9 @@
 use crate::backend::InferenceBackend;
 use crate::error::InferenceError;
 use crate::stream::InferenceStream;
-use crate::types::{BackendType, InferenceParams};
+use crate::types::{BackendType, GenerationDiagnostics, InferenceParams, InferenceStopReason};
 use async_trait::async_trait;
+use std::sync::Mutex;
 use tracing::debug;
 
 /// Configuration for the mock backend.
@@ -43,6 +44,7 @@ impl Default for MockConfig {
 /// GPU/model state is simulated via the `loaded` flag.
 pub struct MockBackend {
     config: MockConfig,
+    last_generation_diagnostics: Mutex<Option<GenerationDiagnostics>>,
 }
 
 impl MockBackend {
@@ -53,7 +55,10 @@ impl MockBackend {
     }
 
     pub fn new(config: MockConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            last_generation_diagnostics: Mutex::new(None),
+        }
     }
 
     /// Create a mock backend with default config (loaded = true, fixed response).
@@ -106,6 +111,10 @@ impl InferenceBackend for MockBackend {
         self.config.loaded
     }
 
+    fn model_name(&self) -> Option<&str> {
+        Some("mock-backend")
+    }
+
     async fn infer(
         &self,
         _prompt: String,
@@ -120,6 +129,15 @@ impl InferenceBackend for MockBackend {
         }
 
         debug!("MockBackend: returning canned response as token stream");
+
+        *self
+            .last_generation_diagnostics
+            .lock()
+            .expect("mock diagnostics mutex should not be poisoned") = Some(GenerationDiagnostics {
+            generated_token_count: 1,
+            stop_reason: InferenceStopReason::NaturalEnd,
+            raw_generated_text: self.config.response_text.clone(),
+        });
 
         let (tx, stream) = InferenceStream::channel(4);
         let response = self.config.response_text.clone();
@@ -160,6 +178,13 @@ impl InferenceBackend for MockBackend {
     async fn shutdown(&mut self) -> Result<(), InferenceError> {
         debug!("MockBackend: shutdown");
         Ok(())
+    }
+
+    fn take_generation_diagnostics(&self) -> Option<GenerationDiagnostics> {
+        self.last_generation_diagnostics
+            .lock()
+            .expect("mock diagnostics mutex should not be poisoned")
+            .take()
     }
 }
 
