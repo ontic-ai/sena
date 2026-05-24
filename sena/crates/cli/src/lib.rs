@@ -1,5 +1,6 @@
 //! CLI library components.
 
+mod commands;
 mod logging;
 mod terminal_window;
 

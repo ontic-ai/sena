@@ -1,3 +1,7 @@
+use crate::commands::{
+    self, CommandArgumentKind, HelpGroup, COMMANDS, HELP_LEFT_COLUMN_GROUPS,
+    HELP_RIGHT_COLUMN_GROUPS,
+};
 use crate::config_editor::ConfigEditor;
 use crate::daemon_client::{connect_to_daemon, start_daemon, wait_for_runtime_ready};
 use crate::error::CliError;
@@ -37,345 +41,154 @@ struct LoopInfo {
 
 const HELP_ESC_RESET_AFTER: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Copy, Debug)]
-struct HelpCommand {
-    command: &'static str,
-    description: &'static str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutocompleteItem {
+    Command(usize),
+    FixedArgument {
+        command_index: usize,
+        argument_index: usize,
+    },
 }
-
-#[derive(Clone, Copy, Debug)]
-struct HelpSection {
-    title: &'static str,
-    commands: &'static [HelpCommand],
-}
-
-const HELP_NAVIGATION_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/tree",
-        description: "Toggle full tree view vs live navigation view",
-    },
-    HelpCommand {
-        command: "/sri",
-        description: "Print full SRI node snapshot to signals panel",
-    },
-];
-
-const HELP_VOICE_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/say \"text\"",
-        description: "Speak text verbatim through TTS (audio test)",
-    },
-    HelpCommand {
-        command: "/run \"text\"",
-        description: "Run full inference pipeline as if spoken",
-    },
-];
-
-const HELP_SYSTEM_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/status",
-        description: "Show all actor health statuses",
-    },
-    HelpCommand {
-        command: "/ping",
-        description: "Show daemon uptime",
-    },
-    HelpCommand {
-        command: "/shutdown",
-        description: "Gracefully shut down the Sena daemon",
-    },
-    HelpCommand {
-        command: "/test-mode",
-        description: "Restart the daemon into actor selection mode",
-    },
-    HelpCommand {
-        command: "/listen",
-        description: "Enable voice input routing to inference",
-    },
-    HelpCommand {
-        command: "/stop",
-        description: "Disable voice input routing (mic stays open)",
-    },
-];
-
-const HELP_CONFIGURATION_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/config",
-        description: "Open the configuration editor",
-    },
-    HelpCommand {
-        command: "/models",
-        description: "List discovered GGUF models",
-    },
-    HelpCommand {
-        command: "/load \"path\"",
-        description: "Load a GGUF model from the given path",
-    },
-];
-
-const HELP_MEMORY_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/memory",
-        description: "Show memory store statistics",
-    },
-    HelpCommand {
-        command: "/query \"text\"",
-        description: "Query memory for relevant nodes",
-    },
-];
-
-const HELP_DEBUG_COMMANDS: &[HelpCommand] = &[
-    HelpCommand {
-        command: "/debug [name]",
-        description: "Enable verbose tracing for a named subsystem",
-    },
-    HelpCommand {
-        command: "/verbose",
-        description: "Show last N transcriptions and responses",
-    },
-    HelpCommand {
-        command: "/loops",
-        description: "Show CTP loop status and trigger history",
-    },
-];
-
-const HELP_OTHER_COMMANDS: &[HelpCommand] = &[HelpCommand {
-    command: "/help",
-    description: "Show this screen",
-}];
-
-const HELP_OVERLAY_SECTIONS: &[HelpSection] = &[
-    HelpSection {
-        title: "Navigation",
-        commands: HELP_NAVIGATION_COMMANDS,
-    },
-    HelpSection {
-        title: "Voice & Inference",
-        commands: HELP_VOICE_COMMANDS,
-    },
-    HelpSection {
-        title: "System",
-        commands: HELP_SYSTEM_COMMANDS,
-    },
-    HelpSection {
-        title: "Configuration",
-        commands: HELP_CONFIGURATION_COMMANDS,
-    },
-    HelpSection {
-        title: "Memory",
-        commands: HELP_MEMORY_COMMANDS,
-    },
-    HelpSection {
-        title: "Debug",
-        commands: HELP_DEBUG_COMMANDS,
-    },
-    HelpSection {
-        title: "Other",
-        commands: HELP_OTHER_COMMANDS,
-    },
-];
-
-const HELP_LEFT_COLUMN_SECTION_INDEXES: &[usize] = &[0, 1, 2, 6];
-const HELP_RIGHT_COLUMN_SECTION_INDEXES: &[usize] = &[3, 4, 5];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommandCategory {
-    Core,
-    Speech,
-    Models,
-    Memory,
-    Runtime,
+enum AutocompleteKind {
+    Commands,
+    FixedArguments { command_index: usize },
 }
-
-impl CommandCategory {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Core => "Core",
-            Self::Speech => "Speech",
-            Self::Models => "Models",
-            Self::Memory => "Memory",
-            Self::Runtime => "Runtime",
-        }
-    }
-}
-
-struct SlashCommand {
-    command: &'static str,
-    description: &'static str,
-    category: CommandCategory,
-}
-
-const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        command: "/help",
-        description: "Show the command guide",
-        category: CommandCategory::Core,
-    },
-    SlashCommand {
-        command: "/status",
-        description: "Show daemon and actor status",
-        category: CommandCategory::Core,
-    },
-    SlashCommand {
-        command: "/quit",
-        description: "Close the CLI",
-        category: CommandCategory::Core,
-    },
-    SlashCommand {
-        command: "/listen",
-        description: "Start live transcription",
-        category: CommandCategory::Speech,
-    },
-    SlashCommand {
-        command: "/stop",
-        description: "Stop listening",
-        category: CommandCategory::Speech,
-    },
-    SlashCommand {
-        command: "/say",
-        description: "Speak text verbatim through TTS",
-        category: CommandCategory::Speech,
-    },
-    SlashCommand {
-        command: "/run",
-        description: "Run full inference pipeline as if spoken",
-        category: CommandCategory::Speech,
-    },
-    SlashCommand {
-        command: "/speech",
-        description: "Show speech status",
-        category: CommandCategory::Speech,
-    },
-    SlashCommand {
-        command: "/models",
-        description: "Open the model picker",
-        category: CommandCategory::Models,
-    },
-    SlashCommand {
-        command: "/model load",
-        description: "Load a model by path",
-        category: CommandCategory::Models,
-    },
-    SlashCommand {
-        command: "/inference",
-        description: "Show inference status",
-        category: CommandCategory::Models,
-    },
-    SlashCommand {
-        command: "/observation",
-        description: "Show current observation snapshot",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/memory",
-        description: "Show remembered user context",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/memory-stats",
-        description: "Show memory stats",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/explanation",
-        description: "Explain a thought by id",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/query",
-        description: "Search memory",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/config",
-        description: "Open config editor",
-        category: CommandCategory::Memory,
-    },
-    SlashCommand {
-        command: "/loops",
-        description: "List background loops",
-        category: CommandCategory::Runtime,
-    },
-    SlashCommand {
-        command: "/tree",
-        description: "Toggle live vs full tree expansion",
-        category: CommandCategory::Runtime,
-    },
-    SlashCommand {
-        command: "/sri",
-        description: "Dump the current SRI snapshot",
-        category: CommandCategory::Runtime,
-    },
-    SlashCommand {
-        command: "/events",
-        description: "Subscribe to daemon events",
-        category: CommandCategory::Runtime,
-    },
-    SlashCommand {
-        command: "/shutdown",
-        description: "Shut down the daemon",
-        category: CommandCategory::Runtime,
-    },
-    SlashCommand {
-        command: "/test-mode",
-        description: "Restart into actor selection mode",
-        category: CommandCategory::Runtime,
-    },
-];
 
 #[derive(Clone, Debug)]
-struct SlashDropdown {
-    filtered: Vec<usize>,
+struct AutocompleteState {
+    kind: AutocompleteKind,
+    items: Vec<AutocompleteItem>,
     selected: usize,
+    scroll_offset: usize,
     no_matches: bool,
+    navigation_engaged: bool,
 }
 
-impl SlashDropdown {
-    fn from_prefix(prefix: &str) -> Self {
-        let filtered = SLASH_COMMANDS
+impl AutocompleteState {
+    const MAX_VISIBLE_ITEMS: usize = 8;
+
+    fn from_input(input: &str) -> Option<Self> {
+        let trimmed = input.trim_start();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+
+        if let Some((command, remainder)) = trimmed.split_once(' ')
+            && let Some((command_index, spec)) = commands::find_command(command)
+        {
+            return match spec.argument_kind {
+                CommandArgumentKind::FixedList(_) => {
+                    Some(Self::fixed_arguments(command_index, remainder.trim_start(), false))
+                }
+                CommandArgumentKind::None | CommandArgumentKind::FreeText => None,
+            };
+        }
+
+        Some(Self::command_matches(trimmed))
+    }
+
+    fn command_matches(prefix: &str) -> Self {
+        let items = COMMANDS
             .iter()
             .enumerate()
             .filter(|(_, command)| command.command.starts_with(prefix))
-            .map(|(index, _)| index)
+            .map(|(index, _)| AutocompleteItem::Command(index))
             .collect::<Vec<_>>();
-        let no_matches = filtered.is_empty() && !prefix.is_empty() && prefix != "/";
+
         Self {
-            filtered,
+            kind: AutocompleteKind::Commands,
+            no_matches: items.is_empty() && !prefix.is_empty() && prefix != "/",
+            items,
             selected: 0,
-            no_matches,
+            scroll_offset: 0,
+            navigation_engaged: false,
         }
     }
 
-    fn update(&mut self, prefix: &str) {
-        *self = Self::from_prefix(prefix);
+    fn fixed_arguments(command_index: usize, prefix: &str, navigation_engaged: bool) -> Self {
+        let items = COMMANDS[command_index]
+            .fixed_arguments()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(|(_, argument)| argument.value.starts_with(prefix))
+            .map(|(argument_index, _)| AutocompleteItem::FixedArgument {
+                command_index,
+                argument_index,
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            kind: AutocompleteKind::FixedArguments { command_index },
+            no_matches: items.is_empty() && !prefix.is_empty(),
+            items,
+            selected: 0,
+            scroll_offset: 0,
+            navigation_engaged,
+        }
     }
 
     fn next(&mut self) {
-        if !self.filtered.is_empty() {
-            self.selected = (self.selected + 1) % self.filtered.len();
+        if self.items.is_empty() {
+            return;
         }
+
+        self.navigation_engaged = true;
+        if self.selected + 1 < self.items.len() {
+            self.selected += 1;
+        }
+        self.sync_scroll();
     }
 
     fn prev(&mut self) {
-        if self.filtered.is_empty() {
+        if self.items.is_empty() {
             return;
         }
-        if self.selected == 0 {
-            self.selected = self.filtered.len() - 1;
-        } else {
+
+        self.navigation_engaged = true;
+        if self.selected > 0 {
             self.selected -= 1;
+        }
+        self.sync_scroll();
+    }
+
+    fn selected_item(&self) -> Option<AutocompleteItem> {
+        self.items.get(self.selected).copied()
+    }
+
+    fn visible_items(&self) -> &[AutocompleteItem] {
+        let end = (self.scroll_offset + Self::MAX_VISIBLE_ITEMS).min(self.items.len());
+        &self.items[self.scroll_offset..end]
+    }
+
+    fn title(&self) -> String {
+        match self.kind {
+            AutocompleteKind::Commands => "Command Helper".to_string(),
+            AutocompleteKind::FixedArguments { command_index } => {
+                format!("{} options", COMMANDS[command_index].command)
+            }
         }
     }
 
-    fn selected_command(&self) -> Option<&'static str> {
-        self.filtered
-            .get(self.selected)
-            .and_then(|&index| SLASH_COMMANDS.get(index))
-            .map(|command| command.command)
+    fn no_matches_label(&self) -> &'static str {
+        match self.kind {
+            AutocompleteKind::Commands => "No matching commands",
+            AutocompleteKind::FixedArguments { .. } => "No matching options",
+        }
+    }
+
+    fn sync_scroll(&mut self) {
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + Self::MAX_VISIBLE_ITEMS {
+            self.scroll_offset = self.selected + 1 - Self::MAX_VISIBLE_ITEMS;
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.filtered.is_empty()
+        self.items.is_empty()
     }
 }
 
@@ -464,7 +277,7 @@ struct ShellRenderState<'a> {
     log_scroll: usize,
     sri_panel: Option<&'a SriPanelState>,
     full_tree: bool,
-    slash_dropdown: Option<&'a SlashDropdown>,
+    autocomplete: Option<&'a AutocompleteState>,
     modal: Option<&'a ModalState>,
 }
 
@@ -484,7 +297,7 @@ pub struct Shell {
     log_scroll: usize,
     quit_armed: bool,
     full_tree: bool,
-    slash_dropdown: Option<SlashDropdown>,
+    autocomplete: Option<AutocompleteState>,
     modal: Option<ModalState>,
 }
 
@@ -678,7 +491,7 @@ impl Shell {
             log_scroll: 0,
             quit_armed: false,
             full_tree: false,
-            slash_dropdown: None,
+            autocomplete: None,
             modal: None,
         })
     }
@@ -862,7 +675,7 @@ impl Shell {
                     log_scroll: self.log_scroll,
                     sri_panel: Some(&panel),
                     full_tree: self.full_tree,
-                    slash_dropdown: self.slash_dropdown.as_ref(),
+                    autocomplete: self.autocomplete.as_ref(),
                     modal: self.modal.as_ref(),
                 },
             )
@@ -901,7 +714,7 @@ impl Shell {
                         log_scroll: self.log_scroll,
                         sri_panel: Some(&panel),
                         full_tree: self.full_tree,
-                        slash_dropdown: self.slash_dropdown.as_ref(),
+                        autocomplete: self.autocomplete.as_ref(),
                         modal: self.modal.as_ref(),
                     },
                 )
@@ -924,36 +737,34 @@ impl Shell {
         }
 
         if self
-            .slash_dropdown
+            .autocomplete
             .as_ref()
-            .is_some_and(|dropdown| !dropdown.is_empty() || dropdown.no_matches)
+            .is_some_and(|autocomplete| !autocomplete.is_empty() || autocomplete.no_matches)
         {
             match code {
                 KeyCode::Up => {
-                    if let Some(dropdown) = &mut self.slash_dropdown {
-                        dropdown.prev();
+                    if let Some(autocomplete) = &mut self.autocomplete {
+                        autocomplete.prev();
                     }
                     return Ok(());
                 }
                 KeyCode::Down => {
-                    if let Some(dropdown) = &mut self.slash_dropdown {
-                        dropdown.next();
+                    if let Some(autocomplete) = &mut self.autocomplete {
+                        autocomplete.next();
                     }
                     return Ok(());
                 }
-                KeyCode::Tab => {
-                    if let Some(command) = self
-                        .slash_dropdown
+                KeyCode::Enter
+                    if self
+                        .autocomplete
                         .as_ref()
-                        .and_then(|dropdown| dropdown.selected_command())
-                    {
-                        self.input_buffer = command.to_string();
-                    }
-                    self.refresh_slash_dropdown();
+                        .is_some_and(|autocomplete| autocomplete.navigation_engaged) =>
+                {
+                    self.apply_autocomplete_selection().await?;
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    self.slash_dropdown = None;
+                    self.autocomplete = None;
                     return Ok(());
                 }
                 _ => {}
@@ -987,18 +798,14 @@ impl Shell {
             }
             KeyCode::Char(c) => {
                 self.input_buffer.push(c);
-                self.refresh_slash_dropdown();
+                self.refresh_autocomplete();
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
-                self.refresh_slash_dropdown();
+                self.refresh_autocomplete();
             }
             KeyCode::Enter => {
-                let input = self.input_buffer.clone();
-                self.input_buffer.clear();
-                self.slash_dropdown = None;
-                self.log_scroll = 0;
-                self.handle_input(input).await?;
+                self.submit_input_buffer().await?;
             }
             KeyCode::Up => {
                 let max_scroll = self.message_log.lock().map(|l| l.len()).unwrap_or(0);
@@ -1056,17 +863,69 @@ impl Shell {
         Ok(())
     }
 
-    fn refresh_slash_dropdown(&mut self) {
-        let prefix = self.input_buffer.split_whitespace().next().unwrap_or("");
-        if prefix.starts_with('/') {
-            if let Some(dropdown) = &mut self.slash_dropdown {
-                dropdown.update(prefix);
-            } else {
-                self.slash_dropdown = Some(SlashDropdown::from_prefix(prefix));
+    fn refresh_autocomplete(&mut self) {
+        self.autocomplete = AutocompleteState::from_input(&self.input_buffer);
+    }
+
+    async fn submit_input_buffer(&mut self) -> Result<(), CliError> {
+        let input = std::mem::take(&mut self.input_buffer);
+        self.autocomplete = None;
+        self.log_scroll = 0;
+        self.handle_input(input).await
+    }
+
+    async fn apply_autocomplete_selection(&mut self) -> Result<(), CliError> {
+        let Some(selected_item) = self
+            .autocomplete
+            .as_ref()
+            .and_then(|autocomplete| autocomplete.selected_item())
+        else {
+            return Ok(());
+        };
+
+        match selected_item {
+            AutocompleteItem::Command(command_index) => {
+                let command = COMMANDS[command_index];
+                self.input_buffer.clear();
+                self.input_buffer.push_str(command.command);
+
+                match command.argument_kind {
+                    CommandArgumentKind::None => {
+                        self.autocomplete = None;
+                        self.submit_input_buffer().await?;
+                    }
+                    CommandArgumentKind::FreeText => {
+                        self.input_buffer.push(' ');
+                        self.autocomplete = None;
+                    }
+                    CommandArgumentKind::FixedList(_) => {
+                        self.input_buffer.push(' ');
+                        self.autocomplete = Some(AutocompleteState::fixed_arguments(
+                            command_index,
+                            "",
+                            true,
+                        ));
+                    }
+                }
             }
-        } else {
-            self.slash_dropdown = None;
+            AutocompleteItem::FixedArgument {
+                command_index,
+                argument_index,
+            } => {
+                let argument = COMMANDS[command_index]
+                    .fixed_arguments()
+                    .and_then(|arguments| arguments.get(argument_index))
+                    .copied();
+
+                if let Some(argument) = argument {
+                    self.input_buffer =
+                        format!("{} {}", COMMANDS[command_index].command, argument.value);
+                }
+                self.autocomplete = None;
+            }
         }
+
+        Ok(())
     }
 
     fn sync_uptime(&mut self, uptime_secs: u64) {
@@ -1078,9 +937,17 @@ impl Shell {
         self.daemon_uptime_secs + self.daemon_uptime_anchor.elapsed().as_secs()
     }
 
-    fn parse_quoted_command_text(input: &str, command: &str) -> Option<String> {
+    fn parse_command_text(input: &str, command: &str) -> Option<String> {
         let remainder = input.trim().strip_prefix(command)?.trim();
-        let text = remainder.strip_prefix('"')?.strip_suffix('"')?;
+        if remainder.is_empty() {
+            return None;
+        }
+
+        let text = if let Some(quoted) = remainder.strip_prefix('"').and_then(|text| text.strip_suffix('"')) {
+            quoted
+        } else {
+            remainder
+        };
 
         if text.trim().is_empty() {
             None
@@ -1104,16 +971,23 @@ impl Shell {
             "/quit" | "/exit" | "/bye" => {
                 self.should_quit = true;
             }
+            "/tab" => self.cmd_tab(parts.get(1).copied()).await?,
             "/status" | "/health" => self.cmd_status().await?,
             "/ping" | "/uptime" => self.cmd_ping().await?,
             "/shutdown" => self.cmd_shutdown().await?,
             "/test-mode" => self.cmd_test_mode().await?,
             "/models" => self.cmd_open_model_modal().await?,
             "/model" => match parts.get(1).copied() {
-                Some("load") => self.cmd_load_model(parts.get(2).copied()).await?,
+                Some("load") => {
+                    let path = Self::parse_command_text(input, "/model load");
+                    self.cmd_load_model(path.as_deref()).await?
+                }
                 _ => self.cmd_open_model_modal().await?,
             },
-            "/load" => self.cmd_load_model(parts.get(1).copied()).await?,
+            "/load" => {
+                let path = Self::parse_command_text(input, "/load");
+                self.cmd_load_model(path.as_deref()).await?
+            }
             "/listen" | "/mic" => self.cmd_listen_start().await?,
             "/stop" | "/end" => self.cmd_listen_stop().await?,
             "/say" => self.cmd_say(input).await?,
@@ -1121,6 +995,7 @@ impl Shell {
             "/observation" | "/obs" => self.cmd_observation().await?,
             "/memory" | "/mem" => self.cmd_transparency_memory().await?,
             "/memory-stats" | "/memstats" => self.cmd_memory_stats().await?,
+            "/debug" => self.cmd_debug(parts.get(1).copied()),
             "/explanation" | "/explain" => self.cmd_explanation(&parts[1..]).await?,
             "/query" | "/search" | "/recall" => self.cmd_memory_query(&parts[1..]).await?,
             "/config" | "/settings" => self.open_config_editor().await?,
@@ -1152,6 +1027,27 @@ impl Shell {
 
     async fn cmd_help(&mut self) -> Result<(), CliError> {
         self.modal = Some(ModalState::Help(HelpOverlayState::default()));
+        Ok(())
+    }
+
+    async fn cmd_tab(&mut self, name: Option<&str>) -> Result<(), CliError> {
+        let Some(name) = name else {
+            self.log_message("Usage: /tab <diag|config|actors|resources>".to_string());
+            return Ok(());
+        };
+
+        if commands::find_fixed_argument("/tab", name).is_none() {
+            self.log_message(format!(
+                "Unknown tab '{}'. Use diag, config, actors, or resources.",
+                name
+            ));
+            return Ok(());
+        }
+
+        self.log_message(format!(
+            "Tab '{}' is staged for separate-window launch in the next phase.",
+            name
+        ));
         Ok(())
     }
 
@@ -1309,8 +1205,8 @@ impl Shell {
     }
 
     async fn cmd_say(&mut self, input: &str) -> Result<(), CliError> {
-        let Some(text) = Self::parse_quoted_command_text(input, "/say") else {
-            self.log_message("usage: /say \"text to speak\"".to_string());
+        let Some(text) = Self::parse_command_text(input, "/say") else {
+            self.log_message("usage: /say <text to speak>".to_string());
             return Ok(());
         };
 
@@ -1323,8 +1219,8 @@ impl Shell {
     }
 
     async fn cmd_run(&mut self, input: &str) -> Result<(), CliError> {
-        let Some(text) = Self::parse_quoted_command_text(input, "/run") else {
-            self.log_message("usage: /run \"text to process\"".to_string());
+        let Some(text) = Self::parse_command_text(input, "/run") else {
+            self.log_message("usage: /run <text to process>".to_string());
             return Ok(());
         };
 
@@ -1398,6 +1294,28 @@ impl Shell {
             Err(e) => self.log_message(format!("Could not search memory: {}", e)),
         }
         Ok(())
+    }
+
+    fn cmd_debug(&mut self, subsystem: Option<&str>) {
+        let Some(subsystem) = subsystem else {
+            self.log_message(
+                "Usage: /debug <inference|speech|memory|ctp|soul|platform|sri>".to_string(),
+            );
+            return;
+        };
+
+        if commands::find_fixed_argument("/debug", subsystem).is_none() {
+            self.log_message(format!(
+                "Unknown debug target '{}'. Use inference, speech, memory, ctp, soul, platform, or sri.",
+                subsystem
+            ));
+            return;
+        }
+
+        self.log_message(format!(
+            "Debug tracing hint set to '{}'. Runtime log-level hot swap is not wired yet.",
+            subsystem
+        ));
     }
 
     async fn cmd_events_subscribe(&mut self) -> Result<(), CliError> {
@@ -1940,7 +1858,7 @@ impl Shell {
             );
 
             if render.modal.is_none() {
-                Self::render_slash_dropdown(frame, vertical[2], render.slash_dropdown);
+                Self::render_autocomplete(frame, vertical[2], render.autocomplete);
             }
             if let Some(modal_state) = render.modal {
                 Self::render_modal(frame, modal_state);
@@ -2320,65 +2238,86 @@ impl Shell {
         frame.render_widget(input, area);
     }
 
-    fn render_slash_dropdown(
+    fn render_autocomplete(
         frame: &mut Frame,
         input_area: Rect,
-        slash_dropdown: Option<&SlashDropdown>,
+        autocomplete: Option<&AutocompleteState>,
     ) {
-        let Some(dropdown) = slash_dropdown else {
+        let Some(autocomplete) = autocomplete else {
             return;
         };
 
-        if dropdown.no_matches {
+        if autocomplete.no_matches {
+            let panel_title = autocomplete.title();
             let popup_area = Rect {
                 x: input_area.x + 1,
                 y: input_area.y.saturating_sub(3),
-                width: 34u16.min(frame.area().width.saturating_sub(2)),
+                width: 40u16.min(frame.area().width.saturating_sub(2)),
                 height: 3,
             };
             frame.render_widget(Clear, popup_area);
             let panel = Paragraph::new(Line::from(Span::styled(
-                "No matching commands",
+                autocomplete.no_matches_label(),
                 theme::muted(),
             )))
-            .block(theme::panel("Command Helper"));
+            .block(theme::panel(&panel_title));
             frame.render_widget(panel, popup_area);
             return;
         }
 
-        if dropdown.is_empty() {
+        if autocomplete.is_empty() {
             return;
         }
 
-        let visible_count = dropdown.filtered.len().min(6);
+        let visible_items = autocomplete.visible_items();
+        let visible_count = visible_items.len();
         let popup_area = Rect {
             x: input_area.x + 1,
             y: input_area.y.saturating_sub((visible_count + 2) as u16),
-            width: 58u16.min(frame.area().width.saturating_sub(2)),
+            width: 64u16.min(frame.area().width.saturating_sub(2)),
             height: (visible_count + 2) as u16,
         };
         frame.render_widget(Clear, popup_area);
 
-        let items = dropdown
-            .filtered
+        let items = visible_items
             .iter()
-            .take(visible_count)
-            .map(|&index| {
-                let command = &SLASH_COMMANDS[index];
+            .map(|item| {
+                let (label, description) = match item {
+                    AutocompleteItem::Command(index) => {
+                        let command = &COMMANDS[*index];
+                        (command.command, command.description)
+                    }
+                    AutocompleteItem::FixedArgument {
+                        command_index,
+                        argument_index,
+                    } => {
+                        let argument = COMMANDS[*command_index]
+                            .fixed_arguments()
+                            .and_then(|arguments| arguments.get(*argument_index))
+                            .copied()
+                            .expect("fixed argument should exist");
+                        (argument.value, argument.description)
+                    }
+                };
+
                 ListItem::new(Line::from(vec![
-                    Span::styled(command.command, theme::title_style()),
+                    Span::styled(format!("{: <12}", label), theme::title_style()),
                     Span::styled("  ", theme::text()),
-                    Span::styled(format!("[{}]", command.category.label()), theme::muted()),
-                    Span::styled("  ", theme::text()),
-                    Span::styled(command.description, theme::text()),
+                    Span::styled(description, theme::text()),
                 ]))
             })
             .collect::<Vec<_>>();
 
         let mut state = ListState::default();
-        state.select(Some(dropdown.selected.min(visible_count.saturating_sub(1))));
+        state.select(Some(
+            autocomplete
+                .selected
+                .saturating_sub(autocomplete.scroll_offset)
+                .min(visible_count.saturating_sub(1)),
+        ));
+        let panel_title = autocomplete.title();
         let list = List::new(items)
-            .block(theme::focused_panel("Command Helper"))
+            .block(theme::focused_panel(&panel_title))
             .highlight_style(theme::selected());
         frame.render_stateful_widget(list, popup_area, &mut state);
     }
@@ -2422,16 +2361,12 @@ impl Shell {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(sections[1]);
 
-        let left = Paragraph::new(Self::help_overlay_column_lines(
-            HELP_LEFT_COLUMN_SECTION_INDEXES,
-        ))
+        let left = Paragraph::new(Self::help_overlay_column_lines(HELP_LEFT_COLUMN_GROUPS))
         .style(theme::overlay_text())
         .wrap(Wrap { trim: false });
         frame.render_widget(left, columns[0]);
 
-        let right = Paragraph::new(Self::help_overlay_column_lines(
-            HELP_RIGHT_COLUMN_SECTION_INDEXES,
-        ))
+        let right = Paragraph::new(Self::help_overlay_column_lines(HELP_RIGHT_COLUMN_GROUPS))
         .style(theme::overlay_text())
         .wrap(Wrap { trim: false });
         frame.render_widget(right, columns[1]);
@@ -2451,24 +2386,22 @@ impl Shell {
         frame.render_widget(footer, sections[2]);
     }
 
-    fn help_overlay_column_lines(section_indexes: &[usize]) -> Vec<Line<'static>> {
+    fn help_overlay_column_lines(groups: &[HelpGroup]) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        for (column_index, section_index) in section_indexes.iter().enumerate() {
+        for (column_index, group) in groups.iter().enumerate() {
             if column_index > 0 {
                 lines.push(Line::from(String::new()));
             }
 
-            let section = &HELP_OVERLAY_SECTIONS[*section_index];
-
             lines.push(Line::from(Span::styled(
-                section.title,
+                group.title(),
                 theme::overlay_text()
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED),
             )));
 
-            for command in section.commands {
+            for command in commands::commands_in_group(*group) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("  {:<22}", command.command),
@@ -2548,58 +2481,110 @@ impl Drop for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELP_OVERLAY_SECTIONS, HelpOverlayState, SLASH_COMMANDS, Shell};
+    use super::{AutocompleteItem, AutocompleteState, HelpOverlayState, Shell};
+    use crate::commands::{CommandArgumentKind, COMMANDS, TAB_ARGUMENTS, find_command};
     use serde_json::json;
     use sri::SriResourceSnapshot;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn quoted_command_text_parses_balanced_quotes_only() {
+    fn command_text_parses_balanced_quotes_and_free_text() {
         assert_eq!(
-            Shell::parse_quoted_command_text("/say \"hello world\"", "/say"),
+            Shell::parse_command_text("/say \"hello world\"", "/say"),
             Some("hello world".to_string())
         );
         assert_eq!(
-            Shell::parse_quoted_command_text("/run \"  hi there  \"", "/run"),
+            Shell::parse_command_text("/run \"  hi there  \"", "/run"),
             Some("  hi there  ".to_string())
         );
-
-        assert_eq!(Shell::parse_quoted_command_text("/say", "/say"), None);
-        assert_eq!(Shell::parse_quoted_command_text("/say \"\"", "/say"), None);
         assert_eq!(
-            Shell::parse_quoted_command_text("/say hello world", "/say"),
-            None
+            Shell::parse_command_text("/run hello world", "/run"),
+            Some("hello world".to_string())
         );
         assert_eq!(
-            Shell::parse_quoted_command_text("/run \"unterminated", "/run"),
-            None
+            Shell::parse_command_text("/load C:/models/sena.gguf", "/load"),
+            Some("C:/models/sena.gguf".to_string())
+        );
+
+        assert_eq!(Shell::parse_command_text("/say", "/say"), None);
+        assert_eq!(Shell::parse_command_text("/say \"\"", "/say"), None);
+        assert_eq!(
+            Shell::parse_command_text("/run \"unterminated", "/run"),
+            Some("\"unterminated".to_string())
         );
     }
 
     #[test]
-    fn help_and_slash_catalog_include_say_and_run() {
-        assert!(HELP_OVERLAY_SECTIONS.iter().any(|section| {
-            section.commands.iter().any(|command| {
-                command.command == "/say \"text\""
-                    && command.description == "Speak text verbatim through TTS (audio test)"
+    fn command_registry_includes_say_run_and_tab() {
+        let (_, say) = find_command("/say").expect("/say should be registered");
+        let (_, run) = find_command("/run").expect("/run should be registered");
+        let (_, tab) = find_command("/tab").expect("/tab should be registered");
+
+        assert_eq!(say.description, "Speak text verbatim through TTS (audio test)");
+        assert_eq!(run.description, "Run full inference pipeline as if spoken");
+        assert_eq!(tab.argument_kind, CommandArgumentKind::FixedList(TAB_ARGUMENTS));
+        assert!(COMMANDS.iter().any(|command| command.command == "/debug"));
+    }
+
+    #[test]
+    fn autocomplete_filters_commands_without_arming_enter_selection() {
+        let autocomplete = AutocompleteState::from_input("/t").expect("autocomplete should open");
+        let commands = autocomplete
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                AutocompleteItem::Command(index) => Some(COMMANDS[*index].command),
+                AutocompleteItem::FixedArgument { .. } => None,
             })
-        }));
-        assert!(HELP_OVERLAY_SECTIONS.iter().any(|section| {
-            section.commands.iter().any(|command| {
-                command.command == "/run \"text\""
-                    && command.description == "Run full inference pipeline as if spoken"
+            .collect::<Vec<_>>();
+
+        assert!(!autocomplete.navigation_engaged);
+        assert!(autocomplete.visible_items().len() >= 2);
+        assert_eq!(autocomplete.selected_item(), Some(AutocompleteItem::Command(0)));
+        assert_eq!(commands.first().copied(), Some("/tab"));
+        assert!(commands.contains(&"/test-mode"));
+    }
+
+    #[test]
+    fn autocomplete_opens_fixed_argument_dropdown_for_tab() {
+        let autocomplete = AutocompleteState::from_input("/tab ").expect("tab args should open");
+
+        let values = autocomplete
+            .items
+            .iter()
+            .map(|item| match item {
+                AutocompleteItem::FixedArgument {
+                    command_index,
+                    argument_index,
+                } => COMMANDS[*command_index]
+                    .fixed_arguments()
+                    .and_then(|arguments| arguments.get(*argument_index))
+                    .expect("argument should exist")
+                    .value,
+                AutocompleteItem::Command(_) => "",
             })
-        }));
-        assert!(
-            SLASH_COMMANDS
-                .iter()
-                .any(|command| command.command == "/say")
-        );
-        assert!(
-            SLASH_COMMANDS
-                .iter()
-                .any(|command| command.command == "/run")
-        );
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, vec!["diag", "config", "actors", "resources"]);
+    }
+
+    #[test]
+    fn free_text_commands_skip_argument_dropdown() {
+        assert!(AutocompleteState::from_input("/run hello there").is_none());
+        assert!(AutocompleteState::from_input("/say hello there").is_none());
+        assert!(AutocompleteState::from_input("/query recent changes").is_none());
+    }
+
+    #[test]
+    fn autocomplete_scrolls_when_more_than_eight_items_are_visible() {
+        let mut autocomplete = AutocompleteState::from_input("/").expect("autocomplete should open");
+
+        assert_eq!(autocomplete.visible_items().len(), AutocompleteState::MAX_VISIBLE_ITEMS);
+        for _ in 0..AutocompleteState::MAX_VISIBLE_ITEMS {
+            autocomplete.next();
+        }
+
+        assert_eq!(autocomplete.scroll_offset, 1);
     }
 
     #[test]

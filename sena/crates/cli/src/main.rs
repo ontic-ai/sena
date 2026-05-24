@@ -7,6 +7,7 @@
 //! 3. Connects to daemon via IPC
 //! 4. Runs the TUI shell with IPC connection
 
+mod commands;
 mod daemon_client;
 mod config_editor;
 mod error;
