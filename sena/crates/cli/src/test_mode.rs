@@ -1,4 +1,4 @@
-use crate::{error::CliError, terminal_window};
+use crate::{error::CliError, tab_chrome, terminal_window};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -70,6 +70,7 @@ impl TestModeApp {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal =
             Terminal::new(backend).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
+        tab_chrome::prime_terminal(&mut terminal)?;
 
         let result = loop {
             terminal

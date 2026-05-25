@@ -79,6 +79,15 @@ impl AutocompleteState {
             return None;
         }
 
+        if let Some((command_index, spec)) = commands::find_command(trimmed) {
+            return match spec.argument_kind {
+                CommandArgumentKind::FixedList(_) => {
+                    Some(Self::fixed_arguments(command_index, "", false))
+                }
+                CommandArgumentKind::None | CommandArgumentKind::FreeText => None,
+            };
+        }
+
         if let Some((command, remainder)) = trimmed.split_once(' ')
             && let Some((command_index, spec)) = commands::find_command(command)
         {
@@ -194,6 +203,17 @@ impl AutocompleteState {
     fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    fn accepts_enter_without_navigation(&self) -> bool {
+        match self.kind {
+            AutocompleteKind::Commands => self.items.len() == 1,
+            AutocompleteKind::FixedArguments { .. } => !self.items.is_empty(),
+        }
+    }
+
+    fn should_apply_on_enter(&self) -> bool {
+        self.navigation_engaged || self.accepts_enter_without_navigation()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +303,8 @@ struct ShellRenderState<'a> {
     full_tree: bool,
     autocomplete: Option<&'a AutocompleteState>,
     modal: Option<&'a ModalState>,
+    close_confirmation_active: bool,
+    close_confirmation_remaining: u8,
 }
 
 pub struct Shell {
@@ -299,7 +321,7 @@ pub struct Shell {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     connection_alive: Arc<AtomicBool>,
     log_scroll: usize,
-    close_armed_at: Option<Instant>,
+    close_confirmation: tab_chrome::CloseConfirmation,
     full_tree: bool,
     autocomplete: Option<AutocompleteState>,
     modal: Option<ModalState>,
@@ -316,8 +338,9 @@ impl Shell {
         execute!(stdout, EnterAlternateScreen)
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let backend = CrosstermBackend::new(stdout);
-        let terminal =
+        let mut terminal =
             Terminal::new(backend).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
+        tab_chrome::prime_terminal(&mut terminal)?;
 
         let message_log = Arc::new(Mutex::new(vec![
             "Welcome to Sena CLI".to_string(),
@@ -418,6 +441,11 @@ impl Shell {
 
         tokio::spawn(async move {
             while let Some(event) = push_rx.recv().await {
+                if tab_chrome::is_shutdown_event(&event) {
+                    connection_alive_task.store(false, Ordering::SeqCst);
+                    break;
+                }
+
                 let stream = event
                     .get("stream")
                     .and_then(|value| value.as_str())
@@ -493,7 +521,7 @@ impl Shell {
             terminal,
             connection_alive,
             log_scroll: 0,
-            close_armed_at: None,
+            close_confirmation: tab_chrome::CloseConfirmation::new(),
             full_tree: false,
             autocomplete: None,
             modal: None,
@@ -681,6 +709,8 @@ impl Shell {
                     full_tree: self.full_tree,
                     autocomplete: self.autocomplete.as_ref(),
                     modal: self.modal.as_ref(),
+                    close_confirmation_active: self.close_confirmation.is_active(),
+                    close_confirmation_remaining: self.close_confirmation.remaining_seconds(),
                 },
             )
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
@@ -720,6 +750,8 @@ impl Shell {
                         full_tree: self.full_tree,
                         autocomplete: self.autocomplete.as_ref(),
                         modal: self.modal.as_ref(),
+                        close_confirmation_active: self.close_confirmation.is_active(),
+                        close_confirmation_remaining: self.close_confirmation.remaining_seconds(),
                     },
                 )
                 .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
@@ -736,6 +768,17 @@ impl Shell {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<(), CliError> {
+        match self.close_confirmation.handle_key(code, modifiers) {
+            tab_chrome::CloseAction::Confirmed => {
+                self.should_quit = true;
+                return Ok(());
+            }
+            tab_chrome::CloseAction::Armed | tab_chrome::CloseAction::Cancelled => {
+                return Ok(());
+            }
+            tab_chrome::CloseAction::Ignored => {}
+        }
+
         if self.modal.is_some() {
             return self.handle_modal_key_event(code).await;
         }
@@ -762,7 +805,7 @@ impl Shell {
                     if self
                         .autocomplete
                         .as_ref()
-                        .is_some_and(|autocomplete| autocomplete.navigation_engaged) =>
+                        .is_some_and(AutocompleteState::should_apply_on_enter) =>
                 {
                     self.apply_autocomplete_selection().await?;
                     return Ok(());
@@ -773,16 +816,6 @@ impl Shell {
                 }
                 _ => {}
             }
-        }
-
-        if tab_chrome::handle_double_ctrl_x(code, modifiers, &mut self.close_armed_at) {
-            self.should_quit = true;
-            return Ok(());
-        }
-
-        if tab_chrome::is_close_armed(self.close_armed_at) {
-            self.log_message("Press Ctrl+X again to close Sena.".to_string());
-            return Ok(());
         }
 
         match code {
@@ -1819,6 +1852,11 @@ impl Shell {
         render: ShellRenderState<'_>,
     ) -> Result<(), io::Error> {
         terminal.draw(|frame| {
+            if render.close_confirmation_active {
+                tab_chrome::render_close_confirmation(frame, render.close_confirmation_remaining);
+                return;
+            }
+
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -1835,7 +1873,7 @@ impl Shell {
                 "LIVE",
                 render.daemon_status,
                 render.daemon_uptime_secs,
-                None,
+                Some(tab_chrome::close_hint()),
             );
 
             let top = Layout::default()
@@ -2554,8 +2592,8 @@ mod tests {
     }
 
     #[test]
-    fn autocomplete_opens_fixed_argument_dropdown_for_tab() {
-        let autocomplete = AutocompleteState::from_input("/tab ").expect("tab args should open");
+    fn autocomplete_opens_fixed_argument_dropdown_for_exact_tab_command() {
+        let autocomplete = AutocompleteState::from_input("/tab").expect("tab args should open");
 
         let values = autocomplete
             .items
@@ -2574,6 +2612,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(values, vec!["diag", "config", "actors", "resources"]);
+        assert!(autocomplete.accepts_enter_without_navigation());
+    }
+
+    #[test]
+    fn autocomplete_accepts_implicit_enter_for_single_command_match() {
+        let autocomplete =
+            AutocompleteState::from_input("/ta").expect("autocomplete should open for /ta");
+
+        assert_eq!(autocomplete.items.len(), 1);
+        assert_eq!(autocomplete.selected_item(), Some(AutocompleteItem::Command(0)));
+        assert!(autocomplete.accepts_enter_without_navigation());
     }
 
     #[test]

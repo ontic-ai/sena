@@ -14,6 +14,10 @@ use ratatui::{
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -64,7 +68,8 @@ struct ActorsTab {
     status_line: String,
     daemon_uptime_secs: u64,
     daemon_uptime_anchor: Instant,
-    close_armed_at: Option<Instant>,
+    close_confirmation: tab_chrome::CloseConfirmation,
+    connection_alive: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -137,12 +142,17 @@ impl ActorsTab {
             },
             daemon_uptime_secs: runtime_status.uptime_seconds,
             daemon_uptime_anchor: Instant::now(),
-            close_armed_at: None,
+            close_confirmation: tab_chrome::CloseConfirmation::new(),
+            connection_alive: tab_chrome::watch_daemon_connection(ipc),
         })
     }
 
     fn run_loop(&mut self) -> Result<ActorsOutcome, CliError> {
         loop {
+            if !self.connection_alive.load(Ordering::SeqCst) {
+                return Ok(ActorsOutcome::Close);
+            }
+
             self.render()?;
 
             if event::poll(Duration::from_millis(100))
@@ -151,12 +161,11 @@ impl ActorsTab {
                     event::read().map_err(|e| CliError::TuiRenderError(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
-                if tab_chrome::handle_double_ctrl_x(
-                    key.code,
-                    key.modifiers,
-                    &mut self.close_armed_at,
-                ) {
-                    return Ok(ActorsOutcome::Close);
+                match self.close_confirmation.handle_key(key.code, key.modifiers) {
+                    tab_chrome::CloseAction::Confirmed => return Ok(ActorsOutcome::Close),
+                    tab_chrome::CloseAction::Armed
+                    | tab_chrome::CloseAction::Cancelled => continue,
+                    tab_chrome::CloseAction::Ignored => {}
                 }
 
                 match key.code {
@@ -189,11 +198,7 @@ impl ActorsTab {
             health_by_id: self.health_by_id.clone(),
             cursor: self.cursor,
             focus: self.focus,
-            status_line: if tab_chrome::is_close_armed(self.close_armed_at) {
-                "Press Ctrl+X again to close this tab.".to_string()
-            } else {
-                self.status_line.clone()
-            },
+            status_line: self.status_line.clone(),
         };
 
         self.terminal
@@ -202,7 +207,7 @@ impl ActorsTab {
                     frame,
                     &render_state,
                     daemon_uptime_secs,
-                    self.close_armed_at,
+                    &self.close_confirmation,
                 )
             })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
@@ -213,8 +218,13 @@ impl ActorsTab {
         frame: &mut Frame,
         state: &ActorsRenderState,
         daemon_uptime_secs: u64,
-        close_armed_at: Option<Instant>,
+        close_confirmation: &tab_chrome::CloseConfirmation,
     ) {
+        if close_confirmation.is_active() {
+            tab_chrome::render_close_confirmation(frame, close_confirmation.remaining_seconds());
+            return;
+        }
+
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)])
@@ -230,7 +240,7 @@ impl ActorsTab {
             "ACTORS",
             "Connected",
             daemon_uptime_secs,
-            Some(tab_chrome::close_hint(close_armed_at)),
+            Some(tab_chrome::close_hint()),
         );
 
         let items: Vec<ListItem> = state

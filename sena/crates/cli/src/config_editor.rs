@@ -17,6 +17,10 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::io;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -45,7 +49,8 @@ pub struct ConfigEditor<'a> {
     status_line: String,
     should_exit: bool,
     exit_armed: bool,
-    close_armed_at: Option<Instant>,
+    close_confirmation: tab_chrome::CloseConfirmation,
+    connection_alive: Arc<AtomicBool>,
     show_tab_header: bool,
 }
 
@@ -60,7 +65,8 @@ impl<'a> ConfigEditor<'a> {
             status_line: "Loading config...".to_string(),
             should_exit: false,
             exit_armed: false,
-            close_armed_at: None,
+            close_confirmation: tab_chrome::CloseConfirmation::new(),
+            connection_alive: Arc::new(AtomicBool::new(true)),
             show_tab_header: false,
         }
     }
@@ -86,8 +92,15 @@ impl<'a> ConfigEditor<'a> {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal =
             Terminal::new(backend).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
+        tab_chrome::prime_terminal(&mut terminal)?;
+        self.connection_alive = tab_chrome::watch_daemon_connection(self.ipc);
 
         while !self.should_exit {
+            if !self.connection_alive.load(Ordering::SeqCst) {
+                self.should_exit = true;
+                continue;
+            }
+
             self.render(&mut terminal)?;
 
             if event::poll(std::time::Duration::from_millis(100))
@@ -246,14 +259,15 @@ impl<'a> ConfigEditor<'a> {
 
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<(), CliError> {
         if self.show_tab_header {
-            if tab_chrome::handle_double_ctrl_x(code, modifiers, &mut self.close_armed_at) {
-                self.should_exit = true;
-                return Ok(());
-            }
-
-            if tab_chrome::is_close_armed(self.close_armed_at) {
-                self.status_line = "Press Ctrl+X again to close this tab.".to_string();
-                return Ok(());
+            match self.close_confirmation.handle_key(code, modifiers) {
+                tab_chrome::CloseAction::Confirmed => {
+                    self.should_exit = true;
+                    return Ok(());
+                }
+                tab_chrome::CloseAction::Armed | tab_chrome::CloseAction::Cancelled => {
+                    return Ok(());
+                }
+                tab_chrome::CloseAction::Ignored => {}
             }
         }
 
@@ -409,6 +423,14 @@ impl<'a> ConfigEditor<'a> {
     ) -> Result<(), CliError> {
         terminal
             .draw(|frame| {
+                if self.close_confirmation.is_active() {
+                    tab_chrome::render_close_confirmation(
+                        frame,
+                        self.close_confirmation.remaining_seconds(),
+                    );
+                    return;
+                }
+
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -426,7 +448,7 @@ impl<'a> ConfigEditor<'a> {
                         "CONFIG",
                         "Connected",
                         0,
-                        Some(tab_chrome::close_hint(self.close_armed_at)),
+                        Some(tab_chrome::close_hint()),
                     );
                 }
 

@@ -48,7 +48,7 @@ struct ResourcesTab {
     connection_alive: Arc<AtomicBool>,
     daemon_uptime_secs: u64,
     daemon_uptime_anchor: Instant,
-    close_armed_at: Option<Instant>,
+    close_confirmation: tab_chrome::CloseConfirmation,
 }
 
 pub async fn run(mut ipc: IpcClient) -> Result<(), CliError> {
@@ -95,6 +95,10 @@ impl ResourcesTab {
 
         tokio::spawn(async move {
             while let Some(event) = push_rx.recv().await {
+                if tab_chrome::is_shutdown_event(&event) {
+                    break;
+                }
+
                 if event
                     .get("stream")
                     .and_then(|value| value.as_str())
@@ -153,12 +157,16 @@ impl ResourcesTab {
             connection_alive,
             daemon_uptime_secs,
             daemon_uptime_anchor: Instant::now(),
-            close_armed_at: None,
+            close_confirmation: tab_chrome::CloseConfirmation::new(),
         })
     }
 
     fn run_loop(&mut self) -> Result<(), CliError> {
         loop {
+            if !self.connection_alive.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
             self.render()?;
 
             if event::poll(Duration::from_millis(100))
@@ -167,12 +175,11 @@ impl ResourcesTab {
                     event::read().map_err(|e| CliError::TuiRenderError(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
-                if tab_chrome::handle_double_ctrl_x(
-                    key.code,
-                    key.modifiers,
-                    &mut self.close_armed_at,
-                ) {
-                    return Ok(());
+                match self.close_confirmation.handle_key(key.code, key.modifiers) {
+                    tab_chrome::CloseAction::Confirmed => return Ok(()),
+                    tab_chrome::CloseAction::Armed
+                    | tab_chrome::CloseAction::Cancelled => continue,
+                    tab_chrome::CloseAction::Ignored => {}
                 }
             }
         }
@@ -204,7 +211,7 @@ impl ResourcesTab {
                     &state,
                     daemon_status,
                     daemon_uptime_secs,
-                    self.close_armed_at,
+                    &self.close_confirmation,
                 )
             })
             .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
@@ -217,8 +224,13 @@ impl ResourcesTab {
         state: &ResourceState,
         daemon_status: &str,
         daemon_uptime_secs: u64,
-        close_armed_at: Option<Instant>,
+        close_confirmation: &tab_chrome::CloseConfirmation,
     ) {
+        if close_confirmation.is_active() {
+            tab_chrome::render_close_confirmation(frame, close_confirmation.remaining_seconds());
+            return;
+        }
+
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(7), Constraint::Min(0)])
@@ -238,7 +250,7 @@ impl ResourcesTab {
             "RESOURCES",
             daemon_status,
             daemon_uptime_secs,
-            Some(tab_chrome::close_hint(close_armed_at)),
+            Some(tab_chrome::close_hint()),
         );
 
         frame.render_widget(
@@ -260,7 +272,7 @@ impl ResourcesTab {
             lower_right[0],
         );
         frame.render_widget(
-            Paragraph::new(Line::from(tab_chrome::close_hint(close_armed_at)))
+            Paragraph::new(Line::from(tab_chrome::close_hint()))
                 .block(theme::panel("Status")),
             lower_right[1],
         );
