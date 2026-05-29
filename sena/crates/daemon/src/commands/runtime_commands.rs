@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
+struct BootSelectionState {
+    sender: Option<oneshot::Sender<runtime::ActorSelection>>,
+    pending_selection: Option<runtime::ActorSelection>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DaemonControlMessage {
     Shutdown,
@@ -23,7 +28,7 @@ pub struct RuntimeState {
     pub is_ready: Arc<AtomicBool>,
     pending_test_mode: Arc<AtomicBool>,
     selected_actors: Arc<RwLock<BTreeSet<String>>>,
-    boot_selection_tx: Arc<Mutex<Option<oneshot::Sender<runtime::ActorSelection>>>>,
+    boot_selection: Arc<Mutex<BootSelectionState>>,
 }
 
 impl RuntimeState {
@@ -33,7 +38,10 @@ impl RuntimeState {
             is_ready: Arc::new(AtomicBool::new(false)),
             pending_test_mode: Arc::new(AtomicBool::new(false)),
             selected_actors: Arc::new(RwLock::new(BTreeSet::new())),
-            boot_selection_tx: Arc::new(Mutex::new(None)),
+            boot_selection: Arc::new(Mutex::new(BootSelectionState {
+                sender: None,
+                pending_selection: None,
+            })),
         }
     }
 
@@ -87,29 +95,43 @@ impl RuntimeState {
         &self,
         sender: oneshot::Sender<runtime::ActorSelection>,
     ) {
-        let mut slot = self.boot_selection_tx.lock().await;
-        *slot = Some(sender);
+        let mut state = self.boot_selection.lock().await;
+        if let Some(selection) = state.pending_selection.take() {
+            drop(state);
+            let _ = sender.send(selection);
+            return;
+        }
+
+        state.sender = Some(sender);
     }
 
     pub async fn clear_boot_selection_sender(&self) {
-        let mut slot = self.boot_selection_tx.lock().await;
-        slot.take();
+        let mut state = self.boot_selection.lock().await;
+        state.sender.take();
+        state.pending_selection.take();
     }
 
     pub async fn submit_boot_selection(
         &self,
         selection: runtime::ActorSelection,
     ) -> Result<(), IpcError> {
-        let mut slot = self.boot_selection_tx.lock().await;
-        let Some(sender) = slot.take() else {
+        let mut state = self.boot_selection.lock().await;
+        if let Some(sender) = state.sender.take() {
+            sender.send(selection).map_err(|_| {
+                IpcError::CommandFailed("test mode selection receiver dropped".to_string())
+            })?;
+        } else if self.test_mode_pending() {
+            if state.pending_selection.is_some() {
+                return Err(IpcError::CommandFailed(
+                    "test mode selection already submitted".to_string(),
+                ));
+            }
+            state.pending_selection = Some(selection);
+        } else {
             return Err(IpcError::CommandFailed(
                 "test mode selection is not currently pending".to_string(),
             ));
-        };
-
-        sender.send(selection).map_err(|_| {
-            IpcError::CommandFailed("test mode selection receiver dropped".to_string())
-        })?;
+        }
         self.set_test_mode_pending(false);
         Ok(())
     }
@@ -592,5 +614,53 @@ impl CommandHandler for SubmitOnboardingConfigHandler {
             .ok();
 
         Ok(json!({ "success": true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn runtime_state_buffers_boot_selection_until_sender_is_installed() {
+        let state = RuntimeState::new();
+        state.set_test_mode_pending(true);
+
+        let selection = runtime::ActorSelection::try_from_ids(["soul", "inference"])
+            .expect("selection should build");
+        let expected_ids = selection.selected_ids();
+
+        state
+            .submit_boot_selection(selection)
+            .await
+            .expect("selection should buffer while test mode is pending");
+
+        let (tx, rx) = oneshot::channel();
+        state.install_boot_selection_sender(tx).await;
+
+        let delivered = tokio::time::timeout(Duration::from_millis(100), rx)
+            .await
+            .expect("selection delivery should not time out")
+            .expect("selection sender should succeed");
+
+        assert_eq!(delivered.selected_ids(), expected_ids);
+        assert!(!state.test_mode_pending());
+    }
+
+    #[tokio::test]
+    async fn runtime_state_rejects_boot_selection_when_not_pending() {
+        let state = RuntimeState::new();
+        let selection = runtime::ActorSelection::try_from_ids(["soul", "inference"])
+            .expect("selection should build");
+
+        let error = state
+            .submit_boot_selection(selection)
+            .await
+            .expect_err("selection should fail when test mode is not pending");
+
+        assert!(error
+            .to_string()
+            .contains("test mode selection is not currently pending"));
     }
 }
