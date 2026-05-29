@@ -6,8 +6,7 @@ use crate::backends::NativeBackend;
 use crate::error::PlatformError;
 use crate::monitor::VisionFrameCache;
 use crate::types::{
-    ClipboardDigest, FileEvent, FileEventKind, KeystrokeCadence, PlatformSignal,
-    WindowContext,
+    ClipboardDigest, FileEvent, FileEventKind, KeystrokeCadence, PlatformSignal, WindowContext,
 };
 use bus::events::platform::PlatformEvent;
 use bus::{Event, EventBus};
@@ -362,7 +361,9 @@ impl PlatformActor {
         let mut watcher = notify::recommended_watcher(move |result| {
             let _ = tx.send(result);
         })
-        .map_err(|error| PlatformError::OsError(format!("failed to create file watcher: {}", error)))?;
+        .map_err(|error| {
+            PlatformError::OsError(format!("failed to create file watcher: {}", error))
+        })?;
 
         let mut watched_count = 0usize;
         for path in watch_paths {
@@ -371,11 +372,9 @@ impl PlatformActor {
                 continue;
             }
 
-            watcher
-                .watch(path, watch_mode(path))
-                .map_err(|error| {
-                    PlatformError::OsError(format!("failed to watch {}: {}", path.display(), error))
-                })?;
+            watcher.watch(path, watch_mode(path)).map_err(|error| {
+                PlatformError::OsError(format!("failed to watch {}: {}", path.display(), error))
+            })?;
             watched_count += 1;
         }
 
@@ -496,7 +495,9 @@ mod tests {
         fn active_window(&self) -> Result<PlatformSignal, PlatformError> {
             let mut windows = self.windows.lock().expect("window sequence lock poisoned");
             let ctx = if windows.len() > 1 {
-                windows.pop_front().expect("window sequence should not be empty")
+                windows
+                    .pop_front()
+                    .expect("window sequence should not be empty")
             } else {
                 windows
                     .front()

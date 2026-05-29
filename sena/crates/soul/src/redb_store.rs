@@ -91,7 +91,8 @@ impl RedbSoulStore {
                 .map_err(db_error)?
                 .is_some();
 
-            let is_fresh_store = !schema_present && schema_initialized.is_none() && !next_row_id_present;
+            let is_fresh_store =
+                !schema_present && schema_initialized.is_none() && !next_row_id_present;
 
             if is_fresh_store {
                 let next_row_id = 1_u64.to_le_bytes();
@@ -518,7 +519,10 @@ mod tests {
 
         {
             let mut store = RedbSoulStore::open(&db_path).expect("open should succeed");
-            let mut schema = store.load_schema().expect("load should succeed").unwrap_or_default();
+            let mut schema = store
+                .load_schema()
+                .expect("load should succeed")
+                .unwrap_or_default();
             schema.session_count = 4;
             schema.name = "Sena".to_string();
             store.save_schema(&schema).expect("save should succeed");

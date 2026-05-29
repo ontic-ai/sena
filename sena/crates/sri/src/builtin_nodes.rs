@@ -42,7 +42,10 @@ pub fn scaffold_builtin_nodes() -> Vec<Box<dyn SriNode>> {
             display_name: "soul",
             description: "tone, style, and identity signals",
             function_stubs: &[
-                ("adapt_personality", "apply live warmth and verbosity changes"),
+                (
+                    "adapt_personality",
+                    "apply live warmth and verbosity changes",
+                ),
                 ("summarize_identity", "condense learned identity traits"),
             ],
         }),
@@ -60,7 +63,10 @@ pub fn scaffold_builtin_nodes() -> Vec<Box<dyn SriNode>> {
             display_name: "sight",
             description: "visual context intake placeholder",
             function_stubs: &[
-                ("capture_context", "collect visual context from the active window"),
+                (
+                    "capture_context",
+                    "collect visual context from the active window",
+                ),
                 ("analyze_scene", "derive scene semantics from visual input"),
             ],
         }),

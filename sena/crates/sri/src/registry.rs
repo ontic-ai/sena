@@ -108,12 +108,15 @@ fn build_tree(nodes: Vec<RegisteredSriNode>) -> SriTreeNode {
             }
             accumulated.push_str(segment);
 
-            cursor = cursor.children.entry(segment.to_string()).or_insert_with(|| BuildNode {
-                shelf_path: accumulated.clone(),
-                segment: segment.to_string(),
-                registered: None,
-                children: BTreeMap::new(),
-            });
+            cursor = cursor
+                .children
+                .entry(segment.to_string())
+                .or_insert_with(|| BuildNode {
+                    shelf_path: accumulated.clone(),
+                    segment: segment.to_string(),
+                    registered: None,
+                    children: BTreeMap::new(),
+                });
         }
 
         cursor.registered = Some(node);
@@ -192,7 +195,10 @@ mod tests {
         }
 
         fn display_name(&self) -> &str {
-            self.shelf_path.rsplit('.').next().unwrap_or(self.shelf_path)
+            self.shelf_path
+                .rsplit('.')
+                .next()
+                .unwrap_or(self.shelf_path)
         }
 
         fn description(&self) -> &str {
@@ -247,6 +253,9 @@ mod tests {
         );
 
         let tree = registry.get_tree();
-        assert_eq!(tree.children[0].children[0].health_status, HealthStatus::Degraded);
+        assert_eq!(
+            tree.children[0].children[0].health_status,
+            HealthStatus::Degraded
+        );
     }
 }
