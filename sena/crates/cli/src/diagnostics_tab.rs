@@ -1,7 +1,7 @@
 use crate::error::CliError;
 use crate::tab_chrome;
 use crate::theme;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEventKind};
 use ipc::IpcClient;
 use ratatui::{
     Frame,
@@ -59,6 +59,8 @@ impl DiagnosticsTab {
             .and_then(|response| response.get("uptime_seconds").and_then(|value| value.as_u64()))
             .unwrap_or(0);
         let snapshot = Arc::new(Mutex::new(None));
+
+        let _ = ipc.send("events.subscribe", json!({})).await;
 
         if let Ok(response) = ipc.send("inference.diagnostics", json!({})).await
             && let Some(snapshot_value) = response.get("snapshot").cloned()
@@ -144,6 +146,8 @@ impl DiagnosticsTab {
         let daemon_uptime_secs =
             tab_chrome::elapsed_uptime(self.daemon_uptime_secs, self.daemon_uptime_anchor);
 
+        tab_chrome::sync_terminal_before_draw(&mut self.terminal)
+            .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         self.terminal
             .draw(|frame| {
                 Self::render_frame(
