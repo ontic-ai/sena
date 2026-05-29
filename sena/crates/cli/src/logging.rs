@@ -9,7 +9,7 @@ const CLI_LOG_FILE_NAME: &str = "sena-cli.log";
 const CLI_LOG_ARCHIVE_NAME: &str = "sena-cli.log.1";
 const CLI_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-pub(crate) fn init_tracing() -> io::Result<PathBuf> {
+pub fn init_tracing() -> io::Result<PathBuf> {
     let log_path = match prepare_log_file_path(resolve_primary_log_path()?) {
         Ok(path) => path,
         Err(primary_error) => {

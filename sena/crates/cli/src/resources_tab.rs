@@ -1,7 +1,7 @@
 use crate::error::CliError;
 use crate::tab_chrome;
 use crate::theme;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEventKind};
 use ipc::IpcClient;
 use ratatui::{
     Frame,
@@ -204,6 +204,8 @@ impl ResourcesTab {
         let daemon_uptime_secs =
             tab_chrome::elapsed_uptime(self.daemon_uptime_secs, self.daemon_uptime_anchor);
 
+        tab_chrome::sync_terminal_before_draw(&mut self.terminal)
+            .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         self.terminal
             .draw(|frame| {
                 Self::render_frame(

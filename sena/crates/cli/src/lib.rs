@@ -1,12 +1,12 @@
 //! CLI library components.
 
-mod actors_tab;
+pub mod actors_tab;
 mod commands;
-mod diagnostics_tab;
-mod logging;
-mod resources_tab;
+pub mod diagnostics_tab;
+pub mod logging;
+pub mod resources_tab;
 mod tab_chrome;
-mod tabs;
+pub mod tabs;
 mod terminal_window;
 
 pub mod daemon_client;

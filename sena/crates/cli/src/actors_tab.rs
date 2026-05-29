@@ -3,7 +3,7 @@ use crate::error::CliError;
 use crate::tab_chrome;
 use crate::theme;
 use bus::events::system::{ActorHealth, ActorStatus};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ipc::IpcClient;
 use ratatui::{
     Frame,
@@ -201,6 +201,8 @@ impl ActorsTab {
             status_line: self.status_line.clone(),
         };
 
+        tab_chrome::sync_terminal_before_draw(&mut self.terminal)
+            .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         self.terminal
             .draw(|frame| {
                 Self::render_frame(

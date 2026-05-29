@@ -32,7 +32,6 @@ fn should_skip_default_resize_for_env(
 #[cfg(target_os = "windows")]
 pub(crate) fn try_resize_current_console(columns: i16, rows: i16) -> Result<(), String> {
     use std::io;
-    use std::ffi::c_void;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
         COORD, GetStdHandle, SMALL_RECT, STD_OUTPUT_HANDLE, SetConsoleScreenBufferSize,
@@ -45,7 +44,7 @@ pub(crate) fn try_resize_current_console(columns: i16, rows: i16) -> Result<(), 
 
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE as *mut c_void {
+        if handle.is_null() || std::ptr::eq(handle, INVALID_HANDLE_VALUE) {
             return Err("failed to acquire stdout console handle".to_string());
         }
 

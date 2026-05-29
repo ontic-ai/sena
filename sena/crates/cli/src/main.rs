@@ -7,28 +7,12 @@
 //! 3. Connects to daemon via IPC
 //! 4. Runs the TUI shell with IPC connection
 
-mod commands;
-mod daemon_client;
-mod actors_tab;
-mod config_editor;
-mod diagnostics_tab;
-mod error;
-mod logging;
-mod onboarding;
-mod resources_tab;
-mod shell;
-mod tab_chrome;
-mod tabs;
-mod terminal_window;
-mod test_mode;
-mod theme;
-mod transparency_format;
-
-use daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_ready};
-use error::CliError;
 use ipc::IpcClient;
-use shell::Shell;
-use tabs::{CliTabKind, CliWindowMode};
+use sena_cli::daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_ready};
+use sena_cli::error::CliError;
+use sena_cli::shell::Shell;
+use sena_cli::tabs::{CliTabKind, CliWindowMode};
+use sena_cli::{actors_tab, config_editor, diagnostics_tab, logging, onboarding, resources_tab, tabs, test_mode};
 use tracing::{debug, error, info};
 
 #[tokio::main]
@@ -63,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     match window_mode {
         CliWindowMode::LegacyConfig => {
             let mut ipc_client = ipc_client;
-            let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client);
+            let mut editor = config_editor::ConfigEditor::new(&mut ipc_client);
             if let Err(e) = editor.run().await {
                 error!("Config editor error: {}", e);
                 return Err(anyhow::anyhow!("Config editor failed: {}", e));
@@ -71,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         }
         CliWindowMode::Tab(CliTabKind::Config) => {
             let mut ipc_client = ipc_client;
-            let mut editor = crate::config_editor::ConfigEditor::new(&mut ipc_client).tabbed();
+            let mut editor = config_editor::ConfigEditor::new(&mut ipc_client).tabbed();
             if let Err(e) = editor.run().await {
                 error!("Config tab error: {}", e);
                 return Err(anyhow::anyhow!("Config tab failed: {}", e));

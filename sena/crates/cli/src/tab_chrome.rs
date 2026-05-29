@@ -62,12 +62,21 @@ pub(crate) fn init_terminal() -> Result<AppTerminal, CliError> {
 }
 
 pub(crate) fn prime_terminal(terminal: &mut AppTerminal) -> Result<(), CliError> {
-    terminal
-        .autoresize()
-        .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
+    sync_terminal_before_draw(terminal).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
     terminal
         .clear()
         .map_err(|e| CliError::TuiRenderError(e.to_string()))
+}
+
+pub(crate) fn sync_terminal_before_draw(terminal: &mut AppTerminal) -> io::Result<()> {
+    let previous = terminal.size()?;
+    terminal.autoresize()?;
+
+    if terminal.size()? != previous {
+        terminal.clear()?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn restore_terminal(terminal: &mut AppTerminal) -> Result<(), CliError> {

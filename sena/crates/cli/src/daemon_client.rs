@@ -109,7 +109,7 @@ pub async fn wait_for_runtime_ready(ipc_client: &mut IpcClient) -> Result<(), Cl
 }
 
 #[cfg(target_os = "windows")]
-pub fn launch_cli_tab(tab: CliTabKind) -> Result<(), CliError> {
+pub(crate) fn launch_cli_tab(tab: CliTabKind) -> Result<(), CliError> {
     let cli_exe =
         std::env::current_exe().map_err(|e| CliError::DaemonStartFailed(e.to_string()))?;
     let cli_path = cli_exe
@@ -134,7 +134,7 @@ pub fn launch_cli_tab(tab: CliTabKind) -> Result<(), CliError> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn launch_cli_tab(_tab: CliTabKind) -> Result<(), CliError> {
+pub(crate) fn launch_cli_tab(_tab: CliTabKind) -> Result<(), CliError> {
     Err(CliError::PlatformNotSupported)
 }
 

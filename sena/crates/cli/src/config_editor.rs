@@ -21,7 +21,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -421,6 +420,8 @@ impl<'a> ConfigEditor<'a> {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<(), CliError> {
+        tab_chrome::sync_terminal_before_draw(terminal)
+            .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         terminal
             .draw(|frame| {
                 if self.close_confirmation.is_active() {

@@ -73,6 +73,8 @@ impl TestModeApp {
         tab_chrome::prime_terminal(&mut terminal)?;
 
         let result = loop {
+            tab_chrome::sync_terminal_before_draw(&mut terminal)
+                .map_err(|e| CliError::TuiRenderError(e.to_string()))?;
             terminal
                 .draw(|frame| self.render(frame))
                 .map_err(|e| CliError::TuiRenderError(e.to_string()))?;

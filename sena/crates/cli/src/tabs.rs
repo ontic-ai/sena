@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CliTabKind {
+pub enum CliTabKind {
     Diag,
     Config,
     Actors,
@@ -26,24 +26,16 @@ impl CliTabKind {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Diag => "DIAGNOSTICS",
-            Self::Config => "CONFIG",
-            Self::Actors => "ACTORS",
-            Self::Resources => "RESOURCES",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CliWindowMode {
+pub enum CliWindowMode {
     Live,
     LegacyConfig,
     Tab(CliTabKind),
 }
 
-pub(crate) fn parse_window_mode(args: &[String]) -> Result<CliWindowMode, String> {
+pub fn parse_window_mode(args: &[String]) -> Result<CliWindowMode, String> {
     let mut config_mode = false;
     let mut tab = None;
     let mut iter = args.iter().skip(1);

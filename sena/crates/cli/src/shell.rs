@@ -8,7 +8,6 @@ use crate::daemon_client::{
 };
 use crate::error::CliError;
 use crate::tab_chrome;
-use crate::terminal_window;
 use crate::test_mode;
 use crate::theme;
 use crate::tabs::CliTabKind;
@@ -36,7 +35,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 struct LoopInfo {
@@ -329,10 +328,6 @@ pub struct Shell {
 
 impl Shell {
     pub async fn new(mut ipc: IpcClient) -> Result<Self, CliError> {
-        if let Err(error) = terminal_window::try_resize_default_console() {
-            debug!(%error, "Skipping console resize for shell");
-        }
-
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen)
@@ -843,13 +838,15 @@ impl Shell {
     }
 
     async fn handle_modal_key_event(&mut self, code: KeyCode) -> Result<(), CliError> {
-        match (&mut self.modal, code) {
-            (Some(ModalState::Help(help)), KeyCode::Esc) => {
-                if help.handle_escape(Instant::now()) {
-                    self.modal = None;
-                }
+        if let Some(ModalState::Help(help)) = self.modal.as_mut() {
+            if matches!(code, KeyCode::Esc) && help.handle_escape(Instant::now()) {
+                self.modal = None;
             }
-            (Some(ModalState::Help(_)), _) => {}
+
+            return Ok(());
+        }
+
+        match (&mut self.modal, code) {
             (Some(ModalState::Models(modal)), KeyCode::Up) => modal.prev(),
             (Some(ModalState::Models(modal)), KeyCode::Down) => modal.next(),
             (Some(ModalState::Models(_)), KeyCode::Esc) => {
@@ -1851,6 +1848,7 @@ impl Shell {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         render: ShellRenderState<'_>,
     ) -> Result<(), io::Error> {
+        tab_chrome::sync_terminal_before_draw(terminal)?;
         terminal.draw(|frame| {
             if render.close_confirmation_active {
                 tab_chrome::render_close_confirmation(frame, render.close_confirmation_remaining);
