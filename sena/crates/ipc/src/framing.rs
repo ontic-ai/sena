@@ -5,6 +5,21 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Maximum frame size: 16MB.
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
+fn raw_json_prefix(len_bytes: [u8; 4]) -> Option<String> {
+    if !matches!(len_bytes[0], b'{' | b'[') {
+        return None;
+    }
+
+    Some(format!(
+        "expected 4-byte little-endian length prefix, got raw JSON prefix {:?} (hex {})",
+        String::from_utf8_lossy(&len_bytes),
+        len_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 /// Write a length-prefixed JSON frame to an async writer.
 ///
 /// # Frame Format
@@ -62,6 +77,10 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
     let len = u32::from_le_bytes(len_bytes) as usize;
 
     if len > MAX_FRAME_SIZE {
+        if let Some(message) = raw_json_prefix(len_bytes) {
+            return Err(IpcError::ProtocolMismatch(message));
+        }
+
         return Err(IpcError::FrameTooLarge(len));
     }
 
@@ -120,5 +139,21 @@ mod tests {
         let result = write_frame(&mut buf, &msg).await;
 
         assert!(matches!(result, Err(IpcError::FrameTooLarge(_))));
+    }
+
+    #[tokio::test]
+    async fn read_frame_reports_protocol_mismatch_for_unframed_json() {
+        let raw = br#"{"id":1,"command":"runtime.status","payload":{}}"#;
+        let mut cursor = &raw[..];
+
+        let result: Result<TestMessage, _> = read_frame(&mut cursor).await;
+
+        match result {
+            Err(IpcError::ProtocolMismatch(message)) => {
+                assert!(message.contains("raw JSON prefix"));
+                assert!(message.contains("hex 7b226964"));
+            }
+            other => panic!("expected protocol mismatch, got {other:?}"),
+        }
     }
 }

@@ -4,7 +4,7 @@ use crate::{IpcRequest, IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use tracing::error;
+use tracing::{error, warn};
 
 /// IPC server that accepts concurrent client connections over named pipe.
 ///
@@ -81,6 +81,9 @@ impl IpcServer {
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(connected, registry, push_rx).await {
                     match &e {
+                        IpcError::ProtocolMismatch(message) => {
+                            warn!(error = %message, "IPC client spoke incompatible wire protocol");
+                        }
                         IpcError::ConnectionClosed => {
                             tracing::debug!("IPC client disconnected");
                         }

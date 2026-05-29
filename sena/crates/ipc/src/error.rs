@@ -15,6 +15,10 @@ pub enum IpcError {
     #[error("frame too large: {0} bytes (max 16MB)")]
     FrameTooLarge(usize),
 
+    /// Peer is speaking an incompatible wire protocol.
+    #[error("protocol mismatch: {0}")]
+    ProtocolMismatch(String),
+
     /// Connection closed unexpectedly.
     #[error("connection closed")]
     ConnectionClosed,
