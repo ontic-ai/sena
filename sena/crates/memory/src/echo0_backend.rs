@@ -152,15 +152,12 @@ impl PersistentMemoryStore {
         let now = Self::now();
 
         nodes.sort_by(|left, right| {
-            right
-                .timestamp
-                .cmp(&left.timestamp)
-                .then_with(|| {
-                    right
-                        .importance
-                        .partial_cmp(&left.importance)
-                        .unwrap_or(Ordering::Equal)
-                })
+            right.timestamp.cmp(&left.timestamp).then_with(|| {
+                right
+                    .importance
+                    .partial_cmp(&left.importance)
+                    .unwrap_or(Ordering::Equal)
+            })
         });
 
         nodes
@@ -737,8 +734,9 @@ mod tests {
     async fn zero_vector_embeddings_are_stored_without_semantic_vector() {
         let temp_dir = tempdir().expect("failed to create temp dir");
         let embedder = SenaEmbedder::new(spawn_zero_embed_sender());
-        let mut backend = PersistentMemoryStore::open(&temp_dir.path().join("memory.redb"), embedder)
-            .expect("store should open");
+        let mut backend =
+            PersistentMemoryStore::open(&temp_dir.path().join("memory.redb"), embedder)
+                .expect("store should open");
 
         backend
             .ingest("fallback memory", MemoryKind::Semantic, CausalId::new())

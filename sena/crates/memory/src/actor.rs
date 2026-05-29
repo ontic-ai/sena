@@ -1071,7 +1071,10 @@ mod tests {
             .expect("query failed");
         assert_eq!(chunks_before.len(), 2, "should find both chunks");
         let initial_score = chunks_before[0].score;
-        assert!(initial_score > 0.0, "fresh chunks should have a positive score");
+        assert!(
+            initial_score > 0.0,
+            "fresh chunks should have a positive score"
+        );
 
         // Perform consolidation
         let result = actor.backend.consolidate().await;
@@ -1321,7 +1324,10 @@ mod tests {
             }
         }
         assert!(query_saw_user, "user exchange node should be queryable");
-        assert!(query_saw_sena, "assistant exchange node should be queryable");
+        assert!(
+            query_saw_sena,
+            "assistant exchange node should be queryable"
+        );
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await

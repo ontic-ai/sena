@@ -1302,7 +1302,7 @@ mod tests {
         let temp_dir = tempdir().expect("create tempdir");
         let bus = Arc::new(EventBus::new());
 
-        let model = SpeechModelManifest::whisper_base_en();
+        let model = SpeechModelManifest::open_wakeword();
         let model_path = ModelCache::cached_path(temp_dir.path(), &model);
 
         // Create stub model file

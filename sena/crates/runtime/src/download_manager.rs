@@ -274,12 +274,12 @@ mod tests {
     #[test]
     fn cached_path_construction() {
         let dir = tempdir().expect("create tempdir");
-        let model = ModelManifest::whisper_base_en();
+        let model = ModelManifest::parakeet_encoder();
         let path = ModelCache::cached_path(dir.path(), &model);
         assert_eq!(
             path.file_name()
                 .expect("cached path should have a filename"),
-            "ggml-base.en.bin"
+            "encoder.onnx"
         );
     }
 
