@@ -117,13 +117,22 @@ fn longest_partial_stop_suffix(text: &str, stop_sequences: &[String]) -> usize {
     longest
 }
 
+fn is_qwen25_model(model_name: &str) -> bool {
+    let normalized: String = model_name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect();
+
+    normalized.starts_with("qwen25")
+}
+
 fn prompt_template_for_model(model_name: Option<&str>) -> PromptTemplateProfile {
     let Some(model_name) = model_name else {
         return PromptTemplateProfile::Raw;
     };
 
-    let model_name = model_name.to_ascii_lowercase();
-    if model_name.contains("qwen") && model_name.contains("instruct") {
+    if is_qwen25_model(model_name) {
         PromptTemplateProfile::QwenChatMl
     } else {
         PromptTemplateProfile::Raw
@@ -175,7 +184,7 @@ pub(crate) fn prepare_inference_request(
     let mut prepared_params = params.clone();
 
     match profile {
-        PromptTemplateProfile::QwenChatMl if prepared_params.stop_sequences.is_empty() => {
+        PromptTemplateProfile::QwenChatMl => {
             prepared_params.stop_sequences = QWEN_CHATML_STOP_SEQUENCES
                 .iter()
                 .map(|sequence| (*sequence).to_string())
@@ -516,7 +525,10 @@ pub fn build_loaded_embed_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_inference_request, prompt_template_for_model, resolve_model_name, QWEN_SYSTEM_PROMPT};
+    use super::{
+        is_qwen25_model, prepare_inference_request, prompt_template_for_model,
+        resolve_model_name, QWEN_SYSTEM_PROMPT,
+    };
     use crate::types::{InferenceParams, InferenceStopReason, QWEN_CHATML_STOP_SEQUENCES};
     use std::path::Path;
 
@@ -548,19 +560,25 @@ mod tests {
     }
 
     #[test]
-    fn explicit_stop_sequences_keep_raw_prompt_shape() {
+    fn qwen_stop_sequences_override_explicit_params() {
         let mut params = InferenceParams::default();
         params.stop_sequences = vec!["\n\n".to_string()];
 
         let prepared = prepare_inference_request(
-            Some("Qwen2.5-7B-Instruct-Q4_K_M"),
+            Some("qwen2.5:7b"),
             "structured extraction prompt",
             &params,
         );
 
-        assert_eq!(prepared.prompt_template, "raw");
-        assert_eq!(prepared.prompt, "structured extraction prompt");
-        assert_eq!(prepared.params.stop_sequences, vec!["\n\n".to_string()]);
+        assert_eq!(prepared.prompt_template, "qwen_chatml");
+        assert!(prepared.prompt.ends_with("<|im_start|>assistant\n"));
+        assert_eq!(
+            prepared.params.stop_sequences,
+            QWEN_CHATML_STOP_SEQUENCES
+                .iter()
+                .map(|sequence| (*sequence).to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -574,9 +592,17 @@ mod tests {
     #[test]
     fn qwen_alias_selects_qwen_prompt_template() {
         assert_eq!(
-            prompt_template_for_model(Some("qwen2.5:7b-instruct")),
+            prompt_template_for_model(Some("qwen2.5:7b")),
             super::PromptTemplateProfile::QwenChatMl
         );
+    }
+
+    #[test]
+    fn qwen25_detection_normalizes_model_names() {
+        assert!(is_qwen25_model("Qwen2.5-7B-Instruct-Q4_K_M"));
+        assert!(is_qwen25_model("qwen2.5:7b"));
+        assert!(is_qwen25_model("qwen25-14b"));
+        assert!(!is_qwen25_model("qwen3:8b"));
     }
 
     #[test]
