@@ -484,8 +484,9 @@ impl Actor for TtsActor {
             .set_prosody(self.speaking_rate, self.pitch_scale);
 
         #[cfg(not(test))]
-        self.ensure_audio_output()
-            .map_err(|e| ActorError::StartupFailed(format!("tts audio output initialization failed: {}", e)))?;
+        self.ensure_audio_output().map_err(|e| {
+            ActorError::StartupFailed(format!("tts audio output initialization failed: {}", e))
+        })?;
 
         // Emit ActorReady event
         bus.broadcast(Event::System(SystemEvent::ActorReady {
@@ -844,7 +845,7 @@ mod tests {
         assert!(actor.queue.is_empty());
         assert!(!actor.is_speaking);
     }
-    
+
     #[tokio::test]
     async fn tts_actor_run_exits_when_broadcast_channel_closes() {
         let backend = Box::new(StubTtsBackend::new(16000));

@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 /// Speech model type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
-    /// Whisper GGUF model for STT.
-    WhisperStt,
     /// Parakeet encoder ONNX model for STT.
     ParakeetEncoder,
     /// Parakeet decoder ONNX model for STT.
@@ -42,27 +40,9 @@ pub struct ModelInfo {
     pub model_type: ModelType,
 }
 
-/// Known speech models with their HuggingFace metadata.
 pub struct ModelManifest;
 
 impl ModelManifest {
-    /// Returns the Whisper base (English-only) GGML model for STT.
-    ///
-    /// Single GGML file used by whisper-rs. Downloaded by runtime DownloadManager.
-    pub fn whisper_base_en() -> ModelInfo {
-        ModelInfo {
-            name: "whisper-base-en-ggml".to_string(),
-            filename: "ggml-base.en.bin".to_string(),
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
-                .to_string(),
-            // TODO: Pin real SHA-256 checksum from HuggingFace
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            size_bytes: 148_164_587, // ~148MB
-            model_type: ModelType::WhisperStt,
-        }
-    }
-
-    /// Returns the Piper voice model for TTS.
     pub fn piper_voice() -> ModelInfo {
         ModelInfo {
             name: "piper-en-us-lessac-medium".to_string(),
@@ -141,7 +121,6 @@ impl ModelManifest {
     /// Returns all speech models.
     pub fn all_models() -> Vec<ModelInfo> {
         vec![
-            Self::whisper_base_en(),
             Self::parakeet_encoder(),
             Self::parakeet_decoder(),
             Self::parakeet_tokenizer(),
@@ -192,44 +171,39 @@ mod tests {
     #[test]
     fn model_manifest_contains_all_models() {
         let models = ModelManifest::all_models();
-        assert_eq!(models.len(), 7);
-
-        // Whisper
-        let whisper = &models[0];
-        assert_eq!(whisper.model_type, ModelType::WhisperStt);
-        assert_eq!(whisper.filename, "ggml-base.en.bin");
+        assert_eq!(models.len(), 6);
 
         // Parakeet (encoder, decoder, tokenizer)
-        let parakeet_encoder = &models[1];
+        let parakeet_encoder = &models[0];
         assert_eq!(parakeet_encoder.model_type, ModelType::ParakeetEncoder);
         assert_eq!(parakeet_encoder.filename, "encoder.onnx");
 
-        let parakeet_decoder = &models[2];
+        let parakeet_decoder = &models[1];
         assert_eq!(parakeet_decoder.model_type, ModelType::ParakeetDecoder);
         assert_eq!(parakeet_decoder.filename, "decoder_joint.onnx");
 
-        let parakeet_tokenizer = &models[3];
+        let parakeet_tokenizer = &models[2];
         assert_eq!(parakeet_tokenizer.model_type, ModelType::ParakeetTokenizer);
         assert_eq!(parakeet_tokenizer.filename, "tokenizer.model");
 
         // Piper (onnx + config)
-        let piper = &models[4];
+        let piper = &models[3];
         assert_eq!(piper.model_type, ModelType::PiperTts);
         assert!(piper.filename.ends_with(".onnx"));
 
-        let piper_config = &models[5];
+        let piper_config = &models[4];
         assert_eq!(piper_config.model_type, ModelType::PiperConfig);
         assert!(piper_config.filename.ends_with(".onnx.json"));
 
         // OpenWakeWord
-        let wakeword = &models[6];
+        let wakeword = &models[5];
         assert_eq!(wakeword.model_type, ModelType::OpenWakeWord);
         assert!(wakeword.filename.ends_with(".tflite"));
     }
 
     #[test]
     fn cached_path_returns_correct_path() {
-        let model = ModelManifest::whisper_base_en();
+        let model = ModelManifest::parakeet_encoder();
         let model_dir = Path::new("/tmp/models");
         let path = ModelCache::cached_path(model_dir, &model);
 
@@ -239,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn is_cached_returns_false_for_nonexistent_file() {
         let temp_dir = tempdir().expect("tempdir creation");
-        let model = ModelManifest::whisper_base_en();
+        let model = ModelManifest::parakeet_encoder();
 
         let cached = ModelCache::is_cached(temp_dir.path(), &model).await;
         assert!(!cached);
@@ -248,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn is_cached_returns_true_for_existing_file() {
         let temp_dir = tempdir().expect("tempdir creation");
-        let model = ModelManifest::whisper_base_en();
+        let model = ModelManifest::parakeet_encoder();
 
         // Create the model file
         let model_path = ModelCache::cached_path(temp_dir.path(), &model);
@@ -270,12 +244,12 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir creation");
 
         // Create one model file
-        let whisper = ModelManifest::whisper_base_en();
-        let whisper_path = ModelCache::cached_path(temp_dir.path(), &whisper);
-        std::fs::write(&whisper_path, b"dummy whisper data").expect("write whisper file");
+        let parakeet_encoder = ModelManifest::parakeet_encoder();
+        let parakeet_encoder_path = ModelCache::cached_path(temp_dir.path(), &parakeet_encoder);
+        std::fs::write(&parakeet_encoder_path, b"dummy parakeet encoder data").expect("write parakeet encoder file");
 
         let cached = ModelCache::list_cached(temp_dir.path()).await;
         assert_eq!(cached.len(), 1);
-        assert_eq!(cached[0].filename, whisper.filename);
+        assert_eq!(cached[0].filename, parakeet_encoder.filename);
     }
 }

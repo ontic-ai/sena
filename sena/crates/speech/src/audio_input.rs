@@ -209,9 +209,8 @@ fn resolve_input_device(
         )));
     }
 
-    host.default_input_device().ok_or_else(|| {
-        SttError::AudioCaptureFailed("no default input device".to_string())
-    })
+    host.default_input_device()
+        .ok_or_else(|| SttError::AudioCaptureFailed("no default input device".to_string()))
 }
 
 fn build_stream_for_format(

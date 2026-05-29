@@ -843,9 +843,7 @@ mod tests {
         for _ in 0..10 {
             match rx.try_recv() {
                 Ok(Event::Speech(SpeechEvent::TranscriptionCompleted {
-                    text,
-                    confidence,
-                    ..
+                    text, confidence, ..
                 })) => {
                     assert_eq!(text, "maybe");
                     assert_eq!(confidence, 1.0);
@@ -973,9 +971,7 @@ mod tests {
             {
                 match event {
                     Event::Speech(SpeechEvent::TranscriptionCompleted {
-                        text,
-                        confidence,
-                        ..
+                        text, confidence, ..
                     }) => {
                         assert_eq!(text, "route this utterance");
                         assert_eq!(confidence, 1.0);
