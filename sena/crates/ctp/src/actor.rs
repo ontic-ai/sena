@@ -77,6 +77,16 @@ impl CtpActor {
         Ok(())
     }
 
+    fn assemble_snapshot(&self) -> ContextSnapshot {
+        let mut snapshot = self.context_assembler.assemble_with_previous(
+            &self.signal_buffer,
+            self.session_start,
+            self.last_snapshot.as_ref(),
+        );
+        snapshot.soul_identity_signal = self.cached_identity_signal.clone();
+        snapshot
+    }
+
     async fn run_ctp_cycle(&mut self) -> Result<(), CtpError> {
         if !self.loop_enabled {
             debug!("CTP loop disabled, skipping periodic cycle");
@@ -92,16 +102,7 @@ impl CtpActor {
         self.signal_buffer.prune();
 
         // Assemble snapshot from current buffer state
-        let mut snapshot = self.context_assembler.assemble_with_previous(
-            &self.signal_buffer,
-            self.session_start,
-            self.last_snapshot.as_ref(),
-        );
-
-        // Inject cached identity signal if available
-        if self.cached_identity_signal.is_some() {
-            snapshot.soul_identity_signal = self.cached_identity_signal.clone();
-        }
+        let snapshot = self.assemble_snapshot();
 
         // Emit snapshot ready event
         bus.broadcast(Event::CTP(Box::new(CTPEvent::ContextSnapshotReady(
@@ -227,6 +228,10 @@ impl CtpActor {
                         // Temporal patterns are logged but not cached currently.
                         // Future enhancement: could use for trigger gating or user state.
                     }
+                    SoulEvent::Deleted { .. } => {
+                        debug!("CTP cleared cached soul identity after soul deletion");
+                        self.cached_identity_signal = None;
+                    }
                     _ => {
                         // Ignore other soul events
                     }
@@ -242,12 +247,7 @@ impl CtpActor {
 
     /// Handle a `CurrentObservation` transparency query and broadcast the response.
     async fn handle_observation_query(&mut self, bus: &Arc<EventBus>) -> Result<(), String> {
-        // Assemble current state snapshot
-        let snapshot = self.context_assembler.assemble_with_previous(
-            &self.signal_buffer,
-            self.session_start,
-            self.last_snapshot.as_ref(),
-        );
+        let snapshot = self.assemble_snapshot();
 
         let result = Box::new(bus::TransparencyResult::Observation(
             transparency_query::handle_current_observation(snapshot),
@@ -511,6 +511,139 @@ mod tests {
         assert!(
             found_snapshot_with_signal,
             "CTP should include received Soul identity signal in snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_query_uses_cached_identity_without_prior_snapshot() {
+        let (mut actor, _signal_tx) = CtpActor::new();
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let identity_signal = bus::events::soul::DistilledIdentitySignal {
+            signal_key: "voice::rate".to_string(),
+            signal_value: "1.1".to_string(),
+            confidence: 0.9,
+        };
+
+        bus.broadcast(Event::Soul(
+            bus::events::soul::SoulEvent::IdentitySignalDistilled {
+                signal: identity_signal.clone(),
+                causal_id: bus::CausalId::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        bus.broadcast(Event::Transparency(bus::TransparencyEvent::QueryRequested(
+            bus::TransparencyQuery::CurrentObservation,
+        )))
+        .await
+        .unwrap();
+
+        let mut found_identity = false;
+        for _ in 0..10 {
+            if let Ok(Ok(Event::Transparency(bus::TransparencyEvent::QueryResponse {
+                query: bus::TransparencyQuery::CurrentObservation,
+                result,
+            }))) = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                && let bus::TransparencyResult::Observation(response) = &*result
+                && let Some(signal) = &response.snapshot.soul_identity_signal
+            {
+                assert_eq!(signal.signal_key, identity_signal.signal_key);
+                assert_eq!(signal.signal_value, identity_signal.signal_value);
+                found_identity = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_identity,
+            "CurrentObservation query should include cached soul identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn soul_deletion_clears_cached_identity_from_future_snapshots() {
+        let (mut actor, signal_tx) = CtpActor::new();
+
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(bus.clone()).await.unwrap();
+
+        tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        let identity_signal = bus::events::soul::DistilledIdentitySignal {
+            signal_key: "voice::tone".to_string(),
+            signal_value: "calm".to_string(),
+            confidence: 0.95,
+        };
+
+        bus.broadcast(Event::Soul(
+            bus::events::soul::SoulEvent::IdentitySignalDistilled {
+                signal: identity_signal,
+                causal_id: bus::CausalId::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        signal_tx.send(CtpSignal::ManualTick).unwrap();
+
+        for _ in 0..10 {
+            if let Ok(Ok(Event::CTP(boxed))) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                && matches!(*boxed, CTPEvent::ContextSnapshotReady(_))
+            {
+                break;
+            }
+        }
+
+        bus.broadcast(Event::Soul(bus::events::soul::SoulEvent::Deleted {
+            causal_id: bus::CausalId::new(),
+        }))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        bus.broadcast(Event::Transparency(bus::TransparencyEvent::QueryRequested(
+            bus::TransparencyQuery::CurrentObservation,
+        )))
+        .await
+        .unwrap();
+
+        let mut found_cleared_snapshot = false;
+        for _ in 0..10 {
+            if let Ok(Ok(Event::Transparency(bus::TransparencyEvent::QueryResponse {
+                query: bus::TransparencyQuery::CurrentObservation,
+                result,
+            }))) = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                && let bus::TransparencyResult::Observation(response) = &*result
+            {
+                assert!(response.snapshot.soul_identity_signal.is_none());
+                found_cleared_snapshot = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_cleared_snapshot,
+            "Soul deletion should clear cached identity from future snapshots"
         );
     }
 
