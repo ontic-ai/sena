@@ -91,6 +91,20 @@ pub type Echo0Backend = PersistentMemoryStore;
 
 impl PersistentMemoryStore {
     pub fn open(path: &Path, embedder: SenaEmbedder) -> Result<Self, MemoryError> {
+        Self::open_with_prune_threshold(path, embedder, 0.2)
+    }
+
+    pub fn open_with_prune_threshold(
+        path: &Path,
+        embedder: SenaEmbedder,
+        prune_threshold: f32,
+    ) -> Result<Self, MemoryError> {
+        if !(0.0..=1.0).contains(&prune_threshold) {
+            return Err(MemoryError::BackendError(format!(
+                "prune_threshold must be between 0.0 and 1.0, got {prune_threshold}"
+            )));
+        }
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 MemoryError::BackendError(format!("failed to create memory dir: {e}"))
@@ -108,7 +122,7 @@ impl PersistentMemoryStore {
             db,
             embedder,
             decay_rate: 0.1,
-            prune_threshold: 0.2,
+            prune_threshold,
         };
         store.ensure_tables()?;
         info!(path = %store.path.display(), "persistent memory store initialized");
@@ -119,6 +133,15 @@ impl PersistentMemoryStore {
     pub fn with_embedder(embedder: SenaEmbedder) -> Result<Self, MemoryError> {
         let path = std::env::temp_dir().join(format!("sena-memory-{}.redb", uuid::Uuid::new_v4()));
         Self::open(&path, embedder)
+    }
+
+    #[cfg(test)]
+    pub fn with_embedder_and_prune_threshold(
+        embedder: SenaEmbedder,
+        prune_threshold: f32,
+    ) -> Result<Self, MemoryError> {
+        let path = std::env::temp_dir().join(format!("sena-memory-{}.redb", uuid::Uuid::new_v4()));
+        Self::open_with_prune_threshold(&path, embedder, prune_threshold)
     }
 
     fn ensure_tables(&self) -> Result<(), MemoryError> {
@@ -446,6 +469,10 @@ impl MemoryBackend for PersistentMemoryStore {
         self.decay_and_prune().await
     }
 
+    async fn clear(&mut self) -> Result<(), MemoryError> {
+        self.replace_nodes(&[])
+    }
+
     async fn export_json(&self, path: PathBuf) -> Result<(), MemoryError> {
         PersistentMemoryStore::export_json(self, path.as_path()).await
     }
@@ -675,6 +702,37 @@ mod tests {
         let exported = std::fs::read_to_string(export_path).expect("read export failed");
         assert!(exported.contains("hello world"));
         assert!(exported.contains("embedding"));
+    }
+
+    #[tokio::test]
+    async fn clear_removes_all_nodes() {
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let mut backend = build_backend(&temp_dir);
+        backend
+            .ingest("hello world", MemoryKind::Episodic, CausalId::new())
+            .await
+            .expect("ingest failed");
+
+        backend.clear().await.expect("clear failed");
+
+        assert!(backend.load_nodes().expect("load nodes failed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn custom_prune_threshold_is_respected() {
+        let (embed_tx, _embed_rx) = mpsc::channel::<EmbedRequest>(8);
+        let embedder = SenaEmbedder::new(embed_tx);
+        let mut backend = PersistentMemoryStore::with_embedder_and_prune_threshold(embedder, 0.95)
+            .expect("backend should build");
+
+        backend
+            .ingest("important chunk", MemoryKind::Episodic, CausalId::new())
+            .await
+            .expect("ingest failed");
+
+        backend.consolidate().await.expect("consolidate failed");
+
+        assert!(backend.load_nodes().expect("load nodes failed").is_empty());
     }
 
     #[tokio::test]

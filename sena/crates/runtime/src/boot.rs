@@ -608,7 +608,11 @@ async fn spawn_actors_with_data_dir(
     // Step 6: Memory actor spawn
     let memory_name: &'static str = "memory";
     if actor_selected(selection, memory_name) {
-        let memory_actor = builder::build_memory_actor(data_dir, embed_tx)?;
+        let memory_actor = builder::build_memory_actor(
+            data_dir,
+            embed_tx,
+            config.memory_prune_threshold,
+        )?;
         expected.push(memory_name);
         selected_actors.insert(memory_name);
         let memory_handle = spawn_memory_actor(memory_actor, bus.clone());

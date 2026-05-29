@@ -242,6 +242,22 @@ impl MemoryActor {
         Ok(chunks)
     }
 
+    async fn handle_clear_request(&mut self, causal_id: CausalId) -> Result<(), MemoryError> {
+        debug!(
+            causal_id = causal_id.as_u64(),
+            "handling clear request"
+        );
+
+        self.backend.clear().await?;
+
+        debug!(
+            causal_id = causal_id.as_u64(),
+            "clear completed successfully"
+        );
+
+        Ok(())
+    }
+
     /// Handle context memory query request from CTP.
     ///
     /// This is distinct from user-initiated queries in that it includes
@@ -624,6 +640,34 @@ impl Actor for MemoryActor {
                                         })?;
                                     }
                                 },
+                                MemoryEvent::ClearRequested { causal_id } => {
+                                    match self.handle_clear_request(causal_id).await {
+                                        Ok(()) => {
+                                            bus.broadcast(Event::Memory(MemoryEvent::ClearCompleted {
+                                                causal_id,
+                                            }))
+                                            .await
+                                            .map_err(|e| {
+                                                ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                            })?;
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                causal_id = causal_id.as_u64(),
+                                                error = %e,
+                                                "clear failed"
+                                            );
+                                            bus.broadcast(Event::Memory(MemoryEvent::ClearFailed {
+                                                causal_id,
+                                                reason: e.to_string(),
+                                            }))
+                                            .await
+                                            .map_err(|e| {
+                                                ActorError::RuntimeError(format!("broadcast failed: {}", e))
+                                            })?;
+                                        }
+                                    }
+                                }
                                 MemoryEvent::MemoryQueryRequest {
                                     query,
                                     limit,
@@ -1328,6 +1372,83 @@ mod tests {
             query_saw_sena,
             "assistant exchange node should be queryable"
         );
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown broadcast failed");
+        let _ = timeout(Duration::from_secs(1), actor_handle).await;
+    }
+
+    #[tokio::test]
+    async fn clear_requests_remove_persisted_memory() {
+        use tokio::time::{Duration, timeout};
+
+        let temp_dir = tempdir().expect("failed to create temp dir");
+        let mut actor = MemoryActor::new(persistent_backend(&temp_dir));
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(Arc::clone(&bus)).await.expect("start failed");
+
+        let actor_handle = tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let causal_id = CausalId::new();
+        bus.broadcast(Event::Memory(MemoryEvent::IngestRequested {
+            text: "remember this".to_string(),
+            kind: MemoryKind::Episodic,
+            causal_id,
+        }))
+        .await
+        .expect("ingest should broadcast");
+
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Memory(MemoryEvent::IngestCompleted { causal_id: completed_id }))) =
+                timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                assert_eq!(completed_id, causal_id);
+                break;
+            }
+        }
+
+        bus.broadcast(Event::Memory(MemoryEvent::ClearRequested { causal_id }))
+            .await
+            .expect("clear should broadcast");
+
+        let mut saw_clear = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Memory(MemoryEvent::ClearCompleted { causal_id: completed_id }))) =
+                timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                assert_eq!(completed_id, causal_id);
+                saw_clear = true;
+                break;
+            }
+        }
+        assert!(saw_clear, "clear request should complete");
+
+        bus.broadcast(Event::Memory(MemoryEvent::QueryRequested {
+            query: "remember".to_string(),
+            limit: 10,
+            causal_id,
+        }))
+        .await
+        .expect("query should broadcast");
+
+        let mut saw_empty_query = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Memory(MemoryEvent::QueryCompleted { chunks, causal_id: completed_id }))) =
+                timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                assert_eq!(completed_id, causal_id);
+                saw_empty_query = chunks.is_empty();
+                break;
+            }
+        }
+        assert!(saw_empty_query, "query should return no persisted chunks after clear");
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await

@@ -187,6 +187,12 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         argument_kind: CommandArgumentKind::FreeText,
     },
     CommandSpec {
+        command: "/memory-clear",
+        description: "Clear persistent memory contents",
+        help_group: HelpGroup::Memory,
+        argument_kind: CommandArgumentKind::None,
+    },
+    CommandSpec {
         command: "/debug",
         description: "Choose a subsystem for verbose tracing hints",
         help_group: HelpGroup::Debug,

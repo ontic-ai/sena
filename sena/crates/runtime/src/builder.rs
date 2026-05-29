@@ -90,11 +90,16 @@ pub fn build_soul_actor(data_dir: &Path) -> Result<soul::SoulActor, RuntimeError
 pub fn build_memory_actor(
     data_dir: &Path,
     embed_tx: tokio::sync::mpsc::Sender<inference::EmbedRequest>,
+    prune_threshold: f32,
 ) -> Result<memory::MemoryActor, RuntimeError> {
     let memory_db_path = data_dir.join("memory.redb");
     tracing::debug!(path = %memory_db_path.display(), "building memory actor with persistent backend");
     let backend = Box::new(
-        memory::Echo0Backend::open(&memory_db_path, memory::SenaEmbedder::new(embed_tx))
+        memory::Echo0Backend::open_with_prune_threshold(
+            &memory_db_path,
+            memory::SenaEmbedder::new(embed_tx),
+            prune_threshold,
+        )
             .map_err(|error| RuntimeError::MemoryStore(error.to_string()))?,
     );
     let actor = memory::MemoryActor::with_backup_config(
@@ -343,7 +348,7 @@ mod tests {
     fn memory_actor_builds() {
         let (embed_tx, _embed_rx) = tokio::sync::mpsc::channel(1);
         let data_dir = tempdir().expect("failed to create tempdir");
-        let result = build_memory_actor(data_dir.path(), embed_tx);
+        let result = build_memory_actor(data_dir.path(), embed_tx, 0.2);
         assert!(result.is_ok());
     }
 

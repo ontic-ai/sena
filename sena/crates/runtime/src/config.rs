@@ -79,6 +79,10 @@ pub struct SenaConfig {
     /// Maximum token budget the auto-tuner may select.
     #[serde(default = "default_auto_tune_max_tokens")]
     pub auto_tune_max_tokens: usize,
+
+    /// Minimum importance required for long-term memory nodes to survive consolidation.
+    #[serde(default = "default_memory_prune_threshold")]
+    pub memory_prune_threshold: f32,
 }
 
 impl Default for SenaConfig {
@@ -100,6 +104,7 @@ impl Default for SenaConfig {
             auto_tune_tokens: default_auto_tune_tokens(),
             auto_tune_min_tokens: default_auto_tune_min_tokens(),
             auto_tune_max_tokens: default_auto_tune_max_tokens(),
+            memory_prune_threshold: default_memory_prune_threshold(),
         }
     }
 }
@@ -154,6 +159,10 @@ fn default_auto_tune_min_tokens() -> usize {
 
 fn default_auto_tune_max_tokens() -> usize {
     4096
+}
+
+fn default_memory_prune_threshold() -> f32 {
+    0.2
 }
 
 /// Configuration errors.
@@ -389,9 +398,18 @@ fn apply_config_value(config: &mut SenaConfig, key: &str, value: &str) -> Result
                 .parse::<usize>()
                 .map_err(|_| "expected a positive integer".to_string())?;
         }
+        "memory_prune_threshold" => {
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| "expected a decimal value between 0.0 and 1.0".to_string())?;
+            if !(0.0..=1.0).contains(&parsed) {
+                return Err("memory_prune_threshold must be between 0.0 and 1.0".to_string());
+            }
+            config.memory_prune_threshold = parsed;
+        }
         _ => {
             return Err(format!(
-                "unknown key '{}'. Supported keys: file_watch_paths, clipboard_observation_enabled, speech_enabled, always_listen, microphone_device, stt_sample_rate_hz, stt_buffer_duration_secs, stt_energy_threshold, stt_silence_duration_secs, wakeword_enabled, wakeword_sensitivity, max_tokens, temperature, repeat_penalty, top_k, top_p, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens",
+                "unknown key '{}'. Supported keys: file_watch_paths, clipboard_observation_enabled, speech_enabled, always_listen, microphone_device, stt_sample_rate_hz, stt_buffer_duration_secs, stt_energy_threshold, stt_silence_duration_secs, wakeword_enabled, wakeword_sensitivity, max_tokens, temperature, repeat_penalty, top_k, top_p, auto_tune_tokens, auto_tune_min_tokens, auto_tune_max_tokens, memory_prune_threshold",
                 key
             ));
         }
@@ -444,6 +462,7 @@ mod tests {
         assert!(config.auto_tune_tokens);
         assert_eq!(config.auto_tune_min_tokens, 256);
         assert_eq!(config.auto_tune_max_tokens, 4096);
+        assert_eq!(config.memory_prune_threshold, 0.2);
     }
 
     #[tokio::test]
@@ -485,6 +504,7 @@ mod tests {
             auto_tune_tokens: false,
             auto_tune_min_tokens: 300,
             auto_tune_max_tokens: 2048,
+            memory_prune_threshold: 0.35,
             ..Default::default()
         };
         save_config_at(&custom_config, &config_path)
@@ -531,6 +551,8 @@ mod tests {
         apply_config_value(&mut config, "top_p", "0.95").expect("top_p should parse");
         apply_config_value(&mut config, "auto_tune_tokens", "false")
             .expect("auto_tune_tokens should parse");
+        apply_config_value(&mut config, "memory_prune_threshold", "0.35")
+            .expect("memory_prune_threshold should parse");
 
         assert_eq!(
             config.file_watch_paths,
@@ -552,6 +574,7 @@ mod tests {
         assert_eq!(config.conversation.top_k, 60);
         assert_eq!(config.conversation.top_p, 0.95);
         assert!(!config.auto_tune_tokens);
+        assert_eq!(config.memory_prune_threshold, 0.35);
     }
 
     #[test]
@@ -568,6 +591,13 @@ mod tests {
             .expect("auto_tune_max_tokens should parse");
 
         let result = apply_config_value(&mut config, "auto_tune_min_tokens", "1024");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_config_value_rejects_invalid_memory_prune_threshold() {
+        let mut config = SenaConfig::default();
+        let result = apply_config_value(&mut config, "memory_prune_threshold", "1.5");
         assert!(result.is_err());
     }
 }

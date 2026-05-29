@@ -39,6 +39,7 @@ impl CommandHandler for ConfigGetHandler {
             "auto_tune_tokens": config.auto_tune_tokens,
             "auto_tune_min_tokens": config.auto_tune_min_tokens,
             "auto_tune_max_tokens": config.auto_tune_max_tokens,
+            "memory_prune_threshold": config.memory_prune_threshold,
         }))
     }
 }

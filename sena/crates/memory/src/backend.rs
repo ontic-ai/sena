@@ -65,6 +65,9 @@ pub trait MemoryBackend: Send + Sync {
     /// Returns `MemoryError` if consolidation fails.
     async fn consolidate(&mut self) -> Result<usize, MemoryError>;
 
+    /// Clear all persistent memory contents managed by this backend.
+    async fn clear(&mut self) -> Result<(), MemoryError>;
+
     /// Export the current persistent memory snapshot to a JSON file.
     async fn export_json(&self, path: PathBuf) -> Result<(), MemoryError>;
 }
@@ -123,6 +126,11 @@ impl MemoryBackend for StubBackend {
         Ok(0)
     }
 
+    async fn clear(&mut self) -> Result<(), MemoryError> {
+        tracing::debug!("stub backend: clear called");
+        Ok(())
+    }
+
     async fn export_json(&self, path: PathBuf) -> Result<(), MemoryError> {
         let parent = path
             .parent()
@@ -154,5 +162,12 @@ mod tests {
         let result = backend.query("test query", 10).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stub_backend_clear_succeeds() {
+        let mut backend = StubBackend::new();
+        let result = backend.clear().await;
+        assert!(result.is_ok());
     }
 }

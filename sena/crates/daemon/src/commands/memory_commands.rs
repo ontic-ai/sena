@@ -165,3 +165,66 @@ impl CommandHandler for MemoryQueryHandler {
         }
     }
 }
+
+/// Handler for "memory.clear" command.
+pub struct MemoryClearHandler {
+    bus: Arc<EventBus>,
+    state: RuntimeState,
+}
+
+impl MemoryClearHandler {
+    pub fn new(bus: Arc<EventBus>, state: RuntimeState) -> Self {
+        Self { bus, state }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for MemoryClearHandler {
+    fn name(&self) -> &'static str {
+        "memory.clear"
+    }
+
+    fn description(&self) -> &'static str {
+        "Clear persistent memory contents"
+    }
+
+    async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
+        self.state.ensure_actors_running(&["memory"]).await?;
+
+        let causal_id = CausalId::new();
+        let mut rx = self.bus.subscribe_broadcast();
+
+        self.bus
+            .broadcast(Event::Memory(MemoryEvent::ClearRequested { causal_id }))
+            .await
+            .map_err(|e| IpcError::CommandFailed(e.to_string()))?;
+
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::Memory(MemoryEvent::ClearCompleted {
+                        causal_id: event_causal_id,
+                    })) if event_causal_id == causal_id => {
+                        return Ok(json!({ "cleared": true }));
+                    }
+                    Ok(Event::Memory(MemoryEvent::ClearFailed {
+                        reason,
+                        causal_id: event_causal_id,
+                    })) if event_causal_id == causal_id => {
+                        return Err(IpcError::CommandFailed(reason));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(IpcError::CommandFailed(e.to_string())),
+                }
+            }
+        })
+        .await;
+
+        match wait_result {
+            Ok(result) => result,
+            Err(_) => Err(IpcError::CommandFailed(
+                "timed out waiting for memory clear".to_string(),
+            )),
+        }
+    }
+}

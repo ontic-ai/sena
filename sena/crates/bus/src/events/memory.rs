@@ -164,6 +164,25 @@ pub enum MemoryEvent {
         reason: String,
     },
 
+    /// Request to clear persistent memory contents.
+    ClearRequested {
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Persistent memory contents were cleared successfully.
+    ClearCompleted {
+        /// Causal chain ID.
+        causal_id: CausalId,
+    },
+
+    /// Persistent memory clear failed.
+    ClearFailed {
+        /// Causal chain ID.
+        causal_id: CausalId,
+        reason: String,
+    },
+
     /// Request from CTP to query memories relevant to the current context.
     ContextQueryRequested(ContextMemoryQueryRequest),
 
@@ -296,6 +315,19 @@ impl std::fmt::Debug for MemoryEvent {
                 .field("causal_id", causal_id)
                 .field("reason", reason)
                 .finish(),
+            Self::ClearRequested { causal_id } => f
+                .debug_struct("ClearRequested")
+                .field("causal_id", causal_id)
+                .finish(),
+            Self::ClearCompleted { causal_id } => f
+                .debug_struct("ClearCompleted")
+                .field("causal_id", causal_id)
+                .finish(),
+            Self::ClearFailed { causal_id, reason } => f
+                .debug_struct("ClearFailed")
+                .field("causal_id", causal_id)
+                .field("reason", reason)
+                .finish(),
             Self::ContextQueryRequested(req) => f
                 .debug_struct("ContextQueryRequested")
                 .field(
@@ -346,6 +378,9 @@ impl MemoryEvent {
             | Self::QueryRequested { causal_id, .. }
             | Self::QueryCompleted { causal_id, .. }
             | Self::QueryFailed { causal_id, .. }
+            | Self::ClearRequested { causal_id, .. }
+            | Self::ClearCompleted { causal_id, .. }
+            | Self::ClearFailed { causal_id, .. }
             | Self::MemoryWriteRequest { causal_id, .. }
             | Self::MemoryWriteCompleted { causal_id, .. }
             | Self::MemoryWriteFailed { causal_id, .. }

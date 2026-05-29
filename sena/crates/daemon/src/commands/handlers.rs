@@ -8,7 +8,7 @@ use crate::commands::{
         ListModelsHandler, LoadModelHandler, RunInferenceHandler,
     },
     loops_commands::{LoopRegistry, LoopsListHandler, LoopsSetHandler},
-    memory_commands::{MemoryQueryHandler, MemoryStatsHandler},
+    memory_commands::{MemoryClearHandler, MemoryQueryHandler, MemoryStatsHandler},
     runtime_commands::{
         BootWithSelectionHandler, DaemonControlMessage, OnboardingStatusHandler, PingHandler,
         RuntimeState, ShutdownHandler, StatusHandler, SubmitOnboardingConfigHandler,
@@ -116,6 +116,10 @@ pub fn register_all(
         state.clone(),
     )));
     registry.register(Arc::new(MemoryQueryHandler::new(
+        boot_result.bus.clone(),
+        state.clone(),
+    )));
+    registry.register(Arc::new(MemoryClearHandler::new(
         boot_result.bus.clone(),
         state.clone(),
     )));

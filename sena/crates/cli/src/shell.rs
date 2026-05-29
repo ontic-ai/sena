@@ -1015,6 +1015,7 @@ impl Shell {
             "/observation" | "/obs" => self.cmd_observation().await?,
             "/memory" | "/mem" => self.cmd_transparency_memory().await?,
             "/memory-stats" | "/memstats" => self.cmd_memory_stats().await?,
+            "/memory-clear" | "/memclear" => self.cmd_memory_clear().await?,
             "/debug" => self.cmd_debug(parts.get(1).copied()),
             "/explanation" | "/explain" => self.cmd_explanation(&parts[1..]).await?,
             "/query" | "/search" | "/recall" => self.cmd_memory_query(&parts[1..]).await?,
@@ -1274,6 +1275,14 @@ impl Shell {
         match self.ipc.send("memory.stats", json!({})).await {
             Ok(response) => self.log_message(format!("Memory snapshot: {}", response)),
             Err(e) => self.log_message(format!("Could not read memory stats: {}", e)),
+        }
+        Ok(())
+    }
+
+    async fn cmd_memory_clear(&mut self) -> Result<(), CliError> {
+        match self.ipc.send("memory.clear", json!({})).await {
+            Ok(_) => self.log_message("Persistent memory cleared.".to_string()),
+            Err(e) => self.log_message(format!("Could not clear memory: {}", e)),
         }
         Ok(())
     }
