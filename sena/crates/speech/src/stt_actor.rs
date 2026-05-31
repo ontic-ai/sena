@@ -100,7 +100,7 @@ impl SttActor {
         self
     }
 
-    /// Start audio capture if loop is enabled and not in test mode.
+    /// Start audio capture if loop is enabled and not using injected test audio.
     fn start_audio_capture(&mut self) -> Result<(), SpeechActorError> {
         #[cfg(test)]
         if self.test_audio_rx.is_some() {
@@ -269,12 +269,12 @@ impl Actor for SttActor {
         self.bus = Some(bus.clone());
         self.broadcast_rx = Some(bus.subscribe_broadcast());
 
-        // Start audio capture if loop is enabled (unless in test mode with test_audio_rx)
+        // Start audio capture if loop is enabled unless injected test audio is already configured.
         if self.loop_enabled {
             #[cfg(test)]
             {
                 if self.test_audio_rx.is_some() {
-                    info!("test mode: using injected audio receiver");
+                    info!("using injected audio receiver");
                 } else if let Err(e) = self.start_audio_capture() {
                     warn!(error = %e, "failed to start audio capture at boot (non-fatal)");
                 }

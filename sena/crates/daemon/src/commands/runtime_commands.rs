@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
-struct BootSelectionState {
+struct ActorSelectionState {
     sender: Option<oneshot::Sender<runtime::ActorSelection>>,
     pending_selection: Option<runtime::ActorSelection>,
 }
@@ -18,7 +18,7 @@ struct BootSelectionState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DaemonControlMessage {
     Shutdown,
-    RestartInTestMode,
+    RestartForActorSelection,
 }
 
 /// Shared daemon state for runtime commands.
@@ -26,9 +26,9 @@ pub enum DaemonControlMessage {
 pub struct RuntimeState {
     pub boot_time: Instant,
     pub is_ready: Arc<AtomicBool>,
-    pending_test_mode: Arc<AtomicBool>,
+    pending_actor_selection: Arc<AtomicBool>,
     selected_actors: Arc<RwLock<BTreeSet<String>>>,
-    boot_selection: Arc<Mutex<BootSelectionState>>,
+    actor_selection: Arc<Mutex<ActorSelectionState>>,
 }
 
 impl RuntimeState {
@@ -36,9 +36,9 @@ impl RuntimeState {
         Self {
             boot_time: Instant::now(),
             is_ready: Arc::new(AtomicBool::new(false)),
-            pending_test_mode: Arc::new(AtomicBool::new(false)),
+            pending_actor_selection: Arc::new(AtomicBool::new(false)),
             selected_actors: Arc::new(RwLock::new(BTreeSet::new())),
-            boot_selection: Arc::new(Mutex::new(BootSelectionState {
+            actor_selection: Arc::new(Mutex::new(ActorSelectionState {
                 sender: None,
                 pending_selection: None,
             })),
@@ -49,12 +49,12 @@ impl RuntimeState {
         self.is_ready.store(true, Ordering::SeqCst);
     }
 
-    pub fn set_test_mode_pending(&self, pending: bool) {
-        self.pending_test_mode.store(pending, Ordering::SeqCst);
+    pub fn set_actor_selection_pending(&self, pending: bool) {
+        self.pending_actor_selection.store(pending, Ordering::SeqCst);
     }
 
-    pub fn test_mode_pending(&self) -> bool {
-        self.pending_test_mode.load(Ordering::SeqCst)
+    pub fn actor_selection_pending(&self) -> bool {
+        self.pending_actor_selection.load(Ordering::SeqCst)
     }
 
     pub async fn set_selected_actors<I, S>(&self, actors: I)
@@ -91,11 +91,11 @@ impl RuntimeState {
         )))
     }
 
-    pub async fn install_boot_selection_sender(
+    pub async fn install_actor_selection_sender(
         &self,
         sender: oneshot::Sender<runtime::ActorSelection>,
     ) {
-        let mut state = self.boot_selection.lock().await;
+        let mut state = self.actor_selection.lock().await;
         if let Some(selection) = state.pending_selection.take() {
             drop(state);
             let _ = sender.send(selection);
@@ -105,34 +105,34 @@ impl RuntimeState {
         state.sender = Some(sender);
     }
 
-    pub async fn clear_boot_selection_sender(&self) {
-        let mut state = self.boot_selection.lock().await;
+    pub async fn clear_actor_selection_sender(&self) {
+        let mut state = self.actor_selection.lock().await;
         state.sender.take();
         state.pending_selection.take();
     }
 
-    pub async fn submit_boot_selection(
+    pub async fn submit_actor_selection(
         &self,
         selection: runtime::ActorSelection,
     ) -> Result<(), IpcError> {
-        let mut state = self.boot_selection.lock().await;
+        let mut state = self.actor_selection.lock().await;
         if let Some(sender) = state.sender.take() {
             sender.send(selection).map_err(|_| {
-                IpcError::CommandFailed("test mode selection receiver dropped".to_string())
+                IpcError::CommandFailed("actor selection receiver dropped".to_string())
             })?;
-        } else if self.test_mode_pending() {
+        } else if self.actor_selection_pending() {
             if state.pending_selection.is_some() {
                 return Err(IpcError::CommandFailed(
-                    "test mode selection already submitted".to_string(),
+                    "actor selection already submitted".to_string(),
                 ));
             }
             state.pending_selection = Some(selection);
         } else {
             return Err(IpcError::CommandFailed(
-                "test mode selection is not currently pending".to_string(),
+                "actor selection is not currently pending".to_string(),
             ));
         }
-        self.set_test_mode_pending(false);
+        self.set_actor_selection_pending(false);
         Ok(())
     }
 }
@@ -216,7 +216,7 @@ impl CommandHandler for StatusHandler {
                 "uptime_seconds": uptime_secs,
                 "actors": [],
                 "selected_actors": selected_actors,
-                "test_mode_pending": self.state.test_mode_pending(),
+                "actor_selection_pending": self.state.actor_selection_pending(),
             }));
         };
 
@@ -252,7 +252,7 @@ impl CommandHandler for StatusHandler {
                 "supervisor_uptime_seconds": supervisor_uptime,
                 "actors": actors,
                 "selected_actors": selected_actors,
-                "test_mode_pending": self.state.test_mode_pending(),
+                "actor_selection_pending": self.state.actor_selection_pending(),
             })),
             Ok(None) | Err(_) => {
                 // Timeout or channel error — return basic status without actor details
@@ -261,7 +261,7 @@ impl CommandHandler for StatusHandler {
                     "uptime_seconds": uptime_secs,
                     "actors": [],
                     "selected_actors": selected_actors,
-                    "test_mode_pending": self.state.test_mode_pending(),
+                    "actor_selection_pending": self.state.actor_selection_pending(),
                 }))
             }
         }
@@ -283,24 +283,24 @@ impl ShutdownHandler {
     }
 }
 
-pub struct TestModeStatusHandler {
+pub struct ActorSelectionStatusHandler {
     state: RuntimeState,
 }
 
-impl TestModeStatusHandler {
+impl ActorSelectionStatusHandler {
     pub fn new(state: RuntimeState) -> Self {
         Self { state }
     }
 }
 
 #[async_trait]
-impl CommandHandler for TestModeStatusHandler {
+impl CommandHandler for ActorSelectionStatusHandler {
     fn name(&self) -> &'static str {
-        "runtime.test_mode_status"
+        "runtime.actor_selection_status"
     }
 
     fn description(&self) -> &'static str {
-        "Report whether test-mode actor selection is pending"
+        "Report actor selection metadata and whether selection is pending"
     }
 
     fn requires_boot(&self) -> bool {
@@ -323,31 +323,31 @@ impl CommandHandler for TestModeStatusHandler {
             .collect::<Vec<_>>();
 
         Ok(json!({
-            "pending": self.state.test_mode_pending(),
+            "actor_selection_pending": self.state.actor_selection_pending(),
             "actors": actors,
             "selected_actors": selected_actors,
         }))
     }
 }
 
-pub struct BootWithSelectionHandler {
+pub struct SubmitActorSelectionHandler {
     state: RuntimeState,
 }
 
-impl BootWithSelectionHandler {
+impl SubmitActorSelectionHandler {
     pub fn new(state: RuntimeState) -> Self {
         Self { state }
     }
 }
 
 #[async_trait]
-impl CommandHandler for BootWithSelectionHandler {
+impl CommandHandler for SubmitActorSelectionHandler {
     fn name(&self) -> &'static str {
-        "runtime.boot_with_selection"
+        "runtime.submit_actor_selection"
     }
 
     fn description(&self) -> &'static str {
-        "Submit test-mode actor selection and continue runtime boot"
+        "Submit actor selection and continue runtime boot"
     }
 
     fn requires_boot(&self) -> bool {
@@ -375,7 +375,7 @@ impl CommandHandler for BootWithSelectionHandler {
             .map_err(|error| IpcError::InvalidPayload(error.to_string()))?;
 
         let selected_ids = selection.selected_ids();
-        self.state.submit_boot_selection(selection).await?;
+        self.state.submit_actor_selection(selection).await?;
 
         Ok(json!({
             "accepted": true,
@@ -384,34 +384,34 @@ impl CommandHandler for BootWithSelectionHandler {
     }
 }
 
-pub struct TestModeRestartHandler {
+pub struct ActorSelectionRestartHandler {
     control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
 }
 
-impl TestModeRestartHandler {
+impl ActorSelectionRestartHandler {
     pub fn new(control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>) -> Self {
         Self { control_tx }
     }
 }
 
 #[async_trait]
-impl CommandHandler for TestModeRestartHandler {
+impl CommandHandler for ActorSelectionRestartHandler {
     fn name(&self) -> &'static str {
-        "runtime.test_mode_restart"
+        "runtime.actor_selection_restart"
     }
 
     fn description(&self) -> &'static str {
-        "Restart the daemon and re-enter test mode actor selection"
+        "Restart the daemon and re-enter actor selection"
     }
 
     async fn handle(&self, _payload: Value) -> Result<Value, IpcError> {
         self.control_tx
-            .send(DaemonControlMessage::RestartInTestMode)
+            .send(DaemonControlMessage::RestartForActorSelection)
             .map_err(|_| IpcError::Internal("control channel closed".to_string()))?;
 
         Ok(json!({
             "restart_requested": true,
-            "mode": "test_mode"
+            "mode": "actor_selection"
         }))
     }
 }
@@ -623,21 +623,21 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn runtime_state_buffers_boot_selection_until_sender_is_installed() {
+    async fn runtime_state_buffers_actor_selection_until_sender_is_installed() {
         let state = RuntimeState::new();
-        state.set_test_mode_pending(true);
+        state.set_actor_selection_pending(true);
 
         let selection = runtime::ActorSelection::try_from_ids(["soul", "inference"])
             .expect("selection should build");
         let expected_ids = selection.selected_ids();
 
         state
-            .submit_boot_selection(selection)
+            .submit_actor_selection(selection)
             .await
-            .expect("selection should buffer while test mode is pending");
+            .expect("selection should buffer while actor selection is pending");
 
         let (tx, rx) = oneshot::channel();
-        state.install_boot_selection_sender(tx).await;
+        state.install_actor_selection_sender(tx).await;
 
         let delivered = tokio::time::timeout(Duration::from_millis(100), rx)
             .await
@@ -645,22 +645,22 @@ mod tests {
             .expect("selection sender should succeed");
 
         assert_eq!(delivered.selected_ids(), expected_ids);
-        assert!(!state.test_mode_pending());
+        assert!(!state.actor_selection_pending());
     }
 
     #[tokio::test]
-    async fn runtime_state_rejects_boot_selection_when_not_pending() {
+    async fn runtime_state_rejects_actor_selection_when_not_pending() {
         let state = RuntimeState::new();
         let selection = runtime::ActorSelection::try_from_ids(["soul", "inference"])
             .expect("selection should build");
 
         let error = state
-            .submit_boot_selection(selection)
+            .submit_actor_selection(selection)
             .await
-            .expect_err("selection should fail when test mode is not pending");
+            .expect_err("selection should fail when actor selection is not pending");
 
         assert!(error
             .to_string()
-            .contains("test mode selection is not currently pending"));
+            .contains("actor selection is not currently pending"));
     }
 }

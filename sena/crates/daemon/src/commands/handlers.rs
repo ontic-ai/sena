@@ -10,9 +10,9 @@ use crate::commands::{
     loops_commands::{LoopRegistry, LoopsListHandler, LoopsSetHandler},
     memory_commands::{MemoryClearHandler, MemoryQueryHandler, MemoryStatsHandler},
     runtime_commands::{
-        BootWithSelectionHandler, DaemonControlMessage, OnboardingStatusHandler, PingHandler,
-        RuntimeState, ShutdownHandler, StatusHandler, SubmitOnboardingConfigHandler,
-        SubmitOnboardingNameHandler, TestModeRestartHandler, TestModeStatusHandler,
+        ActorSelectionRestartHandler, ActorSelectionStatusHandler, DaemonControlMessage,
+        OnboardingStatusHandler, PingHandler, RuntimeState, ShutdownHandler, StatusHandler,
+        SubmitActorSelectionHandler, SubmitOnboardingConfigHandler, SubmitOnboardingNameHandler,
     },
     speech_commands::{
         SpeechListenStartHandler, SpeechListenStopHandler, SpeechSayHandler, SpeechStatusHandler,
@@ -33,8 +33,8 @@ pub fn register_preboot(
     registry.register(Arc::new(StatusHandler::new(state.clone(), None)));
     registry.register(Arc::new(OnboardingStatusHandler::new()));
     registry.register(Arc::new(ShutdownHandler::new(control_tx, None)));
-    registry.register(Arc::new(TestModeStatusHandler::new(state.clone())));
-    registry.register(Arc::new(BootWithSelectionHandler::new(state)));
+    registry.register(Arc::new(ActorSelectionStatusHandler::new(state.clone())));
+    registry.register(Arc::new(SubmitActorSelectionHandler::new(state)));
 }
 
 /// Register all daemon command handlers with the IPC command registry.
@@ -70,9 +70,9 @@ pub fn register_all(
         control_tx.clone(),
         Some(boot_result.bus.clone()),
     )));
-    registry.register(Arc::new(TestModeStatusHandler::new(state.clone())));
-    registry.register(Arc::new(BootWithSelectionHandler::new(state.clone())));
-    registry.register(Arc::new(TestModeRestartHandler::new(control_tx)));
+    registry.register(Arc::new(ActorSelectionStatusHandler::new(state.clone())));
+    registry.register(Arc::new(SubmitActorSelectionHandler::new(state.clone())));
+    registry.register(Arc::new(ActorSelectionRestartHandler::new(control_tx)));
     registry.register(Arc::new(SubmitOnboardingNameHandler::new(
         boot_result.bus.clone(),
     )));

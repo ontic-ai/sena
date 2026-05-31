@@ -1,5 +1,8 @@
-use crate::daemon_client::{connect_to_daemon, start_daemon, wait_for_runtime_ready};
+use crate::daemon_client::{
+    connect_to_daemon, start_daemon, wait_for_daemon_exit, wait_for_runtime_ready,
+};
 use crate::error::CliError;
+use crate::startup;
 use crate::tab_chrome;
 use crate::theme;
 use bus::events::system::{ActorHealth, ActorStatus};
@@ -22,14 +25,14 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Deserialize)]
 struct TestModeStatusResponse {
-    pending: bool,
-    actors: Vec<TestModeActor>,
+    actor_selection_pending: bool,
+    actors: Vec<ActorSelectionActor>,
     #[serde(default)]
     selected_actors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct TestModeActor {
+struct ActorSelectionActor {
     id: String,
     display_name: String,
     description: String,
@@ -60,7 +63,7 @@ enum ActorsOutcome {
 
 struct ActorsTab {
     terminal: tab_chrome::AppTerminal,
-    actors: Vec<TestModeActor>,
+    actors: Vec<ActorSelectionActor>,
     selected_ids: BTreeSet<String>,
     health_by_id: HashMap<String, ActorStatus>,
     cursor: usize,
@@ -74,7 +77,7 @@ struct ActorsTab {
 
 #[derive(Clone)]
 struct ActorsRenderState {
-    actors: Vec<TestModeActor>,
+    actors: Vec<ActorSelectionActor>,
     selected_ids: BTreeSet<String>,
     health_by_id: HashMap<String, ActorStatus>,
     cursor: usize,
@@ -102,8 +105,8 @@ impl ActorsTab {
     async fn new(ipc: &mut IpcClient) -> Result<Self, CliError> {
         let terminal = tab_chrome::init_terminal()?;
 
-        let test_mode: TestModeStatusResponse = serde_json::from_value(
-            ipc.send("runtime.test_mode_status", json!({})).await?,
+        let actor_selection: TestModeStatusResponse = serde_json::from_value(
+            ipc.send("runtime.actor_selection_status", json!({})).await?,
         )
         .map_err(|e| CliError::IpcReceiveError(e.to_string()))?;
 
@@ -117,10 +120,14 @@ impl ActorsTab {
                 actors: Vec::new(),
             });
 
-        let selected_ids = if test_mode.selected_actors.is_empty() {
-            test_mode.actors.iter().map(|actor| actor.id.clone()).collect()
+        let selected_ids = if actor_selection.selected_actors.is_empty() {
+            actor_selection
+                .actors
+                .iter()
+                .map(|actor| actor.id.clone())
+                .collect()
         } else {
-            test_mode.selected_actors.iter().cloned().collect()
+            actor_selection.selected_actors.iter().cloned().collect()
         };
         let health_by_id = runtime_status
             .actors
@@ -130,13 +137,13 @@ impl ActorsTab {
 
         Ok(Self {
             terminal,
-            actors: test_mode.actors,
+            actors: actor_selection.actors,
             selected_ids,
             health_by_id,
             cursor: 0,
             focus: Focus::Actors,
-            status_line: if test_mode.pending {
-                "Daemon is waiting for a selection before boot continues.".to_string()
+            status_line: if actor_selection.actor_selection_pending {
+                "Daemon is waiting for actor selection before boot continues.".to_string()
             } else {
                 "Select actors, then move to Restart Selected Actors.".to_string()
             },
@@ -366,7 +373,7 @@ impl ActorsTab {
         dependents
     }
 
-    fn missing_dependency<'a>(&'a self, actor: &'a TestModeActor) -> Option<&'a TestModeActor> {
+    fn missing_dependency<'a>(&'a self, actor: &'a ActorSelectionActor) -> Option<&'a ActorSelectionActor> {
         if actor.can_start_without_dependencies {
             return None;
         }
@@ -445,25 +452,15 @@ async fn restart_selected_actors(selected_ids: Vec<String>) -> Result<IpcClient,
     }
 
     let mut ipc = connect_to_daemon().await?;
-    ipc.send("runtime.test_mode_restart", json!({})).await?;
-
-    for _ in 0..100 {
-        if !IpcClient::daemon_running().await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    start_daemon(true)?;
+    ipc.send("runtime.actor_selection_restart", json!({})).await?;
+    wait_for_daemon_exit().await?;
+    start_daemon()?;
     let mut replacement = connect_to_daemon().await?;
-    replacement
-        .send(
-            "runtime.boot_with_selection",
-            json!({
-                "actors": selected_ids,
-            }),
-        )
-        .await?;
+    if !startup::submit_pending_actor_selection(&mut replacement, &selected_ids).await? {
+        return Err(CliError::ShellRunError(
+            "daemon did not enter actor selection mode after restart".to_string(),
+        ));
+    }
     wait_for_runtime_ready(&mut replacement).await?;
     Ok(replacement)
 }

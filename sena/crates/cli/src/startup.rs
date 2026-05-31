@@ -20,47 +20,55 @@ use std::time::Duration;
 use tracing::debug;
 
 #[derive(Clone, Debug, Deserialize)]
-struct TestModeStatusResponse {
-    pending: bool,
-    actors: Vec<TestModeActor>,
+struct ActorSelectionStatusResponse {
+    actor_selection_pending: bool,
+    actors: Vec<ActorSelectionActor>,
+    #[serde(default)]
+    selected_actors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct TestModeActor {
+struct ActorSelectionActor {
     id: String,
     display_name: String,
     description: String,
     #[serde(default)]
     dependencies: Vec<String>,
+    #[serde(default)]
+    can_start_without_dependencies: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
+    Confirm,
     Actors,
-    Start,
 }
 
-struct TestModeApp {
-    actors: Vec<TestModeActor>,
+struct ActorSelectionApp {
+    actors: Vec<ActorSelectionActor>,
     selected_ids: BTreeSet<String>,
     cursor: usize,
     focus: Focus,
 }
 
-impl TestModeApp {
-    fn new(actors: Vec<TestModeActor>) -> Self {
-        let selected_ids = actors.iter().map(|actor| actor.id.clone()).collect();
+pub struct StartupSelection {
+    pub current_selected_ids: Vec<String>,
+    pub selected_ids: Vec<String>,
+}
+
+impl ActorSelectionApp {
+    fn new(actors: Vec<ActorSelectionActor>, selected_ids: Vec<String>) -> Self {
         Self {
             actors,
-            selected_ids,
+            selected_ids: selected_ids.into_iter().collect(),
             cursor: 0,
-            focus: Focus::Actors,
+            focus: Focus::Confirm,
         }
     }
 
     fn run(mut self) -> Result<Vec<String>, CliError> {
         if let Err(error) = terminal_window::try_resize_default_console() {
-            debug!(%error, "Skipping console resize for test mode");
+            debug!(%error, "Skipping console resize for actor selection");
         }
 
         enable_raw_mode().map_err(|e| CliError::TuiRenderError(e.to_string()))?;
@@ -89,8 +97,11 @@ impl TestModeApp {
                     KeyCode::Up => self.move_up(),
                     KeyCode::Down => self.move_down(),
                     KeyCode::Tab => self.toggle_focus(),
+                    KeyCode::Char(' ') if self.focus == Focus::Actors => {
+                        self.toggle_current_actor();
+                    }
                     KeyCode::Enter => {
-                        if self.focus == Focus::Start {
+                        if self.focus == Focus::Confirm {
                             break Ok(self.selected_ids_in_order());
                         }
                         self.toggle_current_actor();
@@ -112,35 +123,40 @@ impl TestModeApp {
 
     fn move_up(&mut self) {
         match self.focus {
+            Focus::Confirm => {
+                self.focus = Focus::Actors;
+                self.cursor = self.actors.len().saturating_sub(1);
+            }
             Focus::Actors => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
                 }
-            }
-            Focus::Start => {
-                self.focus = Focus::Actors;
-                self.cursor = self.actors.len().saturating_sub(1);
             }
         }
     }
 
     fn move_down(&mut self) {
         match self.focus {
+            Focus::Confirm => {
+                if !self.actors.is_empty() {
+                    self.focus = Focus::Actors;
+                    self.cursor = 0;
+                }
+            }
             Focus::Actors => {
                 if self.cursor + 1 < self.actors.len() {
                     self.cursor += 1;
                 } else {
-                    self.focus = Focus::Start;
+                    self.focus = Focus::Confirm;
                 }
             }
-            Focus::Start => {}
         }
     }
 
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Actors => Focus::Start,
-            Focus::Start => Focus::Actors,
+            Focus::Confirm => Focus::Actors,
+            Focus::Actors => Focus::Confirm,
         };
     }
 
@@ -181,8 +197,12 @@ impl TestModeApp {
         dependents
     }
 
-    fn missing_dependency(&self, actor_id: &str) -> Option<&TestModeActor> {
+    fn missing_dependency(&self, actor_id: &str) -> Option<&ActorSelectionActor> {
         let actor = self.actors.iter().find(|actor| actor.id == actor_id)?;
+        if actor.can_start_without_dependencies {
+            return None;
+        }
+
         actor
             .dependencies
             .iter()
@@ -190,7 +210,7 @@ impl TestModeApp {
             .and_then(|dependency| self.actors.iter().find(|actor| actor.id == *dependency))
     }
 
-    fn dependency_names(&self, actor: &TestModeActor) -> String {
+    fn dependency_names(&self, actor: &ActorSelectionActor) -> String {
         actor
             .dependencies
             .iter()
@@ -226,21 +246,25 @@ impl TestModeApp {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Min(0),
-                Constraint::Length(3),
+                Constraint::Length(4),
             ])
             .split(frame.area());
 
         let header = Paragraph::new(vec![
             Line::from(Span::styled(
-                "SENA TEST MODE - Select which actors to run this session",
+                "Sena Startup Actor Selection",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "Arrow keys to navigate - Enter to toggle - Tab to confirm",
+                "Press Enter to continue with the current actors, or move down to change selection.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "Arrow keys navigate. Space or Enter toggles an actor while focused in the list.",
                 Style::default().fg(Color::Gray),
             )),
         ])
@@ -298,7 +322,7 @@ impl TestModeApp {
             .wrap(Wrap { trim: false });
         frame.render_widget(body, layout[1]);
 
-        let button_style = if self.focus == Focus::Start {
+        let button_style = if self.focus == Focus::Confirm {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -306,35 +330,66 @@ impl TestModeApp {
         } else {
             Style::default().fg(Color::White)
         };
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Tab / Enter on this bar to start ->  ",
+        let footer = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "Current selection starts immediately ->  ",
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled("[ Continue ]", button_style),
+            ]),
+            Line::from(Span::styled(
+                format!("{} actor(s) selected", self.selected_ids.len()),
                 Style::default().fg(Color::Gray),
-            ),
-            Span::styled("[ Start Sena ]", button_style),
-        ]))
+            )),
+        ])
         .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, layout[2]);
     }
 }
 
-pub async fn complete_pending_selection(ipc: &mut IpcClient) -> Result<bool, CliError> {
+pub async fn choose_actor_selection(ipc: &mut IpcClient) -> Result<StartupSelection, CliError> {
     let response = ipc
-        .send("runtime.test_mode_status", json!({}))
+        .send("runtime.actor_selection_status", json!({}))
         .await
         .map_err(CliError::Ipc)?;
-    let status: TestModeStatusResponse = serde_json::from_value(response)
-        .map_err(|e| CliError::IpcReceiveError(format!("invalid test mode response: {}", e)))?;
+    let status: ActorSelectionStatusResponse = serde_json::from_value(response).map_err(|e| {
+        CliError::IpcReceiveError(format!("invalid actor selection response: {}", e))
+    })?;
 
-    if !status.pending {
+    let current_selected_ids = if status.selected_actors.is_empty() {
+        status.actors.iter().map(|actor| actor.id.clone()).collect()
+    } else {
+        status.selected_actors
+    };
+    let selected_ids = ActorSelectionApp::new(status.actors, current_selected_ids.clone()).run()?;
+
+    Ok(StartupSelection {
+        current_selected_ids,
+        selected_ids,
+    })
+}
+
+pub async fn submit_pending_actor_selection(
+    ipc: &mut IpcClient,
+    selected_ids: &[String],
+) -> Result<bool, CliError> {
+    let response = ipc
+        .send("runtime.actor_selection_status", json!({}))
+        .await
+        .map_err(CliError::Ipc)?;
+    let status: ActorSelectionStatusResponse = serde_json::from_value(response).map_err(|e| {
+        CliError::IpcReceiveError(format!("invalid actor selection response: {}", e))
+    })?;
+
+    if !status.actor_selection_pending {
         return Ok(false);
     }
 
-    let selected_actors = TestModeApp::new(status.actors).run()?;
     ipc.send(
-        "runtime.boot_with_selection",
+        "runtime.submit_actor_selection",
         json!({
-            "actors": selected_actors,
+            "actors": selected_ids,
         }),
     )
     .await
@@ -347,23 +402,24 @@ pub async fn complete_pending_selection(ipc: &mut IpcClient) -> Result<bool, Cli
 mod tests {
     use super::*;
 
-    fn actor(id: &str, display_name: &str, dependencies: &[&str]) -> TestModeActor {
-        TestModeActor {
+    fn actor(id: &str, display_name: &str, dependencies: &[&str]) -> ActorSelectionActor {
+        ActorSelectionActor {
             id: id.to_string(),
             display_name: display_name.to_string(),
             description: format!("{} description", display_name),
             dependencies: dependencies.iter().map(|dependency| dependency.to_string()).collect(),
+            can_start_without_dependencies: false,
         }
     }
 
-    fn actor_graph() -> Vec<TestModeActor> {
+    fn actor_graph() -> Vec<ActorSelectionActor> {
         vec![
             actor("soul", "Soul & Identity", &[]),
             actor("inference", "Inference (LLM)", &[]),
             actor("memory", "Memory", &["inference"]),
             actor("platform", "Platform Sensing", &[]),
             actor("ctp", "Thought Processing (CTP)", &["platform", "inference"]),
-            actor("prompt", "Prompt Assembly", &["inference", "soul"]),
+            actor("prompt", "Prompt Assembly", &["inference"]),
             actor("stt", "Speech Input (STT)", &[]),
             actor("tts", "Speech Output (TTS)", &[]),
             actor("sri", "Runtime Interface (SRI)", &[]),
@@ -372,7 +428,12 @@ mod tests {
 
     #[test]
     fn disabling_dependency_clears_transitive_dependents() {
-        let mut app = TestModeApp::new(actor_graph());
+        let actors = actor_graph();
+        let mut app = ActorSelectionApp::new(
+            actors.clone(),
+            actors.iter().map(|actor| actor.id.clone()).collect(),
+        );
+        app.focus = Focus::Actors;
         app.cursor = 1;
 
         app.toggle_current_actor();
@@ -389,18 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn reenabling_dependency_leaves_dependents_unchecked() {
-        let mut app = TestModeApp::new(actor_graph());
-        app.cursor = 1;
+    fn app_defaults_to_confirm_focus_for_enter_through_startup() {
+        let actors = actor_graph();
+        let app = ActorSelectionApp::new(
+            actors.clone(),
+            actors.iter().map(|actor| actor.id.clone()).collect(),
+        );
 
-        app.toggle_current_actor();
-        app.toggle_current_actor();
-
-        assert!(app.selected_ids.contains("inference"));
-        assert!(!app.selected_ids.contains("memory"));
-        assert!(!app.selected_ids.contains("ctp"));
-        assert!(!app.selected_ids.contains("prompt"));
-        assert!(app.missing_dependency("memory").is_none());
-        assert_eq!(app.checkbox("memory"), "[ ]");
+        assert_eq!(app.focus, Focus::Confirm);
     }
 }

@@ -8,11 +8,17 @@
 //! 4. Runs the TUI shell with IPC connection
 
 use ipc::IpcClient;
-use sena_cli::daemon_client::{connect_to_daemon, ensure_daemon_running, wait_for_runtime_ready};
+use sena_cli::daemon_client::{
+    DAEMON_CONNECT_ERROR_MESSAGE, connect_to_daemon, ensure_daemon_running, start_daemon,
+    wait_for_daemon_exit, wait_for_runtime_ready,
+};
 use sena_cli::error::CliError;
 use sena_cli::shell::Shell;
+use sena_cli::startup;
 use sena_cli::tabs::{CliTabKind, CliWindowMode};
-use sena_cli::{actors_tab, config_editor, diagnostics_tab, logging, onboarding, resources_tab, tabs, test_mode};
+use sena_cli::{actors_tab, config_editor, diagnostics_tab, logging, onboarding, resources_tab, tabs};
+use serde_json::json;
+use std::collections::BTreeSet;
 use tracing::{debug, error, info};
 
 #[tokio::main]
@@ -29,10 +35,49 @@ async fn main() -> anyhow::Result<()> {
     ensure_daemon_running().await?;
 
     // Connect to daemon
-    let mut ipc_client = connect_to_daemon().await?;
-
-    test_mode::complete_pending_selection(&mut ipc_client).await?;
+    let mut ipc_client = connect_to_daemon()
+        .await
+        .map_err(|_| anyhow::anyhow!(DAEMON_CONNECT_ERROR_MESSAGE))?;
     wait_for_runtime_ready(&mut ipc_client).await?;
+
+    let startup_selection = startup::choose_actor_selection(&mut ipc_client).await?;
+    let current_selected_ids = startup_selection
+        .current_selected_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected_ids = startup_selection
+        .selected_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    if current_selected_ids != selected_ids {
+        info!(actors = ?startup_selection.selected_ids, "actor selection changed; restarting daemon");
+        ipc_client
+            .send("runtime.actor_selection_restart", json!({}))
+            .await?;
+        wait_for_daemon_exit().await?;
+        start_daemon()?;
+
+        let mut replacement = connect_to_daemon()
+            .await
+            .map_err(|_| anyhow::anyhow!(DAEMON_CONNECT_ERROR_MESSAGE))?;
+        let submitted = startup::submit_pending_actor_selection(
+            &mut replacement,
+            &startup_selection.selected_ids,
+        )
+        .await?;
+
+        if !submitted {
+            return Err(anyhow::anyhow!(
+                "Daemon did not enter actor selection mode after restart"
+            ));
+        }
+
+        wait_for_runtime_ready(&mut replacement).await?;
+        ipc_client = replacement;
+    }
 
     let onboarding_required = check_onboarding_status(&mut ipc_client).await?;
 

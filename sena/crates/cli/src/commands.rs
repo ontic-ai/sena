@@ -169,12 +169,6 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         argument_kind: CommandArgumentKind::None,
     },
     CommandSpec {
-        command: "/test-mode",
-        description: "Restart the daemon into actor selection mode",
-        help_group: HelpGroup::System,
-        argument_kind: CommandArgumentKind::None,
-    },
-    CommandSpec {
         command: "/memory",
         description: "Show remembered user context",
         help_group: HelpGroup::Memory,

@@ -3,12 +3,9 @@ use crate::commands::{
     HELP_RIGHT_COLUMN_GROUPS,
 };
 use crate::config_editor::ConfigEditor;
-use crate::daemon_client::{
-    connect_to_daemon, launch_cli_tab, start_daemon, wait_for_runtime_ready,
-};
+use crate::daemon_client::launch_cli_tab;
 use crate::error::CliError;
 use crate::tab_chrome;
-use crate::test_mode;
 use crate::theme;
 use crate::tabs::CliTabKind;
 use crossterm::{
@@ -1000,7 +997,6 @@ impl Shell {
             "/status" | "/health" => self.cmd_status().await?,
             "/ping" | "/uptime" => self.cmd_ping().await?,
             "/shutdown" => self.cmd_shutdown().await?,
-            "/test-mode" => self.cmd_test_mode().await?,
             "/models" => self.cmd_open_model_modal().await?,
             "/model" => match parts.get(1).copied() {
                 Some("load") => {
@@ -1153,20 +1149,6 @@ impl Shell {
                 self.log_message(format!("Shutdown command failed: {}", e));
             }
         }
-        Ok(())
-    }
-
-    async fn cmd_test_mode(&mut self) -> Result<(), CliError> {
-        match self.ipc.send("runtime.test_mode_restart", json!({})).await {
-            Ok(_) => {
-                self.log_message("Restarting daemon into test mode...".to_string());
-                self.restart_into_test_mode().await?;
-            }
-            Err(e) => {
-                self.log_message(format!("Could not restart into test mode: {}", e));
-            }
-        }
-
         Ok(())
     }
 
@@ -1556,26 +1538,6 @@ impl Shell {
             Terminal::new(backend).map_err(|e| CliError::TuiRenderError(e.to_string()))?;
 
         self.log_message("Config editor closed".to_string());
-        Ok(())
-    }
-
-    async fn restart_into_test_mode(&mut self) -> Result<(), CliError> {
-        self.cleanup_terminal()?;
-
-        for _ in 0..100 {
-            if !IpcClient::daemon_running().await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        start_daemon(true)?;
-        let mut ipc_client = connect_to_daemon().await?;
-        test_mode::complete_pending_selection(&mut ipc_client).await?;
-        wait_for_runtime_ready(&mut ipc_client).await?;
-
-        let replacement = Shell::new(ipc_client).await?;
-        *self = replacement;
         Ok(())
     }
 
@@ -2606,7 +2568,8 @@ mod tests {
         assert!(autocomplete.visible_items().len() >= 2);
         assert_eq!(autocomplete.selected_item(), Some(AutocompleteItem::Command(0)));
         assert_eq!(commands.first().copied(), Some("/tab"));
-        assert!(commands.contains(&"/test-mode"));
+        assert!(commands.contains(&"/tree"));
+        assert!(!commands.contains(&"/test-mode"));
     }
 
     #[test]

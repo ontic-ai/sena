@@ -59,7 +59,7 @@ pub const ACTOR_SPECS: &[ActorSpec] = &[
         id: PROMPT_ACTOR_ID,
         display_name: "Prompt Assembly",
         description: "Builds context windows before each inference call",
-        dependencies: &[INFERENCE_ACTOR_ID, SOUL_ACTOR_ID],
+        dependencies: &[INFERENCE_ACTOR_ID],
         can_start_without_dependencies: false,
     },
     ActorSpec {
@@ -268,5 +268,15 @@ mod tests {
                 SRI_ACTOR_ID,
             ]
         );
+    }
+
+    #[test]
+    fn prompt_selection_is_valid_without_soul() {
+        let selection =
+            ActorSelection::try_from_ids([INFERENCE_ACTOR_ID, PROMPT_ACTOR_ID]).unwrap();
+
+        selection
+            .validate()
+            .expect("prompt should only require inference");
     }
 }

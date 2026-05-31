@@ -40,7 +40,6 @@ fn main() -> Result<(), DaemonError> {
     init_logging()?;
 
     info!("Sena daemon starting");
-    let test_mode_requested = std::env::args().any(|arg| arg == "--test-mode");
 
     // Create shared shutdown channel up front so the tray is available while the
     // runtime boots on a background worker.
@@ -79,7 +78,6 @@ fn main() -> Result<(), DaemonError> {
             control_rx,
             daemon_control_tx,
             daemon_tray_shutdown_tx,
-            test_mode_requested,
         ))
     });
 
@@ -131,14 +129,13 @@ async fn run_daemon_services(
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonControlMessage>,
     control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlMessage>,
     tray_shutdown_tx: mpsc::Sender<()>,
-    test_mode_requested: bool,
 ) -> Result<(), DaemonError> {
     // Create runtime state for command handlers
     let runtime_state = RuntimeState::new();
     let inference_diagnostics: commands::inference_commands::InferenceDiagnosticsState =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-    // Start IPC server before runtime boot so test mode can submit a selection.
+    // Start IPC server before runtime boot so actor selection can be submitted first.
     let mut preboot_registry = CommandRegistry::new();
     commands::handlers::register_preboot(&mut preboot_registry, runtime_state.clone(), control_tx.clone());
     let (ipc_server, push_tx) = IpcServer::new(preboot_registry);
@@ -151,23 +148,26 @@ async fn run_daemon_services(
 
     info!("IPC server started");
 
-    if test_mode_requested {
-        runtime_state.set_test_mode_pending(true);
-        create_test_mode_marker().await?;
+    let actor_selection_requested = actor_selection_marker_exists().await?;
+
+    if actor_selection_requested {
+        runtime_state.set_actor_selection_pending(true);
         tooltip_tx
             .send(tray::TooltipUpdate {
-                text: "Sena — Waiting for test mode selection".to_string(),
+                text: "Sena — Waiting for actor selection".to_string(),
             })
             .ok();
     }
 
-    let explicit_selection = if test_mode_requested {
-        Some(wait_for_test_mode_selection(&runtime_state).await?)
+    let explicit_selection = if actor_selection_requested {
+        Some(wait_for_actor_selection(&runtime_state).await?)
     } else {
         None
     };
 
-    clear_test_mode_marker().await.ok();
+    if actor_selection_requested {
+        clear_actor_selection_marker().await.ok();
+    }
 
     info!("Booting runtime...");
     let boot_result = match explicit_selection.as_ref() {
@@ -216,11 +216,11 @@ async fn run_daemon_services(
     if let Some(selection) = explicit_selection.as_ref() {
         info!(
             actors = ?selection.selected_ids(),
-            "test mode: running with actors"
+            "running with selected actors"
         );
         info!(
             actors = ?selection.skipped_ids(),
-            "test mode: skipped actors"
+            "skipped actors"
         );
     }
 
@@ -307,7 +307,11 @@ async fn run_daemon_services(
         }
     };
 
-    if let Some(_message) = control_message {
+    if let Some(message) = control_message {
+        if matches!(message, DaemonControlMessage::RestartForActorSelection) {
+            create_actor_selection_marker().await?;
+        }
+
         let _ = supervision_bus
             .broadcast(bus::Event::System(bus::SystemEvent::ShutdownRequested))
             .await;
@@ -677,16 +681,21 @@ fn handle_tray_actions(
     }
 }
 
-fn test_mode_marker_path() -> Result<PathBuf, DaemonError> {
+fn actor_selection_marker_path() -> Result<PathBuf, DaemonError> {
     Ok(runtime::config::config_path()
         .map_err(|e| DaemonError::BootFailed(format!("failed to resolve config path: {}", e)))?
         .parent()
         .ok_or_else(|| DaemonError::BootFailed("config path has no parent".to_string()))?
-        .join("test_mode_pending"))
+        .join("actor_selection_pending"))
 }
 
-async fn create_test_mode_marker() -> Result<(), DaemonError> {
-    let marker_path = test_mode_marker_path()?;
+async fn actor_selection_marker_exists() -> Result<bool, DaemonError> {
+    let marker_path = actor_selection_marker_path()?;
+    Ok(tokio::fs::metadata(marker_path).await.is_ok())
+}
+
+async fn create_actor_selection_marker() -> Result<(), DaemonError> {
+    let marker_path = actor_selection_marker_path()?;
     if let Some(parent) = marker_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -694,39 +703,39 @@ async fn create_test_mode_marker() -> Result<(), DaemonError> {
     }
     tokio::fs::write(&marker_path, b"pending")
         .await
-        .map_err(|e| DaemonError::BootFailed(format!("failed to write test mode marker: {}", e)))
+        .map_err(|e| DaemonError::BootFailed(format!("failed to write actor selection marker: {}", e)))
 }
 
-async fn clear_test_mode_marker() -> Result<(), DaemonError> {
-    let marker_path = test_mode_marker_path()?;
+async fn clear_actor_selection_marker() -> Result<(), DaemonError> {
+    let marker_path = actor_selection_marker_path()?;
     match tokio::fs::remove_file(marker_path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DaemonError::BootFailed(format!(
-            "failed to clear test mode marker: {}",
+            "failed to clear actor selection marker: {}",
             error
         ))),
     }
 }
 
-async fn wait_for_test_mode_selection(
+async fn wait_for_actor_selection(
     runtime_state: &RuntimeState,
 ) -> Result<runtime::ActorSelection, DaemonError> {
     let (selection_tx, selection_rx) = oneshot::channel();
-    runtime_state.install_boot_selection_sender(selection_tx).await;
+    runtime_state.install_actor_selection_sender(selection_tx).await;
 
     let selection = match tokio::time::timeout(std::time::Duration::from_secs(60), selection_rx).await {
         Ok(Ok(selection)) => selection,
         Ok(Err(_)) => {
-            runtime_state.clear_boot_selection_sender().await;
+            runtime_state.clear_actor_selection_sender().await;
             return Err(DaemonError::BootFailed(
-                "test mode selection channel closed before a selection arrived".to_string(),
+                "actor selection channel closed before a selection arrived".to_string(),
             ));
         }
         Err(_) => {
-            runtime_state.clear_boot_selection_sender().await;
+            runtime_state.clear_actor_selection_sender().await;
             return Err(DaemonError::BootFailed(
-                "timed out waiting for test mode actor selection".to_string(),
+                "timed out waiting for actor selection".to_string(),
             ));
         }
     };
