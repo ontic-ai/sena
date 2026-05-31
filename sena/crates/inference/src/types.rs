@@ -17,7 +17,7 @@ impl InferenceStopReason {
     pub fn as_log_value(&self) -> String {
         match self {
             Self::MaxTokensReached => "max_tokens reached".to_string(),
-            Self::StopSequence(sequence) => format!("stop_sequence: {}", sequence),
+            Self::StopSequence(_) => "stop_sequence".to_string(),
             Self::EosToken => "eos_token".to_string(),
             Self::NaturalEnd => "natural_end".to_string(),
         }
@@ -180,7 +180,7 @@ mod tests {
         );
         assert_eq!(
             InferenceStopReason::StopSequence("<|im_end|>".to_string()).as_log_value(),
-            "stop_sequence: <|im_end|>"
+            "stop_sequence"
         );
         assert_eq!(InferenceStopReason::EosToken.as_log_value(), "eos_token");
         assert_eq!(

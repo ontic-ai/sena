@@ -139,6 +139,37 @@ fn prompt_template_for_model(model_name: Option<&str>) -> PromptTemplateProfile 
     }
 }
 
+fn qwen_stop_sequences() -> Vec<String> {
+    QWEN_CHATML_STOP_SEQUENCES
+        .iter()
+        .map(|sequence| (*sequence).to_string())
+        .collect()
+}
+
+fn is_prepared_qwen_chatml_prompt(prompt: &str) -> bool {
+    prompt.starts_with("<|im_start|>system\n") && prompt.ends_with("<|im_start|>assistant\n")
+}
+
+fn prepare_backend_request(
+    model_name: Option<&str>,
+    prompt: &str,
+    params: &InferenceParams,
+) -> PreparedInferenceRequest {
+    match prompt_template_for_model(model_name) {
+        PromptTemplateProfile::QwenChatMl if is_prepared_qwen_chatml_prompt(prompt) => {
+            let mut prepared_params = params.clone();
+            prepared_params.stop_sequences = qwen_stop_sequences();
+
+            PreparedInferenceRequest {
+                prompt: prompt.to_string(),
+                params: prepared_params,
+                prompt_template: "qwen_chatml",
+            }
+        }
+        _ => prepare_inference_request(model_name, prompt, params),
+    }
+}
+
 fn paths_match(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
@@ -185,10 +216,7 @@ pub(crate) fn prepare_inference_request(
 
     match profile {
         PromptTemplateProfile::QwenChatMl => {
-            prepared_params.stop_sequences = QWEN_CHATML_STOP_SEQUENCES
-                .iter()
-                .map(|sequence| (*sequence).to_string())
-                .collect();
+            prepared_params.stop_sequences = qwen_stop_sequences();
 
             PreparedInferenceRequest {
                 prompt: format!(
@@ -273,13 +301,14 @@ impl InferenceBackend for LlamaBackendAdapter {
         prompt: String,
         params: InferenceParams,
     ) -> Result<InferenceStream, InferenceError> {
-        let stop_sequences = params.stop_sequences.clone();
-        let max_tokens = params.max_tokens;
+        let prepared_request = prepare_backend_request(self.model_name(), &prompt, &params);
+        let stop_sequences = prepared_request.params.stop_sequences.clone();
+        let max_tokens = prepared_request.params.max_tokens;
         let infer_params = to_infer_params(
-            prompt,
+            prepared_request.prompt,
             InferenceParams {
                 stop_sequences: Vec::new(),
-                ..params
+                ..prepared_request.params
             },
         );
         let backend_clone = Arc::clone(&self.inner);
@@ -358,7 +387,8 @@ impl InferenceBackend for LlamaBackendAdapter {
     }
 
     fn complete(&self, prompt: &str, params: &InferenceParams) -> Result<String, InferenceError> {
-        let infer_params = to_infer_params_ref(prompt, params);
+        let prepared_request = prepare_backend_request(self.model_name(), prompt, params);
+        let infer_params = to_infer_params_ref(&prepared_request.prompt, &prepared_request.params);
         let backend = self
             .inner
             .try_lock()
@@ -526,8 +556,8 @@ pub fn build_loaded_embed_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_qwen25_model, prepare_inference_request, prompt_template_for_model,
-        resolve_model_name, QWEN_SYSTEM_PROMPT,
+        is_qwen25_model, prepare_backend_request, prepare_inference_request,
+        prompt_template_for_model, resolve_model_name, QWEN_SYSTEM_PROMPT,
     };
     use crate::types::{InferenceParams, InferenceStopReason, QWEN_CHATML_STOP_SEQUENCES};
     use std::path::Path;
@@ -585,7 +615,25 @@ mod tests {
     fn stop_reason_formatting_is_exact_for_qwen_stop_token() {
         assert_eq!(
             InferenceStopReason::StopSequence("<|im_end|>".to_string()).as_log_value(),
-            "stop_sequence: <|im_end|>"
+            "stop_sequence"
+        );
+    }
+
+    #[test]
+    fn backend_preparation_preserves_exact_qwen_assistant_suffix() {
+        let prepared = prepare_backend_request(
+            Some("Qwen2.5-7B-Instruct-Q4_K_M"),
+            "<|im_start|>system\nYou are Sena.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n",
+            &InferenceParams::default(),
+        );
+
+        assert!(prepared.prompt.ends_with("<|im_start|>assistant\n"));
+        assert_eq!(
+            prepared.params.stop_sequences,
+            QWEN_CHATML_STOP_SEQUENCES
+                .iter()
+                .map(|sequence| (*sequence).to_string())
+                .collect::<Vec<_>>()
         );
     }
 
