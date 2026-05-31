@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 fn raw_json_prefix(len_bytes: [u8; 4]) -> Option<String> {
-    if !matches!(len_bytes[0], b'{' | b'[') {
+    if len_bytes[0] != b'{' {
         return None;
     }
 

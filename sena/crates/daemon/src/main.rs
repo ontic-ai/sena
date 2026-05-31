@@ -797,6 +797,7 @@ fn launch_cli(_config_mode: bool) -> Result<(), DaemonError> {
 /// Open models folder in file explorer.
 #[cfg(target_os = "windows")]
 fn open_models_folder() -> Result<(), DaemonError> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     // Get models folder path (using standard AppData location)
@@ -811,7 +812,9 @@ fn open_models_folder() -> Result<(), DaemonError> {
     })?;
 
     // Open in Explorer
-    Command::new("explorer")
+    let mut command = Command::new("explorer");
+    command
+        .creation_flags(0x08000000)
         .arg(models_path)
         .spawn()
         .map_err(|e| {

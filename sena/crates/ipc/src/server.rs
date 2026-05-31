@@ -3,6 +3,8 @@ use crate::{CommandRegistry, IpcError};
 use crate::{IpcRequest, IpcResponse, PIPE_NAME, framing};
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{error, warn};
 
@@ -128,7 +130,19 @@ impl IpcServer {
             tokio::select! {
                 // Handle incoming requests from client
                 request_result = framing::read_frame(&mut stream) => {
-                    let request: IpcRequest = request_result?;
+                    let request: IpcRequest = match request_result {
+                        Ok(request) => request,
+                        Err(IpcError::ProtocolMismatch(message)) if message.contains("raw JSON prefix") => {
+                            tracing::debug!(
+                                error = %message,
+                                "IPC client sent raw JSON without a length prefix; closing connection"
+                            );
+                            let _ = stream.shutdown().await;
+                            break;
+                        }
+                        Err(IpcError::ConnectionClosed) => break,
+                        Err(error) => return Err(error),
+                    };
                     let registry = registry.read().await;
 
                     if request.command == "events.subscribe" {
@@ -330,6 +344,47 @@ mod tests {
         assert!(second_response.success);
         assert_eq!(first_response.payload, json!({"echo": {"client": 1}}));
         assert_eq!(second_response.payload, json!({"echo": {"client": 2}}));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ipc_server_closes_raw_json_client_and_stays_available() {
+        use tokio::io::AsyncWriteExt;
+
+        let pipe_name = unique_pipe_name();
+        let (server, _push_tx) = IpcServer::new(test_registry());
+        let server_task = tokio::spawn({
+            let pipe_name = pipe_name.clone();
+            async move {
+                let _ = server.run_on_pipe(&pipe_name).await;
+            }
+        });
+
+        let mut raw_client = connect_client(&pipe_name).await;
+        raw_client
+            .write_all(br#"{"id":1,"command":"echo","payload":{}}"#)
+            .await
+            .expect("write raw json to client");
+        raw_client.flush().await.expect("flush raw json client");
+        drop(raw_client);
+
+        let mut second_client = connect_client(&pipe_name).await;
+        let request = IpcRequest {
+            id: 2,
+            command: "echo".to_string(),
+            payload: json!({"message": "still alive"}),
+        };
+
+        framing::write_frame(&mut second_client, &request)
+            .await
+            .expect("write request to second client");
+        let response: IpcResponse = framing::read_frame(&mut second_client)
+            .await
+            .expect("read response from second client");
+
+        assert!(response.success);
+        assert_eq!(response.payload, json!({"echo": {"message": "still alive"}}));
 
         server_task.abort();
     }
