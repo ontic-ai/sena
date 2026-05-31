@@ -17,6 +17,8 @@ use tracing::{debug, info, warn};
 const NODES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("memory_nodes");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_meta");
 const META_NEXT_NODE_ID_KEY: &str = "next_node_id";
+const DEFAULT_PRUNE_THRESHOLD: f32 = 0.2;
+const DEFAULT_MIN_RETRIEVAL_SIMILARITY: f32 = 0.65;
 
 fn db_error(error: impl std::fmt::Display) -> MemoryError {
     MemoryError::BackendError(error.to_string())
@@ -85,13 +87,19 @@ pub struct PersistentMemoryStore {
     embedder: SenaEmbedder,
     decay_rate: f32,
     prune_threshold: f32,
+    min_retrieval_similarity: f32,
 }
 
 pub type Echo0Backend = PersistentMemoryStore;
 
 impl PersistentMemoryStore {
     pub fn open(path: &Path, embedder: SenaEmbedder) -> Result<Self, MemoryError> {
-        Self::open_with_prune_threshold(path, embedder, 0.2)
+        Self::open_with_thresholds(
+            path,
+            embedder,
+            DEFAULT_PRUNE_THRESHOLD,
+            DEFAULT_MIN_RETRIEVAL_SIMILARITY,
+        )
     }
 
     pub fn open_with_prune_threshold(
@@ -99,9 +107,29 @@ impl PersistentMemoryStore {
         embedder: SenaEmbedder,
         prune_threshold: f32,
     ) -> Result<Self, MemoryError> {
+        Self::open_with_thresholds(
+            path,
+            embedder,
+            prune_threshold,
+            DEFAULT_MIN_RETRIEVAL_SIMILARITY,
+        )
+    }
+
+    pub fn open_with_thresholds(
+        path: &Path,
+        embedder: SenaEmbedder,
+        prune_threshold: f32,
+        min_retrieval_similarity: f32,
+    ) -> Result<Self, MemoryError> {
         if !(0.0..=1.0).contains(&prune_threshold) {
             return Err(MemoryError::BackendError(format!(
                 "prune_threshold must be between 0.0 and 1.0, got {prune_threshold}"
+            )));
+        }
+
+        if !(0.0..=1.0).contains(&min_retrieval_similarity) {
+            return Err(MemoryError::BackendError(format!(
+                "min_retrieval_similarity must be between 0.0 and 1.0, got {min_retrieval_similarity}"
             )));
         }
 
@@ -123,6 +151,7 @@ impl PersistentMemoryStore {
             embedder,
             decay_rate: 0.1,
             prune_threshold,
+            min_retrieval_similarity,
         };
         store.ensure_tables()?;
         info!(path = %store.path.display(), "persistent memory store initialized");
@@ -142,6 +171,21 @@ impl PersistentMemoryStore {
     ) -> Result<Self, MemoryError> {
         let path = std::env::temp_dir().join(format!("sena-memory-{}.redb", uuid::Uuid::new_v4()));
         Self::open_with_prune_threshold(&path, embedder, prune_threshold)
+    }
+
+    #[cfg(test)]
+    pub fn with_embedder_and_thresholds(
+        embedder: SenaEmbedder,
+        prune_threshold: f32,
+        min_retrieval_similarity: f32,
+    ) -> Result<Self, MemoryError> {
+        let path = std::env::temp_dir().join(format!("sena-memory-{}.redb", uuid::Uuid::new_v4()));
+        Self::open_with_thresholds(
+            &path,
+            embedder,
+            prune_threshold,
+            min_retrieval_similarity,
+        )
     }
 
     fn ensure_tables(&self) -> Result<(), MemoryError> {
@@ -387,13 +431,17 @@ impl PersistentMemoryStore {
         let mut scored: Vec<_> = nodes
             .into_iter()
             .filter(MemoryNode::has_embedding)
-            .map(|node| {
+            .filter_map(|node| {
                 let similarity = cosine_similarity(&query_embedding, &node.embedding);
-                ScoredChunk {
+                if similarity < self.min_retrieval_similarity {
+                    return None;
+                }
+
+                Some(ScoredChunk {
                     content: node.text,
                     score: (similarity * node.importance).clamp(0.0, 1.0),
                     age_seconds: now.saturating_sub(node.timestamp),
-                }
+                })
             })
             .filter(|chunk| chunk.score > 0.0)
             .collect();
@@ -733,6 +781,30 @@ mod tests {
         backend.consolidate().await.expect("consolidate failed");
 
         assert!(backend.load_nodes().expect("load nodes failed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn semantic_query_respects_min_retrieval_similarity() {
+        let embedder = SenaEmbedder::new(spawn_embed_sender());
+        let mut backend = PersistentMemoryStore::with_embedder_and_thresholds(embedder, 0.2, 0.8)
+            .expect("backend should build");
+
+        backend
+            .ingest("rust coding", MemoryKind::Semantic, CausalId::new())
+            .await
+            .expect("ingest failed");
+        backend
+            .ingest("rust", MemoryKind::Semantic, CausalId::new())
+            .await
+            .expect("ingest failed");
+
+        let results = backend
+            .query_semantic("rust coding", 5)
+            .await
+            .expect("query failed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "rust coding");
     }
 
     #[tokio::test]

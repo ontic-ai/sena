@@ -187,7 +187,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         argument_kind: CommandArgumentKind::FreeText,
     },
     CommandSpec {
-        command: "/memory-clear",
+        command: "/memory clear",
         description: "Clear persistent memory contents",
         help_group: HelpGroup::Memory,
         argument_kind: CommandArgumentKind::None,
@@ -258,5 +258,13 @@ mod tests {
         }
 
         assert!(COMMANDS.iter().any(|command| command.command == "/debug"));
+    }
+
+    #[test]
+    fn memory_clear_command_is_registered_with_help_text() {
+        let (_, command) = find_command("/memory clear").expect("memory clear should be registered");
+
+        assert_eq!(command.description, "Clear persistent memory contents");
+        assert_eq!(command.argument_kind, CommandArgumentKind::None);
     }
 }

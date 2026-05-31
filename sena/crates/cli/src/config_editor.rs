@@ -188,6 +188,14 @@ impl<'a> ConfigEditor<'a> {
             response.get("auto_tune_max_tokens"),
             true,
         );
+        self.push_field_from_json(
+            &mut fields,
+            "memory.min_retrieval_similarity",
+            response
+                .get("memory")
+                .and_then(|memory| memory.get("min_retrieval_similarity")),
+            true,
+        );
 
         // Add explicit non-editable fields required by process_split UX contract.
         fields.push(ConfigField {

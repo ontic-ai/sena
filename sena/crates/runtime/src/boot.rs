@@ -612,6 +612,7 @@ async fn spawn_actors_with_data_dir(
             data_dir,
             embed_tx,
             config.memory_prune_threshold,
+            config.memory.min_retrieval_similarity,
         )?;
         expected.push(memory_name);
         selected_actors.insert(memory_name);

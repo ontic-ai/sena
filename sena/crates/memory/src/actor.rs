@@ -1101,7 +1101,7 @@ mod tests {
 
         actor
             .handle_ingest_request(
-                "more important data".to_string(),
+                "important data".to_string(),
                 MemoryKind::Semantic,
                 CausalId::new(),
             )
@@ -1247,7 +1247,7 @@ mod tests {
         // Ingest test memories with different implicit relevance
         actor
             .handle_ingest_request(
-                "Rust programming is powerful".to_string(),
+                "Rust coding".to_string(),
                 MemoryKind::Semantic,
                 CausalId::new(),
             )
@@ -1256,7 +1256,7 @@ mod tests {
 
         actor
             .handle_ingest_request(
-                "Writing Rust code for system tools".to_string(),
+                "coding Rust tools".to_string(),
                 MemoryKind::Episodic,
                 CausalId::new(),
             )
@@ -1302,7 +1302,7 @@ mod tests {
 
         let causal_id = CausalId::new();
         bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
-            text: "User: remember this exchange".to_string(),
+            text: "User: remember exchange".to_string(),
             kind: MemoryKind::Episodic,
             causal_id,
         }))
@@ -1323,7 +1323,7 @@ mod tests {
         assert_eq!(completed, 1, "user memory write should complete");
 
         bus.broadcast(Event::Memory(MemoryEvent::MemoryWriteRequest {
-            text: "Sena: I will remember it".to_string(),
+            text: "Sena: remember exchange".to_string(),
             kind: MemoryKind::Episodic,
             causal_id,
         }))
@@ -1343,7 +1343,7 @@ mod tests {
         assert_eq!(completed, 2, "assistant memory write should complete");
 
         bus.broadcast(Event::Memory(MemoryEvent::QueryRequested {
-            query: "remember".to_string(),
+            query: "remember exchange".to_string(),
             limit: 10,
             causal_id,
         }))
@@ -1358,10 +1358,10 @@ mod tests {
             {
                 query_saw_user = chunks
                     .iter()
-                    .any(|chunk| chunk.content.contains("User: remember this exchange"));
+                    .any(|chunk| chunk.content.contains("User: remember exchange"));
                 query_saw_sena = chunks
                     .iter()
-                    .any(|chunk| chunk.content.contains("Sena: I will remember it"));
+                    .any(|chunk| chunk.content.contains("Sena: remember exchange"));
                 if query_saw_user && query_saw_sena {
                     break;
                 }

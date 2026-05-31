@@ -986,6 +986,11 @@ impl Shell {
             return Ok(());
         }
 
+        if matches!(input.trim(), "/memory clear" | "/mem clear") {
+            self.cmd_memory_clear().await?;
+            return Ok(());
+        }
+
         match parts[0] {
             "/help" | "/?" => self.cmd_help().await?,
             "/quit" | "/exit" | "/bye" => {
@@ -1281,7 +1286,7 @@ impl Shell {
 
     async fn cmd_memory_clear(&mut self) -> Result<(), CliError> {
         match self.ipc.send("memory.clear", json!({})).await {
-            Ok(_) => self.log_message("Persistent memory cleared.".to_string()),
+            Ok(_) => self.log_message("[MEM] memory cleared".to_string()),
             Err(e) => self.log_message(format!("Could not clear memory: {}", e)),
         }
         Ok(())
@@ -2572,10 +2577,16 @@ mod tests {
         let (_, say) = find_command("/say").expect("/say should be registered");
         let (_, run) = find_command("/run").expect("/run should be registered");
         let (_, tab) = find_command("/tab").expect("/tab should be registered");
+        let (_, memory_clear) =
+            find_command("/memory clear").expect("/memory clear should be registered");
 
         assert_eq!(say.description, "Speak text verbatim through TTS (audio test)");
         assert_eq!(run.description, "Run full inference pipeline as if spoken");
         assert_eq!(tab.argument_kind, CommandArgumentKind::FixedList(TAB_ARGUMENTS));
+        assert_eq!(
+            memory_clear.description,
+            "Clear persistent memory contents"
+        );
         assert!(COMMANDS.iter().any(|command| command.command == "/debug"));
     }
 
