@@ -21,13 +21,19 @@ use bus::{
     Actor, ActorError, CTPEvent, CausalId, Event, EventBus, InferenceEvent, InferenceSource,
     MemoryEvent, Priority, SoulEvent, SoulSummary, SpeechEvent, SystemEvent,
 };
+use std::future::pending;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::{debug, info, warn};
 
 const PROMPT_MEMORY_QUERY_LIMIT: usize = 6;
 const RECENT_DIALOGUE_TURN_LIMIT: usize = 6;
+const SOUL_SUMMARY_TIMEOUT: Duration = Duration::from_millis(500);
+const ANONYMOUS_IDENTITY_FALLBACK: &str =
+    "You are Sena, a voice assistant. Respond naturally and helpfully.";
 
 /// Configuration for the prompt actor.
 #[derive(Debug, Clone, Default)]
@@ -48,6 +54,7 @@ pub struct PromptActor {
     cached_soul_content: Option<String>,
     cached_memory_chunks: Vec<ScoredChunk>,
     cached_snapshot: Option<Box<ContextSnapshot>>,
+    soul_summary_deadline: Option<TokioInstant>,
     pending_prompts: HashMap<CausalId, PendingPrompt>,
     pending_user_turns: HashMap<CausalId, String>,
     recent_dialogue_turns: VecDeque<String>,
@@ -72,6 +79,7 @@ impl PromptActor {
             cached_soul_content: None,
             cached_memory_chunks: Vec::new(),
             cached_snapshot: None,
+            soul_summary_deadline: None,
             pending_prompts: HashMap::new(),
             pending_user_turns: HashMap::new(),
             recent_dialogue_turns: VecDeque::new(),
@@ -88,6 +96,7 @@ impl PromptActor {
             cached_soul_content: None,
             cached_memory_chunks: Vec::new(),
             cached_snapshot: None,
+            soul_summary_deadline: None,
             pending_prompts: HashMap::new(),
             pending_user_turns: HashMap::new(),
             recent_dialogue_turns: VecDeque::new(),
@@ -252,6 +261,25 @@ impl PromptActor {
             .await;
     }
 
+    async fn request_soul_summary(&mut self, bus: &Arc<EventBus>, causal_id: CausalId) {
+        self.soul_summary_deadline = Some(TokioInstant::now() + SOUL_SUMMARY_TIMEOUT);
+
+        let _ = bus
+            .broadcast(Event::Soul(SoulEvent::SummaryRequested {
+                max_events: 50,
+                causal_id,
+            }))
+            .await;
+    }
+
+    fn use_anonymous_identity_fallback(&mut self) {
+        debug!(
+            actor = self.name(),
+            "soul summary unavailable within timeout; using anonymous identity fallback"
+        );
+        self.cached_soul_content = Some(ANONYMOUS_IDENTITY_FALLBACK.to_string());
+    }
+
     fn remember_dialogue_turn(&mut self, entry: String) {
         self.recent_dialogue_turns.push_back(entry);
         while self.recent_dialogue_turns.len() > RECENT_DIALOGUE_TURN_LIMIT {
@@ -340,15 +368,24 @@ impl Actor for PromptActor {
 
         // Prime the soul cache so the first inference has context.
         let prime_cid = CausalId::new();
-        let _ = bus
-            .broadcast(Event::Soul(SoulEvent::SummaryRequested {
-                max_events: 50,
-                causal_id: prime_cid,
-            }))
-            .await;
+        self.request_soul_summary(&bus, prime_cid).await;
 
         loop {
-            match rx.recv().await {
+            tokio::select! {
+                _ = async {
+                    if let Some(deadline) = self.soul_summary_deadline {
+                        sleep_until(deadline).await;
+                    } else {
+                        pending::<()>().await;
+                    }
+                } => {
+                    if self.cached_soul_content.is_none() {
+                        self.use_anonymous_identity_fallback();
+                    }
+                    self.soul_summary_deadline = None;
+                }
+
+                recv_result = rx.recv() => match recv_result {
                 // --- Shutdown ---
                 Ok(Event::System(SystemEvent::ShutdownSignal))
                 | Ok(Event::System(SystemEvent::ShutdownRequested))
@@ -364,6 +401,7 @@ impl Actor for PromptActor {
                         content_len = content.len(),
                         "soul summary cached"
                     );
+                    self.soul_summary_deadline = None;
                     self.cached_soul_content = Some(content);
                 }
                 Ok(Event::Soul(SoulEvent::PersonalityUpdated { causal_id, .. })) => {
@@ -372,12 +410,7 @@ impl Actor for PromptActor {
                         ?causal_id,
                         "personality updated — refreshing soul summary cache"
                     );
-                    let _ = bus
-                        .broadcast(Event::Soul(SoulEvent::SummaryRequested {
-                            max_events: 50,
-                            causal_id,
-                        }))
-                        .await;
+                    self.request_soul_summary(&bus, causal_id).await;
                 }
 
                 // --- Context cache: memory query results ---
@@ -499,6 +532,7 @@ impl Actor for PromptActor {
                     debug!(actor = self.name(), "broadcast channel closed");
                     break;
                 }
+                }
             }
         }
 
@@ -617,6 +651,19 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, PromptSegment::SoulContext(_)))
         );
+    }
+
+    #[test]
+    fn build_voice_segments_uses_anonymous_identity_fallback_when_cached() {
+        let mut actor = PromptActor::new();
+        actor.cached_soul_content = Some(ANONYMOUS_IDENTITY_FALLBACK.to_string());
+
+        let segments = actor.build_voice_segments("hello world");
+
+        assert!(segments.iter().any(|segment| match segment {
+            PromptSegment::SoulContext(summary) => summary.content == ANONYMOUS_IDENTITY_FALLBACK,
+            _ => false,
+        }));
     }
 
     #[test]
@@ -889,6 +936,67 @@ mod tests {
             saw_second_inference,
             "the next voice prompt should include recent dialogue history"
         );
+
+        bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
+            .await
+            .expect("shutdown broadcast failed");
+        let _ = timeout(Duration::from_secs(1), actor_handle).await;
+    }
+
+    #[tokio::test]
+    async fn missing_soul_summary_falls_back_to_anonymous_identity() {
+        let mut actor = PromptActor::new();
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_broadcast();
+
+        actor.start(Arc::clone(&bus)).await.expect("start failed");
+        let actor_handle = tokio::spawn(async move {
+            let _ = actor.run().await;
+        });
+
+        tokio::time::sleep(SOUL_SUMMARY_TIMEOUT + Duration::from_millis(50)).await;
+
+        let causal_id = CausalId::new();
+        bus.broadcast(Event::Speech(SpeechEvent::TranscriptionCompleted {
+            text: "hello there".to_string(),
+            confidence: 0.99,
+            causal_id,
+        }))
+        .await
+        .expect("speech event should broadcast");
+
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Memory(MemoryEvent::MemoryQueryRequest { causal_id: seen_cid, .. }))) =
+                timeout(Duration::from_millis(100), rx.recv()).await
+                && seen_cid == causal_id
+            {
+                break;
+            }
+        }
+
+        bus.broadcast(Event::Memory(MemoryEvent::MemoryQueryResponse {
+            chunks: vec![],
+            causal_id,
+        }))
+        .await
+        .expect("memory response should broadcast");
+
+        let mut saw_prompt = false;
+        for _ in 0..20 {
+            if let Ok(Ok(Event::Inference(InferenceEvent::InferenceRequested {
+                prompt,
+                causal_id: seen_cid,
+                ..
+            }))) = timeout(Duration::from_millis(100), rx.recv()).await
+                && seen_cid == causal_id
+            {
+                assert!(prompt.contains(ANONYMOUS_IDENTITY_FALLBACK));
+                saw_prompt = true;
+                break;
+            }
+        }
+
+        assert!(saw_prompt, "voice turn should still emit inference request");
 
         bus.broadcast(Event::System(SystemEvent::ShutdownSignal))
             .await
