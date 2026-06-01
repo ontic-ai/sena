@@ -1,0 +1,16 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ui-core = { path = "../ui-core" }
+
+[target.'cfg(not(windows))'.dependencies]
+opentui_rust = "0.2.1"
+
+[target.'cfg(windows)'.dependencies]
+crossterm = "0.28"

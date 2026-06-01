@@ -1,0 +1,13 @@
+{
+  "id": "openwakeword:hey-sena",
+  "family": "openwakeword",
+  "filename": "hey_sena.tflite",
+  "cache_subdir": "speech",
+  "parts": [
+    {
+      "filename": "hey_sena.tflite",
+      "download_url": "https://huggingface.co/davidscripka/openwakeword/resolve/main/hey_sena.tflite",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

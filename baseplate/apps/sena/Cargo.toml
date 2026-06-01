@@ -1,0 +1,16 @@
+[package]
+name = "sena"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bootstrap = { path = "../../crates/bootstrap" }
+bus = { path = "../../crates/bus" }
+cli = { path = "../../crates/cli" }
+runtime = { path = "../../crates/runtime" }
+tokio.workspace = true
+tracing-subscriber.workspace = true
+ui-core = { path = "../../crates/ui-core" }

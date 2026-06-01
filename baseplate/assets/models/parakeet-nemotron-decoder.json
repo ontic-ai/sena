@@ -1,0 +1,13 @@
+{
+  "id": "parakeet:nemotron-decoder",
+  "family": "parakeet",
+  "filename": "decoder_joint.onnx",
+  "cache_subdir": "speech",
+  "parts": [
+    {
+      "filename": "decoder_joint.onnx",
+      "download_url": "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/decoder_joint.onnx",
+      "sha256": "c86d527e4ae27251a741609eaddd4429ba5c32050e2f532cea1052d9e21f4f09"
+    }
+  ]
+}

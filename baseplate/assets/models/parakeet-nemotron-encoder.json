@@ -1,0 +1,13 @@
+{
+  "id": "parakeet:nemotron-encoder",
+  "family": "parakeet",
+  "filename": "encoder.onnx",
+  "cache_subdir": "speech",
+  "parts": [
+    {
+      "filename": "encoder.onnx",
+      "download_url": "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/encoder.onnx",
+      "sha256": "d24be4aff18dd9d2aa3433cb89c5a457df5015abf79e06a63dde76b1cd6386bb"
+    }
+  ]
+}

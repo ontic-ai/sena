@@ -1,0 +1,13 @@
+{
+  "id": "parakeet:nemotron-tokenizer",
+  "family": "parakeet",
+  "filename": "tokenizer.model",
+  "cache_subdir": "speech",
+  "parts": [
+    {
+      "filename": "tokenizer.model",
+      "download_url": "https://huggingface.co/lokkju/nemotron-speech-streaming-en-0.6b-int8/resolve/main/tokenizer.model",
+      "sha256": "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "piper:en-us-lessac-medium",
+  "family": "piper",
+  "filename": "en_US-lessac-medium.onnx",
+  "cache_subdir": "speech",
+  "parts": [
+    {
+      "filename": "en_US-lessac-medium.onnx",
+      "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+      "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
+    }
+  ]
+}

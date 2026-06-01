@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/sena",
+    "crates/bootstrap",
+    "crates/bus",
+    "crates/cli",
+    "crates/runtime",
+    "crates/speech",
+    "crates/sri",
+    "crates/ui-core",
+]
+default-members = ["apps/sena"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["kura120"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ontic-ai/sena"
+
+[workspace.dependencies]
+anyhow = "1.0"
+roxmltree = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

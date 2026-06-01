@@ -1,0 +1,13 @@
+{
+  "id": "nomic-embed-text:v1.5-q8_0",
+  "family": "nomic-embed-text",
+  "filename": "nomic-embed-text-v1.5.Q8_0.gguf",
+  "cache_subdir": "embed",
+  "parts": [
+    {
+      "filename": "nomic-embed-text-v1.5.Q8_0.gguf",
+      "download_url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf",
+      "sha256": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7"
+    }
+  ]
+}
